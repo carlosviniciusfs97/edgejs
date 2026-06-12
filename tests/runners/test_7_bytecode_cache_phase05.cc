@@ -124,9 +124,12 @@ class TempProjectDir {
 
 }  // namespace
 
-TEST_F(Test7BytecodeCachePhase05, Fnv1a64MatchesKnownVectors) {
-  EXPECT_EQ(edge_bytecode_cache::Fnv1a64("", 0), 0xcbf29ce484222325ull);
-  EXPECT_EQ(edge_bytecode_cache::Fnv1a64("a", 1), 0xaf63dc4c8601ec8cull);
+TEST_F(Test7BytecodeCachePhase05, Hash64MatchesKnownVectors) {
+  // XXH3-64 reference vectors.
+  EXPECT_EQ(edge_bytecode_cache::Hash64("", 0), 0x2D06800538D394C2ull);
+  // Determinism + sensitivity.
+  EXPECT_EQ(edge_bytecode_cache::Hash64("abc", 3), edge_bytecode_cache::Hash64("abc", 3));
+  EXPECT_NE(edge_bytecode_cache::Hash64("abc", 3), edge_bytecode_cache::Hash64("abd", 3));
 }
 
 TEST_F(Test7BytecodeCachePhase05, EncodeDecodeRoundTrip) {
@@ -134,9 +137,12 @@ TEST_F(Test7BytecodeCachePhase05, EncodeDecodeRoundTrip) {
   const auto encoded =
       edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0,
                                          payload.data(), payload.size());
-  std::vector<uint8_t> decoded;
-  ASSERT_TRUE(edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &decoded));
-  EXPECT_EQ(decoded, payload);
+  size_t offset = 0;
+  size_t size = 0;
+  ASSERT_TRUE(edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size(), kTag, kSource,
+                                                 edge_bytecode_cache::kFlagCjsFunctionV1, 0, &offset, &size));
+  ASSERT_EQ(size, payload.size());
+  EXPECT_EQ(std::vector<uint8_t>(encoded.begin() + offset, encoded.begin() + offset + size), payload);
 }
 
 TEST_F(Test7BytecodeCachePhase05, DecodeRejectsBadMagic) {
@@ -144,8 +150,9 @@ TEST_F(Test7BytecodeCachePhase05, DecodeRejectsBadMagic) {
   auto encoded = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0,
                                          payload.data(), payload.size());
   encoded[0] ^= 0xff;
-  std::vector<uint8_t> decoded;
-  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &decoded));
+  size_t off = 0;
+  size_t len = 0;
+  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &off, &len));
 }
 
 TEST_F(Test7BytecodeCachePhase05, DecodeRejectsBadFormatVersion) {
@@ -153,76 +160,92 @@ TEST_F(Test7BytecodeCachePhase05, DecodeRejectsBadFormatVersion) {
   auto encoded = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0,
                                          payload.data(), payload.size());
   encoded[8] ^= 0xff;
-  std::vector<uint8_t> decoded;
-  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &decoded));
+  size_t off = 0;
+  size_t len = 0;
+  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &off, &len));
 }
 
 TEST_F(Test7BytecodeCachePhase05, DecodeRejectsWrongEngineTag) {
   const auto payload = SamplePayload();
   const auto encoded = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0,
                                          payload.data(), payload.size());
-  std::vector<uint8_t> decoded;
+  size_t off = 0;
+  size_t len = 0;
   EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size(), "v8-other-tag", kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0,
-                                                  &decoded));
+                                                  &off, &len));
 }
 
 TEST_F(Test7BytecodeCachePhase05, DecodeRejectsSourceMismatch) {
   const auto payload = SamplePayload();
   const auto encoded = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0,
                                          payload.data(), payload.size());
-  std::vector<uint8_t> decoded;
+  size_t off = 0;
+  size_t len = 0;
   EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size(), kTag,
                                                   "module.exports = 43;\n",
-                                                  edge_bytecode_cache::kFlagCjsFunctionV1, 0, &decoded));
+                                                  edge_bytecode_cache::kFlagCjsFunctionV1, 0, &off, &len));
 }
 
 TEST_F(Test7BytecodeCachePhase05, DecodeRejectsTruncatedAndCorruptedPayload) {
   const auto payload = SamplePayload();
   const auto encoded = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0,
                                          payload.data(), payload.size());
-  std::vector<uint8_t> decoded;
+  size_t off = 0;
+  size_t len = 0;
 
-  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(encoded.data(), 16, kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &decoded));
+  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(encoded.data(), 16, kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &off, &len));
   EXPECT_FALSE(
-      edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size() - 1, kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &decoded));
+      edge_bytecode_cache::DecodeSidecar(encoded.data(), encoded.size() - 1, kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &off, &len));
 
   auto corrupted = encoded;
   corrupted.back() ^= 0x01;
+#if defined(EDGE_NAPI_QUICKJS)
+  // QuickJS keeps a container-level payload hash (its reader is not hardened).
   EXPECT_FALSE(
-      edge_bytecode_cache::DecodeSidecar(corrupted.data(), corrupted.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &decoded));
+      edge_bytecode_cache::DecodeSidecar(corrupted.data(), corrupted.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &off, &len));
+#else
+  // On V8 the engine self-validates payloads (CachedData::rejected), so the
+  // container accepts the flipped byte; end-to-end fallback is covered by the
+  // CorruptedAndStaleSidecarsFallBack spawn test.
+  EXPECT_TRUE(
+      edge_bytecode_cache::DecodeSidecar(corrupted.data(), corrupted.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0, &off, &len));
+#endif
 }
 
 TEST_F(Test7BytecodeCachePhase05, ShapeFlagsCrossRejected) {
   const auto payload = SamplePayload();
-  std::vector<uint8_t> decoded;
+  size_t off = 0;
+  size_t len = 0;
 
   const auto cjs = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1,
                                                       0, payload.data(), payload.size());
   EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(cjs.data(), cjs.size(), kTag, kSource,
-                                                  edge_bytecode_cache::kFlagEsmModuleV1, 0, &decoded));
+                                                  edge_bytecode_cache::kFlagEsmModuleV1, 0, &off, &len));
 
   const auto esm = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagEsmModuleV1,
                                                       0, payload.data(), payload.size());
   EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(esm.data(), esm.size(), kTag, kSource,
-                                                  edge_bytecode_cache::kFlagCjsFunctionV1, 0, &decoded));
+                                                  edge_bytecode_cache::kFlagCjsFunctionV1, 0, &off, &len));
   EXPECT_TRUE(edge_bytecode_cache::DecodeSidecar(esm.data(), esm.size(), kTag, kSource,
-                                                 edge_bytecode_cache::kFlagEsmModuleV1, 0, &decoded));
-  EXPECT_EQ(decoded, payload);
+                                                 edge_bytecode_cache::kFlagEsmModuleV1, 0, &off, &len));
+  ASSERT_EQ(len, payload.size());
+  EXPECT_EQ(std::vector<uint8_t>(esm.begin() + off, esm.begin() + off + len), payload);
 }
 
 TEST_F(Test7BytecodeCachePhase05, FilenameHashEnforcedOnlyWhenNonZero) {
   const auto payload = SamplePayload();
-  std::vector<uint8_t> decoded;
+  size_t off = 0;
+  size_t len = 0;
 
   const auto keyed = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 1234,
                                          payload.data(), payload.size());
-  EXPECT_TRUE(edge_bytecode_cache::DecodeSidecar(keyed.data(), keyed.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 1234, &decoded));
-  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(keyed.data(), keyed.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 5678, &decoded));
+  EXPECT_TRUE(edge_bytecode_cache::DecodeSidecar(keyed.data(), keyed.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 1234, &off, &len));
+  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(keyed.data(), keyed.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 5678, &off, &len));
 
   const auto unkeyed = edge_bytecode_cache::EncodeSidecar(kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 0,
                                          payload.data(), payload.size());
   EXPECT_TRUE(
-      edge_bytecode_cache::DecodeSidecar(unkeyed.data(), unkeyed.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 5678, &decoded));
+      edge_bytecode_cache::DecodeSidecar(unkeyed.data(), unkeyed.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, 5678, &off, &len));
 }
 
 TEST_F(Test7BytecodeCachePhase05, SidecarSuffixMatchesProvider) {

@@ -483,13 +483,13 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
           if (!sidecar_source_path.empty() &&
               std::filesystem::is_regular_file(std::filesystem::path(sidecar_source_path), ec) && !ec) {
             const std::string sidecar_source_utf8 = ValueToUtf8(env, argv[2]);
-            std::vector<uint8_t> payload;
+            edge_bytecode_cache::SidecarPayload payload;
             if (edge_bytecode_cache::ReadSidecar(sidecar_source_path, sidecar_source_utf8,
                                                  edge_bytecode_cache::kFlagEsmModuleV1, &payload)) {
               bool rejected = false;
               if (unofficial_napi_bytecode_deserialize(env,
                                                        payload.data(),
-                                                       payload.size(),
+                                                       payload.payload_size,
                                                        argv[2],
                                                        argv[0],
                                                        unofficial_napi_bytecode_shape_module,

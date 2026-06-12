@@ -1,5 +1,6 @@
 #include "edge_module_loader.h"
 #include "edge_buffer.h"
+#include "edge_builtin_bytecode.h"
 #include "edge_bytecode_cache.h"
 #include "edge_cares_wrap.h"
 #include "edge_crypto.h"
@@ -1034,6 +1035,76 @@ static NativeBuiltinExecutionKind GetNativeBuiltinExecutionKind(const std::strin
   return NativeBuiltinExecutionKind::kUnsupported;
 }
 
+static bool GetTypedArrayBytes(napi_env env, napi_value value, const uint8_t** data_out, size_t* len_out);
+
+// Builtins consolidated bytecode cache: returns a bytecode handle for the
+// builtin either deserialized from the per-binary cache file or compiled
+// eagerly and recorded for the teardown flush. nullptr on any failure with no
+// pending exception, so callers fall back to the plain-text compile path and
+// its exact error shaping.
+static void* AcquireBuiltinBytecode(napi_env env,
+                                    edge_builtin_bytecode::Kind kind,
+                                    const std::string& id,
+                                    const std::string& source,
+                                    napi_value code,
+                                    napi_value filename,
+                                    int32_t shape,
+                                    napi_value params_or_undefined,
+                                    napi_value host_defined_option_id) {
+  if (!edge_bytecode_cache::Enabled()) return nullptr;
+
+  edge_builtin_bytecode::PayloadView view;
+  if (edge_builtin_bytecode::TryGet(kind, id, source, &view)) {
+    void* handle = nullptr;
+    bool rejected = false;
+    if (unofficial_napi_bytecode_deserialize(env,
+                                             view.data,
+                                             view.size,
+                                             code,
+                                             filename,
+                                             shape,
+                                             params_or_undefined,
+                                             host_defined_option_id,
+                                             &handle,
+                                             &rejected) == napi_ok &&
+        !rejected && handle != nullptr) {
+      return handle;
+    }
+    if (handle != nullptr) (void)unofficial_napi_bytecode_release(env, handle);
+    // Engine refused bytes our header considered valid (e.g. engine flag
+    // drift); recompile below so the flush rewrites the entry.
+  }
+
+  void* handle = nullptr;
+  if (unofficial_napi_bytecode_compile(env,
+                                       code,
+                                       filename,
+                                       shape,
+                                       params_or_undefined,
+                                       host_defined_option_id,
+                                       0,
+                                       0,
+                                       &handle,
+                                       nullptr) != napi_ok ||
+      handle == nullptr) {
+    bool has_pending = false;
+    napi_value ignored = nullptr;
+    if (napi_is_exception_pending(env, &has_pending) == napi_ok && has_pending) {
+      (void)napi_get_and_clear_last_exception(env, &ignored);
+    }
+    return nullptr;
+  }
+  napi_value buffer = nullptr;
+  if (unofficial_napi_bytecode_serialize(env, handle, &buffer) == napi_ok && buffer != nullptr) {
+    const uint8_t* bytes = nullptr;
+    size_t length = 0;
+    if (GetTypedArrayBytes(env, buffer, &bytes, &length) && length > 0) {
+      edge_builtin_bytecode::Record(kind, id, source, bytes, length);
+    }
+  }
+  return handle;
+}
+
 static const std::vector<std::string>& CollectRuntimeBuiltinIds() {
   static const std::vector<std::string> ids = []() {
     std::vector<std::string> out = builtin_catalog::AllBuiltinIds();
@@ -1172,7 +1243,9 @@ static napi_value BuiltinsCompileFunctionCallback(napi_env env, napi_callback_in
            param != nullptr &&
            napi_set_element(env, params, index, param) == napi_ok;
   };
+  edge_builtin_bytecode::Kind bytecode_kind;
   if (id == "internal/bootstrap/realm") {
+    bytecode_kind = edge_builtin_bytecode::Kind::kFnBootstrapRealm;
     if (!set_param(0, "process") ||
         !set_param(1, "getLinkedBinding") ||
         !set_param(2, "getInternalBinding") ||
@@ -1180,6 +1253,7 @@ static napi_value BuiltinsCompileFunctionCallback(napi_env env, napi_callback_in
       return nullptr;
     }
   } else if (IsPerContextBuiltinId(id)) {
+    bytecode_kind = edge_builtin_bytecode::Kind::kFnPerContext;
     if (!set_param(0, "exports") ||
         !set_param(1, "primordials") ||
         !set_param(2, "privateSymbols") ||
@@ -1187,6 +1261,7 @@ static napi_value BuiltinsCompileFunctionCallback(napi_env env, napi_callback_in
       return nullptr;
     }
   } else if (id.rfind("internal/main/", 0) == 0 || id.rfind("internal/bootstrap/", 0) == 0) {
+    bytecode_kind = edge_builtin_bytecode::Kind::kFnBootstrapMain;
     if (!set_param(0, "process") ||
         !set_param(1, "require") ||
         !set_param(2, "internalBinding") ||
@@ -1194,6 +1269,7 @@ static napi_value BuiltinsCompileFunctionCallback(napi_env env, napi_callback_in
       return nullptr;
     }
   } else {
+    bytecode_kind = edge_builtin_bytecode::Kind::kFnLazyBuiltin;
     if (!set_param(0, "exports") ||
         !set_param(1, "require") ||
         !set_param(2, "module") ||
@@ -1203,19 +1279,24 @@ static napi_value BuiltinsCompileFunctionCallback(napi_env env, napi_callback_in
       return nullptr;
     }
   }
+  void* builtin_bytecode =
+      AcquireBuiltinBytecode(env, bytecode_kind, id, source, code, filename,
+                             unofficial_napi_bytecode_shape_cjs_function, params, undefined);
   napi_value compile_result = nullptr;
-  const unofficial_napi_js_source compile_source{code, nullptr};
-  if (unofficial_napi_contextify_compile_function(env,
-                                                  &compile_source,
-                                                  filename,
-                                                  0,
-                                                  0,
-                                                  undefined,
-                                                  undefined,
-                                                  params,
-                                                  undefined,
-                                                  &compile_result) != napi_ok ||
-      compile_result == nullptr) {
+  const unofficial_napi_js_source compile_source{builtin_bytecode != nullptr ? nullptr : code,
+                                                 builtin_bytecode};
+  const napi_status compile_status = unofficial_napi_contextify_compile_function(env,
+                                                                                 &compile_source,
+                                                                                 filename,
+                                                                                 0,
+                                                                                 0,
+                                                                                 undefined,
+                                                                                 undefined,
+                                                                                 params,
+                                                                                 undefined,
+                                                                                 &compile_result);
+  if (builtin_bytecode != nullptr) (void)unofficial_napi_bytecode_release(env, builtin_bytecode);
+  if (compile_status != napi_ok || compile_result == nullptr) {
     return nullptr;
   }
   napi_value compiled = nullptr;
@@ -1632,8 +1713,25 @@ static bool ExecuteBuiltinFromNative(napi_env env, ModuleLoaderState* state, con
     return ThrowNativeBuiltinExecutionError(env, id, "failed to create compile inputs");
   }
 
+  edge_builtin_bytecode::Kind bytecode_kind = edge_builtin_bytecode::Kind::kFnBootstrapMain;
+  switch (GetNativeBuiltinExecutionKind(id)) {
+    case NativeBuiltinExecutionKind::kPerContext:
+      bytecode_kind = edge_builtin_bytecode::Kind::kFnPerContext;
+      break;
+    case NativeBuiltinExecutionKind::kBootstrapRealm:
+      bytecode_kind = edge_builtin_bytecode::Kind::kFnBootstrapRealm;
+      break;
+    case NativeBuiltinExecutionKind::kBootstrapOrMain:
+    case NativeBuiltinExecutionKind::kUnsupported:
+      bytecode_kind = edge_builtin_bytecode::Kind::kFnBootstrapMain;
+      break;
+  }
+  void* builtin_bytecode =
+      AcquireBuiltinBytecode(env, bytecode_kind, id, source, code, filename,
+                             unofficial_napi_bytecode_shape_cjs_function, params, undefined);
   napi_value compile_result = nullptr;
-  const unofficial_napi_js_source compile_source{code, nullptr};
+  const unofficial_napi_js_source compile_source{builtin_bytecode != nullptr ? nullptr : code,
+                                                 builtin_bytecode};
   const napi_status compile_status =
       unofficial_napi_contextify_compile_function(env,
                                                   &compile_source,
@@ -1645,6 +1743,7 @@ static bool ExecuteBuiltinFromNative(napi_env env, ModuleLoaderState* state, con
                                                   params,
                                                   undefined,
                                                   &compile_result);
+  if (builtin_bytecode != nullptr) (void)unofficial_napi_bytecode_release(env, builtin_bytecode);
   if (compile_status != napi_ok ||
       compile_result == nullptr) {
     std::string message = "contextify compile failed";
@@ -3807,13 +3906,13 @@ static napi_value ContextifyCompileFunctionForCJSLoaderCallback(napi_env env, na
       sidecar_eligible = true;
       sidecar_source_path = std::move(filename_utf8);
       sidecar_source_utf8 = ValueToUtf8(env, code);
-      std::vector<uint8_t> payload;
+      edge_bytecode_cache::SidecarPayload payload;
       if (edge_bytecode_cache::ReadSidecar(sidecar_source_path, sidecar_source_utf8,
                                            edge_bytecode_cache::kFlagCjsFunctionV1, &payload)) {
         bool rejected = false;
         if (unofficial_napi_bytecode_deserialize(env,
                                                  payload.data(),
-                                                 payload.size(),
+                                                 payload.payload_size,
                                                  code,
                                                  filename,
                                                  unofficial_napi_bytecode_shape_cjs_function,
@@ -5007,8 +5106,8 @@ bool EvaluateJsModule(napi_env env,
   // Node-aligned: compile the wrapper as a function, then call it from C++ with (internalBinding, primordials)
   // as arguments (realm->primordials() in Node). No JS expression like globalThis.primordials at call time.
   std::string builtin_id;
-  const bool is_per_context =
-      TryGetBuiltinIdFromResolvedPath(resolved_path, &builtin_id) && IsPerContextBuiltinId(builtin_id);
+  const bool is_builtin = TryGetBuiltinIdFromResolvedPath(resolved_path, &builtin_id);
+  const bool is_per_context = is_builtin && IsPerContextBuiltinId(builtin_id);
   const std::string wrapped_source = is_per_context
                                          ? "(function(primordials, privateSymbols, perIsolateSymbols) {"
                                            "return function(exports, require, module, __filename, __dirname) {\n" +
@@ -5024,8 +5123,53 @@ bool EvaluateJsModule(napi_env env,
     return ThrowLoaderError(env, "Failed to create wrapped module source");
   }
 
+  // Builtins consolidated bytecode cache (keyed by the full wrapped IIFE text,
+  // so wrapper drift self-invalidates). Non-builtin files keep the plain
+  // napi_run_script path untouched.
   napi_value outer_fn = nullptr;
-  if (napi_run_script(env, script_source, &outer_fn) != napi_ok || outer_fn == nullptr) {
+  if (is_builtin) {
+    napi_value undefined = nullptr;
+    napi_get_undefined(env, &undefined);
+    napi_value source_url_value = nullptr;
+    if (napi_create_string_utf8(env, source_url.c_str(), NAPI_AUTO_LENGTH, &source_url_value) == napi_ok &&
+        source_url_value != nullptr) {
+      const edge_builtin_bytecode::Kind bytecode_kind =
+          is_per_context ? edge_builtin_bytecode::Kind::kWrapperPerContext
+                         : edge_builtin_bytecode::Kind::kWrapperStandard;
+      void* wrapper_bytecode =
+          AcquireBuiltinBytecode(env, bytecode_kind, builtin_id, wrapped_source, script_source,
+                                 source_url_value, unofficial_napi_bytecode_shape_script,
+                                 undefined, undefined);
+      if (wrapper_bytecode != nullptr) {
+        const unofficial_napi_js_source js_source{nullptr, wrapper_bytecode};
+        const napi_status run_status =
+            unofficial_napi_contextify_run_script(env,
+                                                  nullptr,
+                                                  &js_source,
+                                                  source_url_value,
+                                                  0,
+                                                  0,
+                                                  -1,
+                                                  false,
+                                                  false,
+                                                  false,
+                                                  undefined,
+                                                  &outer_fn);
+        (void)unofficial_napi_bytecode_release(env, wrapper_bytecode);
+        if (run_status != napi_ok || outer_fn == nullptr) {
+          // Fall back to the plain path for exact error shaping.
+          outer_fn = nullptr;
+          bool has_pending = false;
+          napi_value ignored = nullptr;
+          if (napi_is_exception_pending(env, &has_pending) == napi_ok && has_pending) {
+            (void)napi_get_and_clear_last_exception(env, &ignored);
+          }
+        }
+      }
+    }
+  }
+  if (outer_fn == nullptr &&
+      (napi_run_script(env, script_source, &outer_fn) != napi_ok || outer_fn == nullptr)) {
     return false;  // Preserve JS exception.
   }
 

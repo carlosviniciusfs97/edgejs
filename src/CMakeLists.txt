@@ -15,6 +15,7 @@ set(EDGE_RUNTIME_CORE_SOURCES
 
 set(EDGE_LOADER_SOURCES
   "${CMAKE_CURRENT_LIST_DIR}/builtin_catalog.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/edge_builtin_bytecode.cc"
   "${CMAKE_CURRENT_LIST_DIR}/edge_bytecode_cache.cc"
   "${CMAKE_CURRENT_LIST_DIR}/edge_module_loader.cc"
   "${CMAKE_CURRENT_LIST_DIR}/edge_precompile.cc"

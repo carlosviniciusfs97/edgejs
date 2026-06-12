@@ -39,6 +39,7 @@
 #include "edge_stream_base.h"
 #include "edge_timers_host.h"
 #include "edge_runtime_platform.h"
+#include "edge_builtin_bytecode.h"
 #include "edge_bytecode_cache.h"
 #include "edge_precompile.h"
 #include "edge_runtime.h"
@@ -271,6 +272,7 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
   }
   EdgeEnvironmentRunCleanup(env);
   EdgeEnvironmentRunAtExitCallbacks(env);
+  edge_builtin_bytecode::FlushIfDirty();
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.cleanup");
   const napi_status release_status = unofficial_napi_release_env(env_scope);
   if (release_status != napi_ok) {

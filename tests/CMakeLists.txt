@@ -101,6 +101,9 @@ if(TARGET napi_v8 AND NAPI_V8_LIBRARY)
   add_edge_node_api_test(edge_test_7_bytecode_cache_phase05
     "${EDGE_ROOT}/tests/runners/test_7_bytecode_cache_phase05.cc"
   )
+  add_edge_node_api_test(edge_test_8_builtin_bytecode
+    "${EDGE_ROOT}/tests/runners/test_8_builtin_bytecode.cc"
+  )
 else()
   message(STATUS "Skipping edge node-api tests: napi_v8 runtime target/linkage is unavailable")
 endif()

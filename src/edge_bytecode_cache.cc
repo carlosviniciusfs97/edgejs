@@ -1,5 +1,8 @@
 #include "edge_bytecode_cache.h"
 
+#define XXH_INLINE_ALL
+#include "xxhash/xxhash.h"
+
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -33,14 +36,6 @@ bool IsFalsyEnvValue(const char* value) {
   }
   return normalized == "0" || normalized == "false" || normalized == "no" ||
          normalized == "off";
-}
-
-bool TraceEnabled() {
-  static const bool enabled = [] {
-    const char* value = std::getenv("EDGE_BYTECODE_CACHE_TRACE");
-    return value != nullptr && value[0] != '\0' && !IsFalsyEnvValue(value);
-  }();
-  return enabled;
 }
 
 void Trace(const char* event, const std::string& path, const char* detail = nullptr) {
@@ -86,7 +81,7 @@ uint64_t ReadU64(const uint8_t* data, size_t offset) {
 // filename (it only enters ScriptOrigin) and stay relocatable.
 uint64_t FilenameHashForSource(const std::string& source_path) {
 #if defined(EDGE_NAPI_QUICKJS)
-  return Fnv1a64(source_path.data(), source_path.size());
+  return Hash64(source_path.data(), source_path.size());
 #else
   (void)source_path;
   return 0;
@@ -118,14 +113,8 @@ const std::string& EngineCacheTag() {
   return tag;
 }
 
-uint64_t Fnv1a64(const void* data, size_t size) {
-  const auto* bytes = static_cast<const uint8_t*>(data);
-  uint64_t hash = 0xcbf29ce484222325ull;
-  for (size_t i = 0; i < size; ++i) {
-    hash ^= bytes[i];
-    hash *= 1099511628211ull;
-  }
-  return hash;
+uint64_t Hash64(const void* data, size_t size) {
+  return XXH3_64bits(data, size);
 }
 
 void SetEnabledFromCli(bool enabled) {
@@ -137,6 +126,14 @@ bool Enabled() {
       !IsFalsyEnvValue(std::getenv("EDGE_BYTECODE_CACHE"));
   return env_enabled && !EngineCacheTag().empty() &&
          g_cli_enabled.load(std::memory_order_relaxed);
+}
+
+bool TraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("EDGE_BYTECODE_CACHE_TRACE");
+    return value != nullptr && value[0] != '\0' && !IsFalsyEnvValue(value);
+  }();
+  return enabled;
 }
 
 std::string SidecarPathForSource(const std::string& source_path) {
@@ -155,10 +152,17 @@ std::vector<uint8_t> EncodeSidecar(std::string_view engine_tag,
   WriteU32(&out, 12, flags);
   WriteU32(&out, 16, static_cast<uint32_t>(engine_tag.size()));
   WriteU64(&out, 20, source_utf8.size());
-  WriteU64(&out, 28, Fnv1a64(source_utf8.data(), source_utf8.size()));
+  WriteU64(&out, 28, Hash64(source_utf8.data(), source_utf8.size()));
   WriteU64(&out, 36, filename_hash);
   WriteU64(&out, 44, payload_size);
-  WriteU64(&out, 52, Fnv1a64(payload, payload_size));
+#if defined(EDGE_NAPI_QUICKJS)
+  // QuickJS's bytecode reader is not hardened against corrupt input.
+  WriteU64(&out, 52, Hash64(payload, payload_size));
+#else
+  // V8 CachedData self-validates (rejected -> fallback); skip the extra pass.
+  (void)payload;
+  WriteU64(&out, 52, 0);
+#endif
   WriteU32(&out, 60, 0);
   std::memcpy(out.data() + kHeaderSize, engine_tag.data(), engine_tag.size());
   if (payload_size > 0) {
@@ -173,9 +177,11 @@ bool DecodeSidecar(const uint8_t* data,
                    std::string_view source_utf8,
                    uint32_t expected_flags,
                    uint64_t expected_filename_hash,
-                   std::vector<uint8_t>* payload_out) {
-  if (payload_out == nullptr) return false;
-  payload_out->clear();
+                   size_t* payload_offset_out,
+                   size_t* payload_size_out) {
+  if (payload_offset_out == nullptr || payload_size_out == nullptr) return false;
+  *payload_offset_out = 0;
+  *payload_size_out = 0;
   if (data == nullptr || size < kHeaderSize) return false;
   if (std::memcmp(data, kMagic, sizeof(kMagic)) != 0) return false;
   if (ReadU32(data, 8) != kFormatVersion) return false;
@@ -194,40 +200,59 @@ bool DecodeSidecar(const uint8_t* data,
     return false;
   }
   if (source_len != source_utf8.size() ||
-      source_hash != Fnv1a64(source_utf8.data(), source_utf8.size())) {
+      source_hash != Hash64(source_utf8.data(), source_utf8.size())) {
     return false;
   }
   if (filename_hash != 0 && filename_hash != expected_filename_hash) return false;
 
   const uint8_t* payload = data + kHeaderSize + tag_len;
-  if (payload_hash != Fnv1a64(payload, payload_len)) return false;
+  if (payload_hash != 0 && payload_hash != Hash64(payload, payload_len)) return false;
 
-  payload_out->assign(payload, payload + payload_len);
+  *payload_offset_out = kHeaderSize + tag_len;
+  *payload_size_out = payload_len;
   return true;
 }
 
 bool ReadSidecar(const std::string& source_path,
                  std::string_view source_utf8,
                  uint32_t expected_flags,
-                 std::vector<uint8_t>* payload_out) {
-  if (payload_out == nullptr) return false;
-  payload_out->clear();
+                 SidecarPayload* out) {
+  if (out == nullptr) return false;
+  out->file_bytes.clear();
+  out->payload_offset = 0;
+  out->payload_size = 0;
   if (!Enabled()) return false;
 
   const auto started = std::chrono::steady_clock::now();
   const std::string sidecar_path = SidecarPathForSource(source_path);
-  std::ifstream in(sidecar_path, std::ios::binary);
-  if (!in.is_open()) return false;
+  std::FILE* in = std::fopen(sidecar_path.c_str(), "rb");
+  if (in == nullptr) return false;
 
-  std::vector<uint8_t> contents((std::istreambuf_iterator<char>(in)),
-                                std::istreambuf_iterator<char>());
-  if (in.bad()) {
+  // One sized read; validation happens in place over the same buffer.
+  if (std::fseek(in, 0, SEEK_END) != 0) {
+    std::fclose(in);
     Trace("miss", sidecar_path, "read-error");
     return false;
   }
-  if (!DecodeSidecar(contents.data(), contents.size(), EngineCacheTag(),
-                     source_utf8, expected_flags,
-                     FilenameHashForSource(source_path), payload_out)) {
+  const long file_size = std::ftell(in);
+  if (file_size <= 0 || std::fseek(in, 0, SEEK_SET) != 0) {
+    std::fclose(in);
+    Trace("miss", sidecar_path, "read-error");
+    return false;
+  }
+  out->file_bytes.resize(static_cast<size_t>(file_size));
+  const size_t read = std::fread(out->file_bytes.data(), 1, out->file_bytes.size(), in);
+  std::fclose(in);
+  if (read != out->file_bytes.size()) {
+    out->file_bytes.clear();
+    Trace("miss", sidecar_path, "read-error");
+    return false;
+  }
+
+  if (!DecodeSidecar(out->file_bytes.data(), out->file_bytes.size(), EngineCacheTag(),
+                     source_utf8, expected_flags, FilenameHashForSource(source_path),
+                     &out->payload_offset, &out->payload_size)) {
+    out->file_bytes.clear();
     Trace("miss", sidecar_path, "invalid-or-stale");
     return false;
   }
@@ -237,7 +262,7 @@ bool ReadSidecar(const std::string& source_path,
                             .count();
     char detail[64];
     std::snprintf(detail, sizeof(detail), "read+hash=%lldus payload=%zub",
-                  static_cast<long long>(micros), payload_out->size());
+                  static_cast<long long>(micros), out->payload_size);
     Trace("hit", sidecar_path, detail);
   }
   return true;

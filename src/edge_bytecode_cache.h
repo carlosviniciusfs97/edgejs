@@ -14,8 +14,9 @@
 namespace edge_bytecode_cache {
 
 // Bump whenever the bytes handed to the engine compiler for a given source
-// file change shape (CJS wrapper text, parameter list, shebang handling, ...).
-constexpr uint32_t kFormatVersion = 1;
+// file change shape (CJS wrapper text, parameter list, shebang handling, ...)
+// or the container hashing changes (v2: XXH3 instead of FNV-1a).
+constexpr uint32_t kFormatVersion = 2;
 
 // Compile shape of the payload; a sidecar is only consumed by the exact shape
 // that produced it.
@@ -33,7 +34,8 @@ const char* SidecarSuffix();
 // "qjs-ng-0.14.0". Empty disables the cache entirely.
 const std::string& EngineCacheTag();
 
-uint64_t Fnv1a64(const void* data, size_t size);
+// XXH3-64 over arbitrary bytes (container hashing).
+uint64_t Hash64(const void* data, size_t size);
 
 // The CLI calls this when --no-bytecode-cache is in effect or the mode should
 // never touch sidecars (e.g. --check).
@@ -43,7 +45,19 @@ void SetEnabledFromCli(bool enabled);
 // EDGE_BYTECODE_CACHE is not set to a falsy value.
 bool Enabled();
 
+// True when EDGE_BYTECODE_CACHE_TRACE is set (shared by the builtins cache).
+bool TraceEnabled();
+
 std::string SidecarPathForSource(const std::string& source_path);
+
+// A validated sidecar: the whole file is read once and the payload is a view
+// into that buffer (no intermediate copies).
+struct SidecarPayload {
+  std::vector<uint8_t> file_bytes;
+  size_t payload_offset = 0;
+  size_t payload_size = 0;
+  const uint8_t* data() const { return file_bytes.data() + payload_offset; }
+};
 
 // Reads <source_path><suffix> and validates it against the exact source text
 // about to be compiled and the expected compile shape. False (and empty
@@ -51,7 +65,7 @@ std::string SidecarPathForSource(const std::string& source_path);
 bool ReadSidecar(const std::string& source_path,
                  std::string_view source_utf8,
                  uint32_t expected_flags,
-                 std::vector<uint8_t>* payload_out);
+                 SidecarPayload* out);
 
 // Atomically writes the sidecar next to the source (temp file + rename).
 // Failures (read-only filesystem, permissions, ...) are silent: returns
@@ -77,7 +91,8 @@ bool DecodeSidecar(const uint8_t* data,
                    std::string_view source_utf8,
                    uint32_t expected_flags,
                    uint64_t expected_filename_hash,
-                   std::vector<uint8_t>* payload_out);
+                   size_t* payload_offset_out,
+                   size_t* payload_size_out);
 
 }  // namespace edge_bytecode_cache
 

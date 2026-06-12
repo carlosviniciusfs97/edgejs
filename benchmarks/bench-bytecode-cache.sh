@@ -102,3 +102,62 @@ EOF
 
 run_lane "cjs" "$GEN_BASE/gen" "main.js"
 run_lane "esm" "$GEN_BASE/gen-esm" "main.mjs"
+
+# --- builtins consolidated cache: empty-startup lane -------------------------------
+# The builtins cache lands next to the binary, so the lane runs a COPY of the
+# binary in a scratch dir (copy, not symlink: exec-path resolution follows
+# symlinks back to the original).
+run_builtins_lane() {
+  local lane="builtins-empty"
+  local dir
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/edge-builtins-bench.XXXXXX")"
+  trap 'rm -rf "$dir"' RETURN
+  cp "$EDGE_BIN" "$dir/edge"
+  echo 'console.log(1 + 1);' > "$dir/app.js"
+  local builtins_file="$dir/edge.builtins$SUFFIX"
+
+  local json_out="$RESULTS_DIR/bytecode-cache-$LABEL-$lane.json"
+  local csv_out="$RESULTS_DIR/bytecode-cache-$LABEL-$lane.csv"
+  local md_out="$RESULTS_DIR/bytecode-cache-$LABEL-$lane.md"
+
+  echo
+  echo "=== Benchmarking ($LABEL, $lane, warmup=$WARMUP, runs=$RUNS) ==="
+  hyperfine \
+    --warmup "$WARMUP" \
+    --runs "$RUNS" \
+    --export-json "$json_out" \
+    --export-csv "$csv_out" \
+    --export-markdown "$md_out" \
+    --prepare "true" \
+    --command-name "disabled (compile builtins from source)" "$dir/edge --no-bytecode-cache $dir/app.js" \
+    --prepare "rm -f $builtins_file" \
+    --command-name "first run (writes builtins cache)" "$dir/edge $dir/app.js" \
+    --prepare "$dir/edge $dir/app.js >/dev/null 2>&1" \
+    --command-name "warm (builtins cache)" "$dir/edge $dir/app.js"
+
+  "$NODE_BIN" - "$json_out" "$LABEL/$lane" <<'EOF'
+const { readFileSync } = require('node:fs');
+const [jsonPath, label] = process.argv.slice(2);
+const results = JSON.parse(readFileSync(jsonPath, 'utf8')).results;
+const disabled = results.find((r) => r.command.startsWith('disabled'));
+const firstRun = results.find((r) => r.command.startsWith('first run'));
+const warm = results.find((r) => r.command.startsWith('warm'));
+const ms = (s) => (s * 1000).toFixed(1);
+console.log('');
+console.log(`=== Builtins bytecode cache summary (${label}) ===`);
+console.log(`disabled (compile builtins):  ${ms(disabled.mean)} ms ± ${ms(disabled.stddev)} ms`);
+console.log(`first run (compile + write):  ${ms(firstRun.mean)} ms ± ${ms(firstRun.stddev)} ms`);
+console.log(`warm (builtins cache):        ${ms(warm.mean)} ms ± ${ms(warm.stddev)} ms`);
+console.log('');
+console.log(`empty-startup speedup (disabled -> warm): ${(disabled.mean / warm.mean).toFixed(2)}x`);
+console.log(`time saved per start:                     ${ms(disabled.mean - warm.mean)} ms`);
+EOF
+
+  echo
+  echo "Exported:"
+  echo "  $json_out"
+  echo "  $csv_out"
+  echo "  $md_out"
+}
+
+run_builtins_lane

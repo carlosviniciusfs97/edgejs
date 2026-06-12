@@ -199,7 +199,7 @@ printf "import { b } from './b.mjs';\nconsole.log(b * 3);\n" > "$DIR/a.mjs"
 "$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1 || fail "precompile exited non-zero"
 out="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/a.mjs" 2>"$WORKDIR/chain.txt")"
 [ "$out" = "42" ] || fail "chain output: $out"
-hits="$(grep -c "hit " "$WORKDIR/chain.txt")"
+hits="$(grep -c "] hit " "$WORKDIR/chain.txt")"  # sidecar hits only, not builtin-hit
 [ "$hits" -eq 3 ] || fail "expected 3 cache hits, got $hits"
 pass
 
@@ -332,6 +332,116 @@ begin "--precompile conflict validation"
 "$EDGE_BIN" --precompile --check x.js >/dev/null 2>&1 && fail "--precompile --check should fail"
 "$EDGE_BIN" --precompile --no-bytecode-cache x >/dev/null 2>&1 && fail "--precompile --no-bytecode-cache should fail"
 pass
+
+# === Builtins consolidated bytecode cache (<binary>.builtins<suffix>) ==============
+# The cache lands next to the binary, so each scenario gets its own COPY of
+# the binary (copy, not symlink: the exec-path lookup resolves symlinks).
+BUILTINS_FILE_NAME="edge.builtins$SUFFIX"
+
+make_builtins_bin() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cp "$EDGE_BIN" "$dir/edge"
+  echo 'console.log(1 + 1);' > "$dir/app.js"
+}
+
+# --- first run writes, second run hits --------------------------------------------
+begin "builtins cache write then hit"
+DIR="$WORKDIR/builtins-basic"
+make_builtins_bin "$DIR"
+out1="$(EDGE_BYTECODE_CACHE_TRACE=1 "$DIR/edge" "$DIR/app.js" 2>"$DIR/trace1.txt")"
+[ "$out1" = "2" ] || fail "first run output: $out1"
+[ -f "$DIR/$BUILTINS_FILE_NAME" ] || fail "missing $BUILTINS_FILE_NAME after first run"
+grep -q "builtins-write" "$DIR/trace1.txt" || fail "first run did not trace builtins-write"
+out2="$(EDGE_BYTECODE_CACHE_TRACE=1 "$DIR/edge" "$DIR/app.js" 2>"$DIR/trace2.txt")"
+[ "$out2" = "2" ] || fail "second run output: $out2"
+grep -q "builtin-hit" "$DIR/trace2.txt" || fail "second run had no builtin-hit"
+grep -q "builtins-write" "$DIR/trace2.txt" && fail "second run rewrote the builtins cache"
+grep -q "builtin-miss" "$DIR/trace2.txt" && fail "second run had builtin-miss lines"
+pass
+
+# --- corrupted builtins file: output parity + rewrite ------------------------------
+begin "corrupted builtins cache falls back and rewrites"
+DIR="$WORKDIR/builtins-corrupt"
+make_builtins_bin "$DIR"
+"$DIR/edge" "$DIR/app.js" >/dev/null 2>&1
+[ -f "$DIR/$BUILTINS_FILE_NAME" ] || fail "missing builtins cache to corrupt"
+# Truncate mid-file: structural validation fails, all entries recompile.
+head -c 100 "$DIR/$BUILTINS_FILE_NAME" > "$DIR/$BUILTINS_FILE_NAME.tmp"
+mv "$DIR/$BUILTINS_FILE_NAME.tmp" "$DIR/$BUILTINS_FILE_NAME"
+out="$(EDGE_BYTECODE_CACHE_TRACE=1 "$DIR/edge" "$DIR/app.js" 2>"$DIR/trace.txt")"
+[ "$out" = "2" ] || fail "corrupted-cache run output: $out"
+grep -q "builtins-load-failed" "$DIR/trace.txt" || fail "no builtins-load-failed trace"
+grep -q "builtins-write" "$DIR/trace.txt" || fail "corrupt cache was not rewritten"
+out2="$(EDGE_BYTECODE_CACHE_TRACE=1 "$DIR/edge" "$DIR/app.js" 2>"$DIR/trace2.txt")"
+[ "$out2" = "2" ] || fail "post-rewrite run output: $out2"
+grep -q "builtin-hit" "$DIR/trace2.txt" || fail "rewritten cache produced no hits"
+pass
+
+# --- opt-outs write no builtins file -----------------------------------------------
+begin "builtins cache opt-outs write nothing"
+DIR="$WORKDIR/builtins-optout"
+make_builtins_bin "$DIR"
+"$DIR/edge" --no-bytecode-cache "$DIR/app.js" >/dev/null 2>&1
+[ ! -f "$DIR/$BUILTINS_FILE_NAME" ] || fail "--no-bytecode-cache wrote builtins cache"
+EDGE_BYTECODE_CACHE=0 "$DIR/edge" "$DIR/app.js" >/dev/null 2>&1
+[ ! -f "$DIR/$BUILTINS_FILE_NAME" ] || fail "EDGE_BYTECODE_CACHE=0 wrote builtins cache"
+"$DIR/edge" --check "$DIR/app.js" >/dev/null 2>&1
+[ ! -f "$DIR/$BUILTINS_FILE_NAME" ] || fail "--check wrote builtins cache"
+pass
+
+# --- read-only binary dir: silent no-op --------------------------------------------
+begin "read-only binary dir runs fine without builtins cache"
+DIR="$WORKDIR/builtins-readonly"
+make_builtins_bin "$DIR"
+chmod a-w "$DIR"
+out="$("$DIR/edge" "$DIR/app.js" 2>/dev/null)"
+chmod u+w "$DIR"
+[ "$out" = "2" ] || fail "read-only dir run output: $out"
+[ ! -f "$DIR/$BUILTINS_FILE_NAME" ] || fail "builtins cache appeared in read-only dir"
+pass
+
+# --- cached vs disabled output parity ----------------------------------------------
+begin "builtins cached output matches disabled output"
+DIR="$WORKDIR/builtins-parity"
+make_builtins_bin "$DIR"
+cat > "$DIR/app.js" <<'EOF'
+const os = require('node:os');
+const path = require('node:path');
+const { Buffer } = require('node:buffer');
+console.log(typeof os.platform(), path.join('a', 'b'), Buffer.from('hi').toString('hex'));
+process.nextTick(() => console.log('tick'));
+EOF
+expected="$("$DIR/edge" --no-bytecode-cache "$DIR/app.js" 2>/dev/null)"
+"$DIR/edge" "$DIR/app.js" >/dev/null 2>&1  # seed
+warm="$("$DIR/edge" "$DIR/app.js" 2>/dev/null)"
+[ "$warm" = "$expected" ] || fail "cached output differs: '$warm' vs '$expected'"
+pass
+
+# --- worker_threads smoke -----------------------------------------------------------
+# Skipped on QuickJS: worker_threads hangs there independently of the bytecode
+# cache (the parent never receives worker messages; pre-existing engine issue,
+# reproducible on a clean tree with --no-bytecode-cache).
+if [ "$SUFFIX" = ".qjsb" ]; then
+  echo "skip: builtins cache worker_threads smoke (worker_threads hangs on quickjs)"
+else
+  begin "builtins cache worker_threads smoke"
+  DIR="$WORKDIR/builtins-worker"
+  make_builtins_bin "$DIR"
+  cat > "$DIR/app.js" <<'EOF'
+const { Worker } = require('node:worker_threads');
+const worker = new Worker("require('node:worker_threads').parentPort.postMessage(40 + 2);", { eval: true });
+worker.on('message', (value) => { console.log(value); });
+setTimeout(() => { console.error('worker timed out'); process.exit(1); }, 20000);
+EOF
+  out1="$("$DIR/edge" "$DIR/app.js" 2>/dev/null)"
+  [ "$out1" = "42" ] || fail "worker first run output: $out1"
+  [ -f "$DIR/$BUILTINS_FILE_NAME" ] || fail "worker run wrote no builtins cache"
+  out2="$(EDGE_BYTECODE_CACHE_TRACE=1 "$DIR/edge" "$DIR/app.js" 2>"$DIR/trace2.txt")"
+  [ "$out2" = "42" ] || fail "worker second run output: $out2"
+  grep -q "builtin-hit" "$DIR/trace2.txt" || fail "worker second run had no builtin-hit"
+  pass
+fi
 
 echo
 if [ "$FAILURES" -gt 0 ]; then
