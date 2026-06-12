@@ -111,20 +111,16 @@ TEST_F(Test8BuiltinBytecode, DecodeRejectsTrailingGarbage) {
 TEST_F(Test8BuiltinBytecode, CorruptedPayloadEntryHandling) {
   const auto entries = SampleEntries();
   auto encoded = edge_builtin_bytecode::EncodeFile(kTag, entries);
-  // Flip the last byte: it belongs to the final entry's payload.
+  // Flip the last byte: it belongs to the final entry's payload. The
+  // container only pins structure; payload integrity is the engine's job
+  // (V8 CachedData / the QuickJS provider's QJSB payload header), so the
+  // entry survives container decoding on both engines and the engine
+  // rejects it at deserialize time.
   encoded.back() ^= 0x01;
 
   std::vector<edge_builtin_bytecode::FileEntry> decoded;
   ASSERT_TRUE(edge_builtin_bytecode::DecodeFile(encoded.data(), encoded.size(), kTag, &decoded));
-#if defined(EDGE_NAPI_QUICKJS)
-  // QuickJS entries carry a payload hash (its reader is not hardened): the
-  // corrupt entry is dropped, the rest survive.
-  ASSERT_EQ(decoded.size(), entries.size() - 1);
-#else
-  // V8 writes no payload hash (CachedData self-validates): the container
-  // keeps the entry and the engine rejects it at deserialize time.
   ASSERT_EQ(decoded.size(), entries.size());
-#endif
   EXPECT_EQ(decoded[0].id, "fs");
   EXPECT_EQ(decoded[1].id, "internal/bootstrap/realm");
 }

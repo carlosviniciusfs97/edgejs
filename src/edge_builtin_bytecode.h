@@ -15,8 +15,10 @@
 // container format, validation, and the process-global entry store only.
 namespace edge_builtin_bytecode {
 
-// Bump when the container layout or the hashing scheme changes.
-constexpr uint32_t kFormatVersion = 1;
+// Bump when the container layout or the payload encoding changes (v2: raw
+// payloads; v3: entries dropped the engine-conditional payload hash — engine
+// payloads self-validate, so the container carries source identity only).
+constexpr uint32_t kFormatVersion = 3;
 
 // Compile shape of an entry. Each kind pins the compile path, parameter list,
 // and wrapper that produced the payload; the entry's source hash covers the

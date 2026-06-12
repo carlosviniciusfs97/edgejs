@@ -118,6 +118,30 @@ out="$("$EDGE_BIN" "$DIR/main.js" 2>/dev/null)"
 [ "$out" = "changed" ] || fail "stale sidecar served old code: $out"
 pass
 
+# --- relocated tree ---------------------------------------------------------------
+# QuickJS bytecode embeds the compile-time path/URL (import.meta.url, stack
+# traces), so its self-validating payload header rejects relocated sidecars
+# and the runtime recompiles + rewrites. V8 caches are relocatable and keep
+# hitting. Either way: correct output, no stale paths.
+begin "relocated tree recompiles (quickjs) or keeps hitting (v8)"
+DIR="$WORKDIR/relocate-src"
+mkdir -p "$DIR"
+cat > "$DIR/main.mjs" <<'RELOC_EOF'
+console.log(import.meta.url.endsWith('relocate-dst/main.mjs') ? 'url-ok' : 'url-stale');
+RELOC_EOF
+"$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1
+[ -f "$DIR/main.mjs$SUFFIX" ] || fail "missing sidecar before relocation"
+mv "$DIR" "$WORKDIR/relocate-dst"
+out="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$WORKDIR/relocate-dst/main.mjs" 2>"$WORKDIR/reloc.txt")"
+[ "$out" = "url-ok" ] || fail "relocated import.meta.url is stale: $out"
+if [ "$SUFFIX" = ".qjsb" ]; then
+  grep -q "remove $WORKDIR/relocate-dst/main.mjs$SUFFIX" "$WORKDIR/reloc.txt" || fail "quickjs did not drop the relocated sidecar"
+  grep -q "write $WORKDIR/relocate-dst/main.mjs$SUFFIX" "$WORKDIR/reloc.txt" || fail "quickjs did not rewrite the relocated sidecar"
+else
+  grep -q "hit $WORKDIR/relocate-dst/main.mjs$SUFFIX" "$WORKDIR/reloc.txt" || fail "v8 should consume relocated sidecars"
+fi
+pass
+
 # --- opt-outs ------------------------------------------------------------------
 begin "--no-bytecode-cache writes and reads nothing"
 DIR="$WORKDIR/optout-flag"

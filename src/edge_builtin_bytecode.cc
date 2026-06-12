@@ -23,9 +23,8 @@ namespace {
 
 constexpr char kMagic[8] = {'E', 'D', 'G', 'E', 'J', 'S', 'B', 'B'};
 constexpr size_t kHeaderSize = 32;
-// kind u8, reserved u8, id_len u16, payload_len u32, source_xxh3 u64,
-// payload_xxh3 u64.
-constexpr size_t kEntryFixedSize = 24;
+// kind u8, reserved u8, id_len u16, payload_len u32, source_xxh3 u64.
+constexpr size_t kEntryFixedSize = 16;
 constexpr size_t kMaxKind = 5;
 
 void Trace(const char* event, const std::string& subject, const char* detail = nullptr) {
@@ -75,21 +74,10 @@ uint64_t ReadU64(const uint8_t* data, size_t offset) {
   return value;
 }
 
-uint64_t PayloadHashForWrite(const uint8_t* payload, size_t payload_size) {
-#if defined(EDGE_NAPI_QUICKJS)
-  // QuickJS's bytecode reader is not hardened against corrupt input.
-  return edge_bytecode_cache::Hash64(payload, payload_size);
-#else
-  // V8 CachedData self-validates (rejected -> fallback); skip the extra pass.
-  (void)payload;
-  (void)payload_size;
-  return 0;
-#endif
-}
-
 // Walks every entry in a decoded-from-disk file. fn(kind, id, source_hash,
-// payload_hash, payload_offset, payload_size); a malformed entry aborts the
-// walk. Returns false on any structural problem.
+// payload_offset, payload_size); a malformed entry aborts the walk. Returns
+// false on any structural problem. Payload integrity is the engine's job
+// (V8 CachedData / the QuickJS provider's QJSB payload header).
 template <typename Fn>
 bool ForEachEntry(const uint8_t* data,
                   size_t size,
@@ -113,14 +101,12 @@ bool ForEachEntry(const uint8_t* data,
     const uint16_t id_len = ReadU16(data, offset + 2);
     const uint32_t payload_len = ReadU32(data, offset + 4);
     const uint64_t source_hash = ReadU64(data, offset + 8);
-    const uint64_t payload_hash = ReadU64(data, offset + 16);
     offset += kEntryFixedSize;
     if (kind > kMaxKind) return false;
     if (size - offset < static_cast<size_t>(id_len) + payload_len) return false;
     const std::string_view id(reinterpret_cast<const char*>(data + offset), id_len);
     offset += id_len;
-    fn(static_cast<Kind>(kind), id, source_hash, payload_hash, offset,
-       static_cast<size_t>(payload_len));
+    fn(static_cast<Kind>(kind), id, source_hash, offset, static_cast<size_t>(payload_len));
     offset += payload_len;
   }
   return offset == size;
@@ -190,13 +176,8 @@ void EnsureLoadedLocked(Store& store) {
   const uint8_t* data = store.file_bytes.data();
   const bool ok = ForEachEntry(
       data, store.file_bytes.size(), edge_bytecode_cache::EngineCacheTag(),
-      [&](Kind kind, std::string_view id, uint64_t source_hash, uint64_t payload_hash,
-          size_t payload_offset, size_t payload_size) {
-        if (payload_hash != 0 &&
-            payload_hash != edge_bytecode_cache::Hash64(data + payload_offset, payload_size)) {
-          Trace("builtin-corrupt", std::string(id));
-          return;  // dropped -> miss -> recompile + rewrite at flush
-        }
+      [&](Kind kind, std::string_view id, uint64_t source_hash, size_t payload_offset,
+          size_t payload_size) {
         store.loaded[EntryKey(kind, id)] = LoadedEntry{source_hash, payload_offset, payload_size};
       });
   if (!ok) {
@@ -360,8 +341,6 @@ std::vector<uint8_t> EncodeFile(std::string_view engine_tag,
     WriteU16(&out, offset + 2, static_cast<uint16_t>(entry.id.size()));
     WriteU32(&out, offset + 4, static_cast<uint32_t>(entry.payload.size()));
     WriteU64(&out, offset + 8, entry.source_hash);
-    WriteU64(&out, offset + 16,
-             PayloadHashForWrite(entry.payload.data(), entry.payload.size()));
     offset += kEntryFixedSize;
     std::memcpy(out.data() + offset, entry.id.data(), entry.id.size());
     offset += entry.id.size();
@@ -379,12 +358,8 @@ bool DecodeFile(const uint8_t* data,
   out->clear();
   return ForEachEntry(
       data, size, engine_tag,
-      [&](Kind kind, std::string_view id, uint64_t source_hash, uint64_t payload_hash,
-          size_t payload_offset, size_t payload_size) {
-        if (payload_hash != 0 &&
-            payload_hash != edge_bytecode_cache::Hash64(data + payload_offset, payload_size)) {
-          return;  // mirror the loader: corrupt entries are dropped, not fatal
-        }
+      [&](Kind kind, std::string_view id, uint64_t source_hash, size_t payload_offset,
+          size_t payload_size) {
         FileEntry entry;
         entry.kind = kind;
         entry.id.assign(id);
