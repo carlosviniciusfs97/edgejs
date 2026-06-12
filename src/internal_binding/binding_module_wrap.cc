@@ -37,10 +37,6 @@ struct ModuleWrapInstance {
   napi_ref url_ref = nullptr;
   void* module_handle = nullptr;
   bool has_top_level_await = false;
-  // XXH3 of the source text; backs the Edge cachedData wrapper on engines
-  // whose deserializer cannot validate source identity (createCachedData /
-  // constructor cachedData). Unused (0) on V8.
-  uint64_t source_hash = 0;
 };
 
 struct ModuleWrapBindingState {
@@ -438,12 +434,6 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
       if (argc >= 4 && argv[3] != nullptr) (void)napi_get_value_int32(env, argv[3], &line_offset);
       if (argc >= 5 && argv[4] != nullptr) (void)napi_get_value_int32(env, argv[4], &column_offset);
 
-      if (edge_bytecode_cache::VmCachedDataNeedsWrapper()) {
-        const std::string source_utf8 = ValueToUtf8(env, argv[2]);
-        instance->source_hash =
-            edge_bytecode_cache::Hash64(source_utf8.data(), source_utf8.size());
-      }
-
       // arg5 is dual-purpose at the JS boundary: the ESM loader passes its
       // host-defined-option Symbol; vm.SourceTextModule passes user cachedData
       // (an ArrayBufferView).
@@ -453,21 +443,18 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
 
       void* module_bytecode = nullptr;
       if (arg5_is_cached_data) {
-        // vm.SourceTextModule cachedData: validate and consume. Node throws
-        // ERR_VM_MODULE_CACHED_DATA_REJECTED from the constructor when the
-        // bytes don't match this source.
+        // vm.SourceTextModule cachedData: validate and consume. The provider
+        // validates source/shape/integrity itself (V8 CachedData / QuickJS
+        // QJSB header) and reports a mismatch via rejected_out. Node throws
+        // ERR_VM_MODULE_CACHED_DATA_REJECTED from the constructor on reject.
         bool rejected = true;
         const uint8_t* data = nullptr;
         size_t length = 0;
-        size_t payload_offset = 0;
-        size_t payload_size = 0;
-        if (GetArrayBufferViewBytes(env, arg5, &data, &length) && length > 0 &&
-            edge_bytecode_cache::UnwrapVmCachedData(instance->source_hash, data, length,
-                                                    &payload_offset, &payload_size)) {
+        if (GetArrayBufferViewBytes(env, arg5, &data, &length) && length > 0) {
           bool deserialize_rejected = false;
           if (unofficial_napi_bytecode_deserialize(env,
-                                                   data + payload_offset,
-                                                   payload_size,
+                                                   data,
+                                                   length,
                                                    argv[2],
                                                    argc >= 1 ? argv[0] : nullptr,
                                                    unofficial_napi_bytecode_shape_module,
@@ -485,11 +472,16 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
           delete instance;
           return nullptr;
         }
-      } else if (edge_bytecode_cache::Enabled() && (argc < 2 || IsNullishValue(env, argv[1]))) {
+      } else if (edge_bytecode_cache::Enabled() && (argc < 2 || IsNullishValue(env, argv[1])) &&
+                 line_offset == 0 && column_offset == 0) {
         // Bytecode sidecar cache for file-backed modules loaded by the default
         // ESM loader (a vm context in argv[1] opts out). Deserialize
         // <path>.v8b/.qjsb when it matches the exact source, otherwise compile
-        // to a fresh handle and persist it (write-on-first-run).
+        // to a fresh handle and persist it (write-on-first-run). Non-zero
+        // line/column offsets are baked into the payload but absent from the
+        // sidecar key, so they are excluded here — otherwise a
+        // `new vm.SourceTextModule(src, {identifier:'file://…', lineOffset:N})`
+        // would poison the real loader's sidecar with shifted positions.
         const std::string url_utf8 = argc >= 1 && argv[0] != nullptr ? ValueToUtf8(env, argv[0]) : "";
         if (url_utf8.rfind("file://", 0) == 0) {
           const std::string sidecar_source_path = edge_path::NormalizeFileURLOrPath(url_utf8);
@@ -762,25 +754,10 @@ napi_value ModuleWrapCreateCachedData(napi_env env, napi_callback_info info) {
     napi_value out = nullptr;
     if (unofficial_napi_module_wrap_create_cached_data(env, instance->module_handle, &out) == napi_ok &&
         out != nullptr) {
-      if (edge_bytecode_cache::VmCachedDataNeedsWrapper()) {
-        // QuickJS: prepend the Edge source-hash prefix so the constructor's
-        // cachedData path can validate source identity (the engine cannot).
-        const uint8_t* bytes = nullptr;
-        size_t length = 0;
-        if (GetArrayBufferViewBytes(env, out, &bytes, &length) && length > 0) {
-          const std::vector<uint8_t> wrapped_bytes =
-              edge_bytecode_cache::WrapVmCachedData(instance->source_hash, bytes, length);
-          napi_value buffer = nullptr;
-          if (napi_create_buffer_copy(env, wrapped_bytes.size(), wrapped_bytes.data(), nullptr,
-                                      &buffer) == napi_ok &&
-              buffer != nullptr) {
-            return buffer;
-          }
-        }
-        // Empty cache (evaluated module): fall through unwrapped.
-      }
-      // vm.SourceTextModule#createCachedData() promises a node Buffer; the
-      // QuickJS provider hands back a plain Uint8Array.
+      // The provider's bytes self-validate (V8 CachedData / QuickJS QJSB
+      // header, which now carries the module source hash); just hand back a
+      // node Buffer. vm.SourceTextModule#createCachedData() promises a Buffer;
+      // the QuickJS provider returns a plain Uint8Array.
       napi_value global = nullptr;
       napi_value buffer_ctor = nullptr;
       napi_value from_fn = nullptr;

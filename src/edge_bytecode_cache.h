@@ -95,32 +95,6 @@ bool DecodeSidecar(const uint8_t* data,
                    size_t* payload_offset_out,
                    size_t* payload_size_out);
 
-// vm cachedData wrapper. Engine payloads self-validate integrity (V8
-// CachedData; QuickJS via the provider's QJSB header) but QuickJS cannot
-// detect bytecode compiled from different SOURCE. User-facing vm buffers
-// (vm.Script/compileFunction/SourceTextModule cachedData) on QuickJS
-// therefore carry an Edge-owned 12-byte prefix [QJSC + XXH3(source)] that is
-// validated and stripped before the bytes reach the engine. On V8 both
-// helpers are pass-throughs (offset 0), keeping byte-parity with Node's
-// CachedData. Sidecar/builtins payloads carry no Edge prefix — their
-// containers already record the source hash.
-bool VmCachedDataNeedsWrapper();
-
-// Prefix + payload as a fresh buffer (pass-through copy on V8).
-std::vector<uint8_t> WrapVmCachedData(uint64_t source_hash,
-                                      const uint8_t* payload,
-                                      size_t payload_size);
-
-// Validates the prefix against the expected source hash and returns the raw
-// payload span. False means wrong/missing prefix or wrong source — callers
-// report cachedData as rejected without touching the engine. On V8 always
-// true with the identity span.
-bool UnwrapVmCachedData(uint64_t expected_source_hash,
-                        const uint8_t* data,
-                        size_t size,
-                        size_t* payload_offset_out,
-                        size_t* payload_size_out);
-
 }  // namespace edge_bytecode_cache
 
 #endif  // EDGE_BYTECODE_CACHE_H_

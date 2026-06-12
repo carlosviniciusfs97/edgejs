@@ -3254,62 +3254,6 @@ static napi_value EnsureNodeBuffer(napi_env env, napi_value view) {
   return wrapped;
 }
 
-// Wraps raw bytecode_serialize output into a user-facing vm cachedData
-// Buffer: on QuickJS an Edge-owned source-hash prefix is prepended (the
-// engine cannot validate source identity itself); on V8 this is just
-// EnsureNodeBuffer (CachedData self-validates, bytes stay Node-parity raw).
-static napi_value WrapVmCachedDataBuffer(napi_env env, napi_value source_text, napi_value raw_buffer) {
-  if (raw_buffer == nullptr) return nullptr;
-  if (!edge_bytecode_cache::VmCachedDataNeedsWrapper()) {
-    return EnsureNodeBuffer(env, raw_buffer);
-  }
-  const uint8_t* bytes = nullptr;
-  size_t length = 0;
-  if (!GetTypedArrayBytes(env, raw_buffer, &bytes, &length) || length == 0) {
-    return EnsureNodeBuffer(env, raw_buffer);
-  }
-  const std::string source_utf8 = ValueToUtf8(env, source_text);
-  const std::vector<uint8_t> wrapped = edge_bytecode_cache::WrapVmCachedData(
-      edge_bytecode_cache::Hash64(source_utf8.data(), source_utf8.size()), bytes, length);
-  napi_value out = nullptr;
-  if (napi_create_buffer_copy(env, wrapped.size(), wrapped.data(), nullptr, &out) != napi_ok ||
-      out == nullptr) {
-    return nullptr;
-  }
-  return out;
-}
-
-// Validates and strips the vm cachedData wrapper from user-supplied bytes.
-// False means the bytes were not produced from this exact source (or carry no
-// valid wrapper) — callers report cachedDataRejected without touching the
-// engine. Pass-through on V8, where the engine validates.
-static bool UnwrapVmCachedDataBytes(napi_env env,
-                                    napi_value source_text,
-                                    const uint8_t* bytes,
-                                    size_t length,
-                                    const uint8_t** payload_out,
-                                    size_t* payload_size_out) {
-  *payload_out = nullptr;
-  *payload_size_out = 0;
-  if (bytes == nullptr || length == 0) return false;
-  if (!edge_bytecode_cache::VmCachedDataNeedsWrapper()) {
-    *payload_out = bytes;
-    *payload_size_out = length;
-    return true;
-  }
-  const std::string source_utf8 = ValueToUtf8(env, source_text);
-  size_t offset = 0;
-  size_t size = 0;
-  if (!edge_bytecode_cache::UnwrapVmCachedData(
-          edge_bytecode_cache::Hash64(source_utf8.data(), source_utf8.size()), bytes, length,
-          &offset, &size)) {
-    return false;
-  }
-  *payload_out = bytes + offset;
-  *payload_size_out = size;
-  return true;
-}
-
 // Compiles script text and returns its serialized code cache (replaces the
 // removed unofficial_napi_contextify_create_cached_data). Leaves the compile
 // exception pending on syntax errors.
@@ -3337,7 +3281,9 @@ static bool CreateScriptCachedDataBuffer(napi_env env,
   const napi_status status = unofficial_napi_bytecode_serialize(env, bytecode, buffer_out);
   (void)unofficial_napi_bytecode_release(env, bytecode);
   if (status != napi_ok || *buffer_out == nullptr) return false;
-  *buffer_out = WrapVmCachedDataBuffer(env, code, *buffer_out);
+  // The provider's serialized bytes self-validate (V8 CachedData / QuickJS
+  // QJSB header); just hand back a Node Buffer.
+  *buffer_out = EnsureNodeBuffer(env, *buffer_out);
   return *buffer_out != nullptr;
 }
 
@@ -3401,14 +3347,13 @@ static napi_value ContextifyScriptConstructorCallback(napi_env env, napi_callbac
   if (has_cached_data_arg) {
     const uint8_t* bytes = nullptr;
     size_t length = 0;
-    const uint8_t* payload = nullptr;
-    size_t payload_size = 0;
-    if (GetTypedArrayBytes(env, argv[4], &bytes, &length) && length > 0 &&
-        UnwrapVmCachedDataBytes(env, code, bytes, length, &payload, &payload_size)) {
+    // The provider validates source/shape/integrity itself (V8 CachedData /
+    // QuickJS QJSB header) and reports a mismatch via rejected_out.
+    if (GetTypedArrayBytes(env, argv[4], &bytes, &length) && length > 0) {
       bool rejected = false;
       if (unofficial_napi_bytecode_deserialize(env,
-                                               payload,
-                                               payload_size,
+                                               bytes,
+                                               length,
                                                code,
                                                filename,
                                                unofficial_napi_bytecode_shape_script,
@@ -3449,11 +3394,17 @@ static napi_value ContextifyScriptConstructorCallback(napi_env env, napi_callbac
   }
   if (produce_cached_data) {
     napi_value cache_buffer = nullptr;
+    const uint8_t* produced_bytes = nullptr;
+    size_t produced_len = 0;
+    // Only report cachedDataProduced when the engine actually emitted bytes
+    // (an empty buffer round-trips as "rejected", so reporting it as produced
+    // would be misleading).
     bool produced_ok =
         unofficial_napi_bytecode_serialize(env, script_bytecode, &cache_buffer) == napi_ok &&
-        cache_buffer != nullptr;
+        cache_buffer != nullptr &&
+        GetTypedArrayBytes(env, cache_buffer, &produced_bytes, &produced_len) && produced_len > 0;
     if (produced_ok) {
-      cache_buffer = WrapVmCachedDataBuffer(env, code, cache_buffer);
+      cache_buffer = EnsureNodeBuffer(env, cache_buffer);
       produced_ok = cache_buffer != nullptr;
     }
     napi_value produced = nullptr;
@@ -3841,14 +3792,13 @@ static napi_value ContextifyCompileFunctionCallback(napi_env env, napi_callback_
   if (has_cached_data) {
     const uint8_t* bytes = nullptr;
     size_t length = 0;
-    const uint8_t* payload = nullptr;
-    size_t payload_size = 0;
-    if (GetTypedArrayBytes(env, cached_data, &bytes, &length) && length > 0 &&
-        UnwrapVmCachedDataBytes(env, code, bytes, length, &payload, &payload_size)) {
+    // The provider validates source/shape/params/integrity itself (V8
+    // CachedData / QuickJS QJSB header) and reports a mismatch via rejected_out.
+    if (GetTypedArrayBytes(env, cached_data, &bytes, &length) && length > 0) {
       bool rejected = false;
       if (unofficial_napi_bytecode_deserialize(env,
-                                               payload,
-                                               payload_size,
+                                               bytes,
+                                               length,
                                                code,
                                                filename,
                                                unofficial_napi_bytecode_shape_cjs_function,
@@ -3863,7 +3813,11 @@ static napi_value ContextifyCompileFunctionCallback(napi_env env, napi_callback_
     } else {
       cached_data_rejected = true;
     }
-  } else if (produce_cached_data) {
+  }
+  // Produce a fresh cache when asked — including after a rejected cachedData,
+  // so a caller refreshing a stale cache (cachedData + produceCachedData) gets
+  // a new buffer instead of silently nothing.
+  if (fn_bytecode == nullptr && produce_cached_data) {
     if (unofficial_napi_bytecode_compile(env,
                                          code,
                                          filename,
@@ -3906,11 +3860,14 @@ static napi_value ContextifyCompileFunctionCallback(napi_env env, napi_callback_
   }
   if (produce_cached_data && fn_bytecode != nullptr) {
     napi_value cache_buffer = nullptr;
+    const uint8_t* produced_bytes = nullptr;
+    size_t produced_len = 0;
     bool produced_ok =
         unofficial_napi_bytecode_serialize(env, fn_bytecode, &cache_buffer) == napi_ok &&
-        cache_buffer != nullptr;
+        cache_buffer != nullptr &&
+        GetTypedArrayBytes(env, cache_buffer, &produced_bytes, &produced_len) && produced_len > 0;
     if (produced_ok) {
-      cache_buffer = WrapVmCachedDataBuffer(env, code, cache_buffer);
+      cache_buffer = EnsureNodeBuffer(env, cache_buffer);
       produced_ok = cache_buffer != nullptr;
     }
     napi_value produced = nullptr;

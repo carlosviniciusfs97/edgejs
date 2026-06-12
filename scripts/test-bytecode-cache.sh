@@ -342,6 +342,54 @@ out="$("$EDGE_BIN" --no-bytecode-cache --no-warnings --experimental-vm-modules "
 [ "$out" = "vm-module-ok" ] || fail "vm.SourceTextModule cachedData round-trip: $out"
 pass
 
+# --- vm cachedData cross-shape is never executed during compile -------------------
+# A whole-script cache fed to vm.compileFunction must not run the script body
+# while compiling (the QJSB shape tag / V8 compile-kind guard reject it). Both
+# engines.
+begin "vm cachedData cross-shape does not execute body"
+DIR="$WORKDIR/vm-xshape"
+mkdir -p "$DIR"
+cat > "$DIR/xshape.cjs" <<'EOF'
+const vm = require('node:vm');
+globalThis.__hit = 0;
+const s = new vm.Script("globalThis.__hit++; 7", { produceCachedData: true });
+if (globalThis.__hit !== 0) throw new Error('Script ctor ran body');
+// Feed the script cache to compileFunction (wrong shape). Must not execute.
+const f = vm.compileFunction("globalThis.__hit++; 7", [], { cachedData: s.cachedData });
+if (globalThis.__hit !== 0) throw new Error('cross-shape executed body during compile');
+console.log('xshape-ok');
+EOF
+out="$("$EDGE_BIN" --no-bytecode-cache "$DIR/xshape.cjs" 2>&1)"
+[ "$out" = "xshape-ok" ] || fail "vm cross-shape body execution: $out"
+pass
+
+# --- QuickJS self-validating payload rejects wrong source/params ------------------
+# QuickJS bytecode carries no source identity natively, so the provider's QJSB
+# header enforces source + params. (V8's CompileFunction code cache is not
+# source-validated — matching Node — so this strict check is QuickJS-only.)
+if [ "$SUFFIX" = ".qjsb" ]; then
+  begin "quickjs cachedData rejects wrong source and params"
+  DIR="$WORKDIR/vm-strict"
+  mkdir -p "$DIR"
+  cat > "$DIR/strict.cjs" <<'EOF'
+const vm = require('node:vm');
+// Different source.
+const a = vm.compileFunction("return 1", [], { produceCachedData: true });
+const b = vm.compileFunction("return 2", [], { cachedData: a.cachedData });
+if (b.cachedDataRejected !== true) throw new Error('wrong-source not rejected');
+if (b() !== 2) throw new Error('recompiled body wrong: ' + b());
+// Different params.
+const c = vm.compileFunction("return p", ["p", "q"], { produceCachedData: true });
+const d = vm.compileFunction("return p", ["p"], { cachedData: c.cachedData });
+if (d.cachedDataRejected !== true) throw new Error('wrong-params not rejected');
+if (d(5) !== 5) throw new Error('recompiled params wrong: ' + d(5));
+console.log('strict-ok');
+EOF
+  out="$("$EDGE_BIN" --no-bytecode-cache "$DIR/strict.cjs" 2>&1)"
+  [ "$out" = "strict-ok" ] || fail "quickjs strict cachedData rejection: $out"
+  pass
+fi
+
 # --- --check stays clean ---------------------------------------------------------
 begin "--check writes no sidecars"
 DIR="$WORKDIR/checkmode"

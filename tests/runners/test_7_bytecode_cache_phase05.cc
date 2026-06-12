@@ -132,39 +132,6 @@ TEST_F(Test7BytecodeCachePhase05, Hash64MatchesKnownVectors) {
   EXPECT_NE(edge_bytecode_cache::Hash64("abc", 3), edge_bytecode_cache::Hash64("abd", 3));
 }
 
-TEST_F(Test7BytecodeCachePhase05, VmCachedDataWrapperRoundTrip) {
-  const auto payload = SamplePayload();
-  const uint64_t source_hash = edge_bytecode_cache::Hash64(kSource, sizeof(kSource) - 1);
-  const auto wrapped =
-      edge_bytecode_cache::WrapVmCachedData(source_hash, payload.data(), payload.size());
-
-  size_t offset = 0;
-  size_t size = 0;
-  ASSERT_TRUE(edge_bytecode_cache::UnwrapVmCachedData(source_hash, wrapped.data(), wrapped.size(),
-                                                      &offset, &size));
-  ASSERT_EQ(size, payload.size());
-  EXPECT_EQ(std::vector<uint8_t>(wrapped.begin() + offset, wrapped.begin() + offset + size),
-            payload);
-
-#if defined(EDGE_NAPI_QUICKJS)
-  // QuickJS buffers carry the 12-byte source-hash prefix; a different source
-  // must be rejected before the bytes ever reach the engine.
-  EXPECT_EQ(wrapped.size(), payload.size() + 12);
-  EXPECT_FALSE(edge_bytecode_cache::UnwrapVmCachedData(source_hash + 1, wrapped.data(),
-                                                       wrapped.size(), &offset, &size));
-  auto corrupted = wrapped;
-  corrupted[0] ^= 0xff;  // magic
-  EXPECT_FALSE(edge_bytecode_cache::UnwrapVmCachedData(source_hash, corrupted.data(),
-                                                       corrupted.size(), &offset, &size));
-#else
-  // V8 cachedData stays raw engine bytes (CachedData self-validates);
-  // wrap/unwrap are pass-throughs and the hash is ignored.
-  EXPECT_EQ(wrapped, payload);
-  EXPECT_TRUE(edge_bytecode_cache::UnwrapVmCachedData(source_hash + 1, wrapped.data(),
-                                                      wrapped.size(), &offset, &size));
-#endif
-}
-
 TEST_F(Test7BytecodeCachePhase05, EncodeDecodeRoundTrip) {
   const auto payload = SamplePayload();
   const auto encoded =
@@ -237,6 +204,39 @@ TEST_F(Test7BytecodeCachePhase05, DecodeRejectsTruncatedAndCorruptedPayload) {
   // flipped payload byte passes container validation on both engines.
   EXPECT_TRUE(
       edge_bytecode_cache::DecodeSidecar(corrupted.data(), corrupted.size(), kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, &off, &len));
+}
+
+TEST_F(Test7BytecodeCachePhase05, DecodeRejectsLengthFieldOverflow) {
+  // A crafted header whose payload_len/tag_len fields would overflow the
+  // additive structural check must be rejected without reading out of bounds.
+  const auto payload = SamplePayload();
+  const auto base = edge_bytecode_cache::EncodeSidecar(
+      kTag, kSource, edge_bytecode_cache::kFlagCjsFunctionV1, payload.data(), payload.size());
+  size_t off = 0;
+  size_t len = 0;
+
+  auto put_u64 = [](std::vector<uint8_t>* buf, size_t pos, uint64_t value) {
+    for (int i = 0; i < 8; ++i) (*buf)[pos + i] = static_cast<uint8_t>(value >> (8 * i));
+  };
+  auto put_u32 = [](std::vector<uint8_t>* buf, size_t pos, uint32_t value) {
+    for (int i = 0; i < 4; ++i) (*buf)[pos + i] = static_cast<uint8_t>(value >> (8 * i));
+  };
+
+  // payload_len (offset 32) set so kHeaderSize + tag_len + payload_len wraps
+  // back to the real size; the additive check must still reject it.
+  auto bad_payload_len = base;
+  put_u64(&bad_payload_len, 32, ~static_cast<uint64_t>(0));
+  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(bad_payload_len.data(), bad_payload_len.size(),
+                                                  kTag, kSource,
+                                                  edge_bytecode_cache::kFlagCjsFunctionV1, &off, &len));
+
+  // tag_len (offset 40) larger than the buffer must reject before the tag
+  // memcmp reads out of bounds.
+  auto bad_tag_len = base;
+  put_u32(&bad_tag_len, 40, 0xFFFFFFFFu);
+  EXPECT_FALSE(edge_bytecode_cache::DecodeSidecar(bad_tag_len.data(), bad_tag_len.size(), kTag,
+                                                  kSource, edge_bytecode_cache::kFlagCjsFunctionV1,
+                                                  &off, &len));
 }
 
 TEST_F(Test7BytecodeCachePhase05, ShapeFlagsCrossRejected) {

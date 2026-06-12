@@ -77,21 +77,26 @@ bit 1 = ESM) and cross-shape consumption is rejected at validation.
 Engine notes:
 - V8 code caches are consumed **against the original source text**, so handles
   retain the text — giving every consumer automatic fallback.
-- QuickJS payloads are **self-validating**, mirroring V8's CachedData: the
-  provider writes a 20-byte `QJSB` header [filename XXH3-64, payload XXH3-64]
-  at serialize time and validates it at deserialize. The payload hash guards
-  corruption (`JS_ReadObject` is not hardened); the filename hash guards
-  relocation (QuickJS bytecode embeds the compile-time path/URL —
-  import.meta.url would silently go stale). A filename hash of 0 means
-  unenforced: `vm.SourceTextModule#createCachedData` writes 0 because Node
-  numbers vm module identifiers (`vm:module(N)`).
-- Neither engine validates SOURCE identity below the container on QuickJS:
-  that lives in Edge. Sidecar/builtins containers record the source hash;
-  user-facing vm cachedData buffers on QuickJS carry an Edge-owned `QJSC` +
-  XXH3-64(source) prefix (`edge_bytecode_cache::Wrap/UnwrapVmCachedData`),
-  validated and stripped before bytes reach the provider. On V8 both are
-  pass-throughs (CachedData validates natively; buffers stay Node-parity
-  raw).
+- QuickJS payloads are **fully self-validating**, mirroring everything V8's
+  CachedData checks natively: the provider writes a 40-byte `QJSB` header
+  `[magic, version, shape u8, reserved, source XXH3, params XXH3, filename
+  XXH3, payload XXH3]` at serialize time and rejects any mismatch at
+  deserialize. shape/source/params reject bytes compiled from a different
+  compile shape, a different source, or a different CJS parameter list (a
+  whole-script cache fed to `compileFunction`, or `params:['a']` consumed as
+  `['x']` — all of which V8 rejects too). The payload hash guards corruption
+  (`JS_ReadObject` is not hardened). The filename hash guards relocation
+  (QuickJS bytecode embeds the compile-time path/URL — `import.meta.url` would
+  silently go stale); a stored hash of 0 is unenforced, written by
+  `vm.SourceTextModule#createCachedData` because Node numbers vm module
+  identifiers (`vm:module(N)`).
+- Because the QJSB header covers source identity, **the NAPI providers
+  self-validate untrusted vm cachedData directly** — Edge hands user buffers
+  straight to `bytecode_deserialize` and trusts `rejected_out`. There is no
+  Edge-side cachedData wrapper on either engine (V8 CachedData validates
+  natively and stays Node-parity raw; QuickJS validates via QJSB).
+  Sidecar/builtins containers also record their own source hash, so their
+  payloads are double-checked but never wrapped.
 - QuickJS `JS_ReadObject` of module bytecode resolves import requests eagerly
   at read time; since this embedding links modules explicitly afterwards
   (`JS_SetModuleRequestModule`), `deserialize` installs a **stub module
@@ -215,11 +220,12 @@ Shipped 2026-06-11. Two independent wins:
   v0.8.2 single-header at `deps/xxhash/` and
   `napi/quickjs/src/internal/xxhash.h`; zstd's bundled xxhash hard-defines
   `XXH_NO_XXH3`, hence the copies). Ownership split: Edge owns the
-  engine-agnostic container (source identity + structure) and the vm
-  cachedData source-hash wrapper; the QuickJS provider owns its payload's
-  self-validation (`QJSB` header: filename + corruption hashes), mirroring
-  what V8's CachedData does internally. `kFormatVersion` is 4 — older
-  sidecars recompile once and rewrite.
+  engine-agnostic container (source identity + structure); the QuickJS
+  provider owns its payload's full self-validation (`QJSB` header: shape,
+  source, params, filename, and corruption hashes), mirroring what V8's
+  CachedData does internally — so there is no Edge-side cachedData wrapper on
+  either engine. `kFormatVersion` is 4 — older sidecars recompile once and
+  rewrite.
 - The payload hash is engine-conditional like the filename hash: V8 writes 0
   and skips the check (CachedData self-validates; `rejected` already falls
   back), QuickJS keeps it (its reader is not hardened).

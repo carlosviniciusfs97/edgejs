@@ -171,8 +171,12 @@ bool DecodeSidecar(const uint8_t* data,
   const uint64_t payload_len = ReadU64(data, 32);
   const uint64_t tag_len = ReadU32(data, 40);
 
-  // payload_len pins the file's structure: truncated or padded files reject.
-  if (size != kHeaderSize + tag_len + payload_len) return false;
+  // Bounds first: the tag/payload lengths come from untrusted file bytes, so
+  // validate the structure additively (never `kHeaderSize + tag_len +
+  // payload_len`, which can wrap past 2^64 and let an out-of-bounds tag/payload
+  // span through). `size >= kHeaderSize` is already established above.
+  if (tag_len > size - kHeaderSize) return false;
+  if (payload_len != size - kHeaderSize - tag_len) return false;
   if (tag_len != engine_tag.size() ||
       std::memcmp(data + kHeaderSize, engine_tag.data(), engine_tag.size()) != 0) {
     return false;
@@ -299,63 +303,6 @@ bool RemoveSidecar(const std::string& source_path) {
   const bool removed = std::filesystem::remove(sidecar_path, ec);
   if (removed) Trace("remove", sidecar_path);
   return removed && !ec;
-}
-
-namespace {
-// Layout (and on-disk compatibility) of the QuickJS vm cachedData prefix:
-// 4 magic bytes + XXH3-64(source) little-endian.
-constexpr char kVmPrefixMagic[4] = {'Q', 'J', 'S', 'C'};
-constexpr size_t kVmPrefixSize = 12;
-}  // namespace
-
-bool VmCachedDataNeedsWrapper() {
-#if defined(EDGE_NAPI_QUICKJS)
-  return true;
-#else
-  return false;
-#endif
-}
-
-std::vector<uint8_t> WrapVmCachedData(uint64_t source_hash,
-                                      const uint8_t* payload,
-                                      size_t payload_size) {
-  if (payload == nullptr) payload_size = 0;
-  if (!VmCachedDataNeedsWrapper()) {
-    return std::vector<uint8_t>(payload, payload + payload_size);
-  }
-  std::vector<uint8_t> out;
-  out.reserve(kVmPrefixSize + payload_size);
-  out.insert(out.end(), kVmPrefixMagic, kVmPrefixMagic + sizeof(kVmPrefixMagic));
-  for (int i = 0; i < 8; ++i) {
-    out.push_back(static_cast<uint8_t>(source_hash >> (8 * i)));
-  }
-  out.insert(out.end(), payload, payload + payload_size);
-  return out;
-}
-
-bool UnwrapVmCachedData(uint64_t expected_source_hash,
-                        const uint8_t* data,
-                        size_t size,
-                        size_t* payload_offset_out,
-                        size_t* payload_size_out) {
-  if (payload_offset_out == nullptr || payload_size_out == nullptr) return false;
-  *payload_offset_out = 0;
-  *payload_size_out = 0;
-  if (data == nullptr || size == 0) return false;
-  if (!VmCachedDataNeedsWrapper()) {
-    *payload_size_out = size;
-    return true;
-  }
-  if (size <= kVmPrefixSize) return false;
-  if (std::memcmp(data, kVmPrefixMagic, sizeof(kVmPrefixMagic)) != 0) return false;
-  uint64_t stored = 0;
-  for (int i = 0; i < 8; ++i) {
-    stored |= static_cast<uint64_t>(data[4 + i]) << (8 * i);
-  }
-  if (stored != expected_source_hash) return false;
-  *payload_offset_out = kVmPrefixSize;
-  *payload_size_out = size - kVmPrefixSize;
-  return true;
 }
 
 }  // namespace edge_bytecode_cache
