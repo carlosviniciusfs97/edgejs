@@ -22,6 +22,7 @@ benchmarks/results/**/*.json
 benchmarks/results/**/*.csv
 benchmarks/results/**/*.md
 benchmarks/results/baselines/**/*.txt
+benchmarks/workloads/bytecode-cache/gen/
 
 /AGENTS.md
 /claude.md

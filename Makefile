@@ -182,14 +182,20 @@ $(EDGE_BINARY):
 test: build test-only
 
 test-only:
-	NODE_TEST_RUNNER=$(EDGE_BINARY) ./test/nodejs_test_harness --category=node:buffer,node:console,node:dgram,node:diagnostics_channel,node:dns,node:events,node:http,node:https,node:os,node:path,node:punycode,node:querystring,node:stream,node:string_decoder,node:tty,node:url,node:zlib,node:crypto,node:domain,node:http2,node:tls,node:sys \
+	EDGE_BYTECODE_CACHE=0 NODE_TEST_RUNNER=$(EDGE_BINARY) ./test/nodejs_test_harness --category=node:buffer,node:console,node:dgram,node:diagnostics_channel,node:dns,node:events,node:http,node:https,node:os,node:path,node:punycode,node:querystring,node:stream,node:string_decoder,node:tty,node:url,node:zlib,node:crypto,node:domain,node:http2,node:tls,node:sys \
 	  --skip-tests=$(EDGE_NODE_TEST_SKIP_TESTS) \
 	  -j $(TEST_JOBS)
 
 test-quickjs-only:
-	NODE_TEST_RUNNER=$(BUILD_EDGE_QUICKJS_CLI_DIR)/edge ./test/nodejs_test_harness --category=node:buffer,node:console,node:dgram,node:diagnostics_channel,node:dns,node:events,node:http,node:https,node:os,node:path,node:punycode,node:querystring,node:stream,node:string_decoder,node:tty,node:url,node:zlib,node:crypto,node:domain,node:http2,node:tls,node:sys \
+	EDGE_BYTECODE_CACHE=0 NODE_TEST_RUNNER=$(BUILD_EDGE_QUICKJS_CLI_DIR)/edge ./test/nodejs_test_harness --category=node:buffer,node:console,node:dgram,node:diagnostics_channel,node:dns,node:events,node:http,node:https,node:os,node:path,node:punycode,node:querystring,node:stream,node:string_decoder,node:tty,node:url,node:zlib,node:crypto,node:domain,node:http2,node:tls,node:sys \
 	  --skip-tests=$(QUICKJS_SKIP_TESTS) \
 	  -j $(TEST_JOBS)
+
+test-bytecode-cache:
+	EDGE_BIN=$(EDGE_BINARY) ./scripts/test-bytecode-cache.sh
+
+test-bytecode-cache-quickjs:
+	EDGE_BIN=$(BUILD_EDGE_QUICKJS_CLI_DIR)/edge ./scripts/test-bytecode-cache.sh
 
 clean-edge-quickjs-cli:
 	rm -rf $(BUILD_EDGE_QUICKJS_CLI_DIR)

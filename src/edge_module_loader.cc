@@ -1,5 +1,6 @@
 #include "edge_module_loader.h"
 #include "edge_buffer.h"
+#include "edge_bytecode_cache.h"
 #include "edge_cares_wrap.h"
 #include "edge_crypto.h"
 #include "edge_env_loop.h"
@@ -3575,20 +3576,83 @@ static napi_value ContextifyCompileFunctionForCJSLoaderCallback(napi_env env, na
   napi_value host_defined_option_id = GetPerIsolateSymbolByName(env, "vm_dynamic_import_default_internal");
   if (host_defined_option_id == nullptr) host_defined_option_id = undefined;
 
+  // Bytecode sidecar cache: consume <filename>.v8b/.qjsb when it matches the
+  // exact source about to be compiled, otherwise produce it after compiling
+  // (write-on-first-run). Only real files participate; [eval]/[stdin]/REPL
+  // sources have no sidecar identity.
+  napi_value cached_data_value = undefined;
+  bool consumed_sidecar = false;
+  bool produce_sidecar = false;
+  std::string sidecar_source_path;
+  std::string sidecar_source_utf8;
+  if (edge_bytecode_cache::Enabled()) {
+    std::string filename_utf8 = ValueToUtf8(env, filename);
+    fs::path filename_path(filename_utf8);
+    if (filename_path.is_absolute() && PathExistsRegularFile(filename_path)) {
+      sidecar_source_path = std::move(filename_utf8);
+      sidecar_source_utf8 = ValueToUtf8(env, code);
+      std::vector<uint8_t> payload;
+      if (edge_bytecode_cache::ReadSidecar(sidecar_source_path, sidecar_source_utf8, &payload)) {
+        napi_value arraybuffer = nullptr;
+        void* arraybuffer_data = nullptr;
+        if (napi_create_arraybuffer(env, payload.size(), &arraybuffer_data, &arraybuffer) == napi_ok &&
+            arraybuffer_data != nullptr) {
+          std::memcpy(arraybuffer_data, payload.data(), payload.size());
+          napi_value payload_view = nullptr;
+          if (napi_create_typedarray(env, napi_uint8_array, payload.size(), arraybuffer, 0, &payload_view) ==
+                  napi_ok &&
+              payload_view != nullptr) {
+            cached_data_value = payload_view;
+            consumed_sidecar = true;
+          }
+        }
+      } else {
+        produce_sidecar = true;
+      }
+    }
+  }
+
   napi_value compile_result = nullptr;
   napi_status status = unofficial_napi_contextify_compile_function(env,
                                                                    code,
                                                                    filename,
                                                                    0,
                                                                    0,
-                                                                   undefined,
-                                                                   false,
+                                                                   cached_data_value,
+                                                                   produce_sidecar,
                                                                    undefined,
                                                                    undefined,
                                                                    params,
                                                                    host_defined_option_id,
                                                                    &compile_result);
   if (status == napi_ok && compile_result != nullptr) {
+    if (consumed_sidecar) {
+      napi_value rejected_value = GetNamedPropertyOrUndefined(env, compile_result, "cachedDataRejected");
+      bool rejected = false;
+      if (rejected_value != nullptr && napi_get_value_bool(env, rejected_value, &rejected) == napi_ok &&
+          rejected) {
+        // Engine refused bytecode our header considered valid (e.g. engine
+        // flag drift); drop it so the next run rewrites instead of re-rejecting.
+        edge_bytecode_cache::RemoveSidecar(sidecar_source_path);
+      }
+    } else if (produce_sidecar) {
+      napi_value produced_value = GetNamedPropertyOrUndefined(env, compile_result, "cachedData");
+      bool is_typedarray = false;
+      if (produced_value != nullptr && napi_is_typedarray(env, produced_value, &is_typedarray) == napi_ok &&
+          is_typedarray) {
+        napi_typedarray_type type = napi_uint8_array;
+        size_t length = 0;
+        void* data = nullptr;
+        if (napi_get_typedarray_info(env, produced_value, &type, &length, &data, nullptr, nullptr) ==
+                napi_ok &&
+            type == napi_uint8_array && data != nullptr && length > 0) {
+          edge_bytecode_cache::WriteSidecar(sidecar_source_path,
+                                            sidecar_source_utf8,
+                                            static_cast<const uint8_t*>(data),
+                                            length);
+        }
+      }
+    }
     return CreateContextifyCjsLoaderResult(env, compile_result, false);
   }
   if (status != napi_pending_exception || !should_detect_module) {
