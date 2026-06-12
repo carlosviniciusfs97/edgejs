@@ -10,15 +10,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
+#include <string>
 #include <system_error>
 
-#if defined(_WIN32)
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
+#include "edge_bytecode_io.h"
 
 namespace edge_bytecode_cache {
 namespace {
@@ -47,33 +42,10 @@ void Trace(const char* event, const std::string& path, const char* detail = null
   }
 }
 
-void WriteU32(std::vector<uint8_t>* out, size_t offset, uint32_t value) {
-  (*out)[offset + 0] = static_cast<uint8_t>(value);
-  (*out)[offset + 1] = static_cast<uint8_t>(value >> 8);
-  (*out)[offset + 2] = static_cast<uint8_t>(value >> 16);
-  (*out)[offset + 3] = static_cast<uint8_t>(value >> 24);
-}
-
-void WriteU64(std::vector<uint8_t>* out, size_t offset, uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    (*out)[offset + i] = static_cast<uint8_t>(value >> (8 * i));
-  }
-}
-
-uint32_t ReadU32(const uint8_t* data, size_t offset) {
-  return static_cast<uint32_t>(data[offset]) |
-         (static_cast<uint32_t>(data[offset + 1]) << 8) |
-         (static_cast<uint32_t>(data[offset + 2]) << 16) |
-         (static_cast<uint32_t>(data[offset + 3]) << 24);
-}
-
-uint64_t ReadU64(const uint8_t* data, size_t offset) {
-  uint64_t value = 0;
-  for (int i = 0; i < 8; ++i) {
-    value |= static_cast<uint64_t>(data[offset + i]) << (8 * i);
-  }
-  return value;
-}
+using io::ReadU32;
+using io::ReadU64;
+using io::WriteU32;
+using io::WriteU64;
 
 }  // namespace
 
@@ -203,27 +175,11 @@ bool ReadSidecar(const std::string& source_path,
 
   const auto started = std::chrono::steady_clock::now();
   const std::string sidecar_path = SidecarPathForSource(source_path);
-  std::FILE* in = std::fopen(sidecar_path.c_str(), "rb");
-  if (in == nullptr) return false;
 
-  // One sized read; validation happens in place over the same buffer.
-  if (std::fseek(in, 0, SEEK_END) != 0) {
-    std::fclose(in);
-    Trace("miss", sidecar_path, "read-error");
-    return false;
-  }
-  const long file_size = std::ftell(in);
-  if (file_size <= 0 || std::fseek(in, 0, SEEK_SET) != 0) {
-    std::fclose(in);
-    Trace("miss", sidecar_path, "read-error");
-    return false;
-  }
-  out->file_bytes.resize(static_cast<size_t>(file_size));
-  const size_t read = std::fread(out->file_bytes.data(), 1, out->file_bytes.size(), in);
-  std::fclose(in);
-  if (read != out->file_bytes.size()) {
-    out->file_bytes.clear();
-    Trace("miss", sidecar_path, "read-error");
+  // One sized read; validation happens in place over the same buffer. A
+  // missing file is the common no-cache case, not a read error.
+  if (!io::ReadFileFully(sidecar_path, &out->file_bytes)) {
+    if (std::filesystem::exists(sidecar_path)) Trace("miss", sidecar_path, "read-error");
     return false;
   }
 
@@ -257,41 +213,9 @@ bool WriteSidecar(const std::string& source_path,
   const std::vector<uint8_t> contents =
       EncodeSidecar(EngineCacheTag(), source_utf8, flags, payload, payload_size);
 
-#if defined(_WIN32)
-  const int pid = _getpid();
-#else
-  const int pid = static_cast<int>(getpid());
-#endif
-  const std::string tmp_path = sidecar_path + "." + std::to_string(pid) + ".tmp";
-
-  std::error_code ec;
-  {
-    std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-      Trace("write-failed", sidecar_path, "open");
-      return false;
-    }
-    out.write(reinterpret_cast<const char*>(contents.data()),
-              static_cast<std::streamsize>(contents.size()));
-    out.flush();
-    if (!out.good()) {
-      out.close();
-      std::filesystem::remove(tmp_path, ec);
-      Trace("write-failed", sidecar_path, "write");
-      return false;
-    }
-  }
-
-  std::filesystem::rename(tmp_path, sidecar_path, ec);
-  if (ec) {
-    // Windows rename does not replace an existing destination.
-    std::filesystem::remove(sidecar_path, ec);
-    std::filesystem::rename(tmp_path, sidecar_path, ec);
-    if (ec) {
-      std::filesystem::remove(tmp_path, ec);
-      Trace("write-failed", sidecar_path, "rename");
-      return false;
-    }
+  if (!io::AtomicWriteFile(sidecar_path, contents.data(), contents.size())) {
+    Trace("write-failed", sidecar_path);
+    return false;
   }
   Trace("write", sidecar_path);
   return true;
