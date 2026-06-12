@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -144,13 +145,14 @@ std::string SidecarPathForSource(const std::string& source_path) {
 
 std::vector<uint8_t> EncodeSidecar(std::string_view engine_tag,
                                    std::string_view source_utf8,
+                                   uint32_t flags,
                                    uint64_t filename_hash,
                                    const uint8_t* payload,
                                    size_t payload_size) {
   std::vector<uint8_t> out(kHeaderSize + engine_tag.size() + payload_size);
   std::memcpy(out.data(), kMagic, sizeof(kMagic));
   WriteU32(&out, 8, kFormatVersion);
-  WriteU32(&out, 12, kFlagCjsFunctionV1);
+  WriteU32(&out, 12, flags);
   WriteU32(&out, 16, static_cast<uint32_t>(engine_tag.size()));
   WriteU64(&out, 20, source_utf8.size());
   WriteU64(&out, 28, Fnv1a64(source_utf8.data(), source_utf8.size()));
@@ -169,6 +171,7 @@ bool DecodeSidecar(const uint8_t* data,
                    size_t size,
                    std::string_view engine_tag,
                    std::string_view source_utf8,
+                   uint32_t expected_flags,
                    uint64_t expected_filename_hash,
                    std::vector<uint8_t>* payload_out) {
   if (payload_out == nullptr) return false;
@@ -176,7 +179,7 @@ bool DecodeSidecar(const uint8_t* data,
   if (data == nullptr || size < kHeaderSize) return false;
   if (std::memcmp(data, kMagic, sizeof(kMagic)) != 0) return false;
   if (ReadU32(data, 8) != kFormatVersion) return false;
-  if (ReadU32(data, 12) != kFlagCjsFunctionV1) return false;
+  if (ReadU32(data, 12) != expected_flags) return false;
 
   const uint64_t tag_len = ReadU32(data, 16);
   const uint64_t source_len = ReadU64(data, 20);
@@ -205,11 +208,13 @@ bool DecodeSidecar(const uint8_t* data,
 
 bool ReadSidecar(const std::string& source_path,
                  std::string_view source_utf8,
+                 uint32_t expected_flags,
                  std::vector<uint8_t>* payload_out) {
   if (payload_out == nullptr) return false;
   payload_out->clear();
   if (!Enabled()) return false;
 
+  const auto started = std::chrono::steady_clock::now();
   const std::string sidecar_path = SidecarPathForSource(source_path);
   std::ifstream in(sidecar_path, std::ios::binary);
   if (!in.is_open()) return false;
@@ -221,24 +226,33 @@ bool ReadSidecar(const std::string& source_path,
     return false;
   }
   if (!DecodeSidecar(contents.data(), contents.size(), EngineCacheTag(),
-                     source_utf8, FilenameHashForSource(source_path),
-                     payload_out)) {
+                     source_utf8, expected_flags,
+                     FilenameHashForSource(source_path), payload_out)) {
     Trace("miss", sidecar_path, "invalid-or-stale");
     return false;
   }
-  Trace("hit", sidecar_path);
+  if (TraceEnabled()) {
+    const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - started)
+                            .count();
+    char detail[64];
+    std::snprintf(detail, sizeof(detail), "read+hash=%lldus payload=%zub",
+                  static_cast<long long>(micros), payload_out->size());
+    Trace("hit", sidecar_path, detail);
+  }
   return true;
 }
 
 bool WriteSidecar(const std::string& source_path,
                   std::string_view source_utf8,
+                  uint32_t flags,
                   const uint8_t* payload,
                   size_t payload_size) {
   if (!Enabled() || payload == nullptr || payload_size == 0) return false;
 
   const std::string sidecar_path = SidecarPathForSource(source_path);
   const std::vector<uint8_t> contents =
-      EncodeSidecar(EngineCacheTag(), source_utf8,
+      EncodeSidecar(EngineCacheTag(), source_utf8, flags,
                     FilenameHashForSource(source_path), payload, payload_size);
 
 #if defined(_WIN32)

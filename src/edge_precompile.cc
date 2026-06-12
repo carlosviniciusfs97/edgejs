@@ -10,6 +10,7 @@
 #include <system_error>
 
 #include "edge_bytecode_cache.h"
+#include "edge_url.h"
 #include "simdjson/simdjson.h"
 #include "unofficial_napi.h"
 
@@ -122,7 +123,23 @@ enum class FileResult {
   kFailed,
 };
 
-FileResult PrecompileFile(napi_env env, const fs::path& file_path, std::string* detail_out) {
+enum class FileShape {
+  kCjs,
+  kEsm,
+};
+
+struct PrecompileEntry {
+  fs::path path;
+  FileShape shape = FileShape::kCjs;
+
+  bool operator<(const PrecompileEntry& other) const { return path < other.path; }
+  bool operator==(const PrecompileEntry& other) const { return path == other.path; }
+};
+
+FileResult PrecompileFile(napi_env env,
+                          const fs::path& file_path,
+                          FileShape shape,
+                          std::string* detail_out) {
   std::string source;
   if (!ReadFileUtf8(file_path, &source)) {
     *detail_out = "failed to read file";
@@ -140,85 +157,95 @@ FileResult PrecompileFile(napi_env env, const fs::path& file_path, std::string* 
     ~ScopeCloser() { napi_close_handle_scope(env, scope); }
   } scope_closer{env, scope};
 
-  const std::string filename_utf8 = file_path.string();
+  const std::string path_utf8 = file_path.string();
+  // ESM modules compile under their file:// URL — the exact name the runtime
+  // ModuleWrap hook compiles with (and that QuickJS bakes into the bytecode).
+  const std::string filename_utf8 =
+      shape == FileShape::kEsm ? edge_url::PathToFileURLString(path_utf8) : path_utf8;
+  if (filename_utf8.empty()) {
+    *detail_out = "failed to derive module URL";
+    return FileResult::kFailed;
+  }
+
   napi_value code = nullptr;
   napi_value filename = nullptr;
-  napi_value undefined = nullptr;
   if (napi_create_string_utf8(env, source.c_str(), source.size(), &code) != napi_ok ||
-      napi_create_string_utf8(env, filename_utf8.c_str(), filename_utf8.size(), &filename) != napi_ok ||
-      napi_get_undefined(env, &undefined) != napi_ok) {
+      napi_create_string_utf8(env, filename_utf8.c_str(), filename_utf8.size(), &filename) != napi_ok) {
     *detail_out = "failed to create compile arguments";
     return FileResult::kFailed;
   }
 
-  // Same parameter list the CJS loader compiles with; the sidecar must match
-  // the runtime compile shape exactly.
-  static constexpr const char* kParams[] = {"exports", "require", "module", "__filename", "__dirname"};
   napi_value params = nullptr;
-  if (napi_create_array_with_length(env, 5, &params) != napi_ok) {
-    *detail_out = "failed to create compile arguments";
-    return FileResult::kFailed;
-  }
-  for (uint32_t i = 0; i < 5; ++i) {
-    napi_value param = nullptr;
-    if (napi_create_string_utf8(env, kParams[i], NAPI_AUTO_LENGTH, &param) != napi_ok ||
-        napi_set_element(env, params, i, param) != napi_ok) {
+  if (shape == FileShape::kCjs) {
+    // Same parameter list the CJS loader compiles with; the sidecar must match
+    // the runtime compile shape exactly.
+    static constexpr const char* kParams[] = {"exports", "require", "module", "__filename", "__dirname"};
+    if (napi_create_array_with_length(env, 5, &params) != napi_ok) {
       *detail_out = "failed to create compile arguments";
       return FileResult::kFailed;
     }
+    for (uint32_t i = 0; i < 5; ++i) {
+      napi_value param = nullptr;
+      if (napi_create_string_utf8(env, kParams[i], NAPI_AUTO_LENGTH, &param) != napi_ok ||
+          napi_set_element(env, params, i, param) != napi_ok) {
+        *detail_out = "failed to create compile arguments";
+        return FileResult::kFailed;
+      }
+    }
   }
 
-  napi_value compile_result = nullptr;
-  const napi_status status = unofficial_napi_contextify_compile_function(env,
-                                                                         code,
-                                                                         filename,
-                                                                         0,
-                                                                         0,
-                                                                         undefined,
-                                                                         true,
-                                                                         undefined,
-                                                                         undefined,
-                                                                         params,
-                                                                         undefined,
-                                                                         &compile_result);
-  if (status != napi_ok || compile_result == nullptr) {
+  const int32_t bytecode_shape = shape == FileShape::kEsm
+                                     ? unofficial_napi_bytecode_shape_module
+                                     : unofficial_napi_bytecode_shape_cjs_function;
+  void* bytecode = nullptr;
+  bool can_parse_as_module = false;
+  const napi_status status = unofficial_napi_bytecode_compile(env,
+                                                              code,
+                                                              filename,
+                                                              bytecode_shape,
+                                                              params,
+                                                              nullptr,
+                                                              0,
+                                                              0,
+                                                              &bytecode,
+                                                              &can_parse_as_module);
+  if (status != napi_ok || bytecode == nullptr) {
     const std::string compile_error = DescribePendingException(env);
-    // A .js file with module syntax in a commonjs scope is loadable at
-    // runtime through ESM detection; that is not a precompile failure.
-    bool can_parse_as_esm = false;
-    if (unofficial_napi_contextify_contains_module_syntax(
-            env, code, filename, undefined, true, &can_parse_as_esm) == napi_ok &&
-        can_parse_as_esm) {
-      *detail_out = "ES module syntax (sidecars cover CommonJS only)";
-      return FileResult::kSkipped;
-    }
     bool pending = false;
     napi_value ignored = nullptr;
     if (napi_is_exception_pending(env, &pending) == napi_ok && pending) {
       (void)napi_get_and_clear_last_exception(env, &ignored);
     }
+    if (shape == FileShape::kCjs && can_parse_as_module) {
+      // A .js file with module syntax in a commonjs scope loads as ESM at
+      // runtime (detect-module); precompile it with the module shape instead.
+      return PrecompileFile(env, file_path, FileShape::kEsm, detail_out);
+    }
     *detail_out = compile_error;
     return FileResult::kFailed;
   }
 
-  napi_value produced = nullptr;
-  bool is_typedarray = false;
-  if (napi_get_named_property(env, compile_result, "cachedData", &produced) != napi_ok ||
-      produced == nullptr ||
-      napi_is_typedarray(env, produced, &is_typedarray) != napi_ok || !is_typedarray) {
+  napi_value cache_buffer = nullptr;
+  const bool serialized =
+      unofficial_napi_bytecode_serialize(env, bytecode, &cache_buffer) == napi_ok && cache_buffer != nullptr;
+  (void)unofficial_napi_bytecode_release(env, bytecode);
+  if (!serialized) {
     *detail_out = "engine produced no cached data";
     return FileResult::kFailed;
   }
+
   napi_typedarray_type type = napi_uint8_array;
   size_t length = 0;
   void* data = nullptr;
-  if (napi_get_typedarray_info(env, produced, &type, &length, &data, nullptr, nullptr) != napi_ok ||
+  if (napi_get_typedarray_info(env, cache_buffer, &type, &length, &data, nullptr, nullptr) != napi_ok ||
       type != napi_uint8_array || data == nullptr || length == 0) {
     *detail_out = "engine produced no cached data";
     return FileResult::kFailed;
   }
 
-  if (!edge_bytecode_cache::WriteSidecar(filename_utf8, source,
+  const uint32_t sidecar_flags = shape == FileShape::kEsm ? edge_bytecode_cache::kFlagEsmModuleV1
+                                                          : edge_bytecode_cache::kFlagCjsFunctionV1;
+  if (!edge_bytecode_cache::WriteSidecar(path_utf8, source, sidecar_flags,
                                          static_cast<const uint8_t*>(data), length)) {
     *detail_out = "failed to write sidecar (read-only or inaccessible location?)";
     return FileResult::kFailed;
@@ -228,8 +255,7 @@ FileResult PrecompileFile(napi_env env, const fs::path& file_path, std::string* 
 
 void CollectFromDirectory(const fs::path& dir,
                           PackageTypeResolver* resolver,
-                          std::vector<fs::path>* out,
-                          size_t* skipped) {
+                          std::vector<PrecompileEntry>* out) {
   std::error_code ec;
   fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec);
   if (ec) return;
@@ -239,13 +265,11 @@ void CollectFromDirectory(const fs::path& dir,
     const fs::path& path = entry.path();
     const std::string ext = path.extension().string();
     if (ext == ".cjs") {
-      out->push_back(path);
+      out->push_back({path, FileShape::kCjs});
+    } else if (ext == ".mjs") {
+      out->push_back({path, FileShape::kEsm});
     } else if (ext == ".js") {
-      if (resolver->IsModuleScope(path)) {
-        ++*skipped;
-      } else {
-        out->push_back(path);
-      }
+      out->push_back({path, resolver->IsModuleScope(path) ? FileShape::kEsm : FileShape::kCjs});
     }
   }
 }
@@ -262,21 +286,25 @@ int RunPrecompile(napi_env env, const std::vector<std::string>& paths, std::stri
   }
 
   PackageTypeResolver resolver;
-  std::vector<fs::path> files;
+  std::vector<PrecompileEntry> files;
   size_t skipped = 0;
   for (const auto& raw_path : paths) {
     const fs::path path(raw_path);
     std::error_code ec;
     if (fs::is_directory(path, ec) && !ec) {
-      CollectFromDirectory(path, &resolver, &files, &skipped);
+      CollectFromDirectory(path, &resolver, &files);
       continue;
     }
     if (fs::is_regular_file(path, ec) && !ec) {
       const std::string ext = path.extension().string();
-      if (ext == ".cjs" || (ext == ".js" && !resolver.IsModuleScope(path))) {
-        files.push_back(path);
+      if (ext == ".cjs") {
+        files.push_back({path, FileShape::kCjs});
+      } else if (ext == ".mjs") {
+        files.push_back({path, FileShape::kEsm});
+      } else if (ext == ".js") {
+        files.push_back({path, resolver.IsModuleScope(path) ? FileShape::kEsm : FileShape::kCjs});
       } else {
-        std::fprintf(stderr, "edge --precompile: skipping %s (not a CommonJS .js/.cjs file)\n",
+        std::fprintf(stderr, "edge --precompile: skipping %s (not a .js/.cjs/.mjs file)\n",
                      path.string().c_str());
         ++skipped;
       }
@@ -294,21 +322,21 @@ int RunPrecompile(napi_env env, const std::vector<std::string>& paths, std::stri
   size_t failed = 0;
   for (const auto& file : files) {
     std::error_code abs_ec;
-    fs::path absolute = fs::absolute(file, abs_ec);
-    if (abs_ec) absolute = file;
+    fs::path absolute = fs::absolute(file.path, abs_ec);
+    if (abs_ec) absolute = file.path;
     std::string detail;
-    switch (PrecompileFile(env, absolute.lexically_normal(), &detail)) {
+    switch (PrecompileFile(env, absolute.lexically_normal(), file.shape, &detail)) {
       case FileResult::kWritten:
         ++written;
         break;
       case FileResult::kSkipped:
         std::fprintf(stderr, "edge --precompile: skipping %s: %s\n",
-                     file.string().c_str(), detail.c_str());
+                     file.path.string().c_str(), detail.c_str());
         ++skipped;
         break;
       case FileResult::kFailed:
         std::fprintf(stderr, "edge --precompile: error in %s: %s\n",
-                     file.string().c_str(), detail.c_str());
+                     file.path.string().c_str(), detail.c_str());
         ++failed;
         break;
     }

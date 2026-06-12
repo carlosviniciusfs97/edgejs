@@ -1,12 +1,13 @@
 #!/usr/bin/env node
-// Generates a deterministic synthetic CJS app used by bench-bytecode-cache.sh:
+// Generates deterministic synthetic apps used by bench-bytecode-cache.sh:
 // many small modules plus one large vendor bundle, so engine parse/compile
 // time dominates startup and the bytecode-cache effect is measurable.
+// Emits a CJS app under gen/ and an equivalent ESM app under gen-esm/.
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const OUT_DIR = join(dirname(fileURLToPath(import.meta.url)), 'workloads', 'bytecode-cache', 'gen');
+const BASE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'workloads', 'bytecode-cache');
 const MODULE_COUNT = 150;
 const VENDOR_FUNCTIONS = 2600; // ~1.5 MB of source
 
@@ -23,7 +24,7 @@ function mulberry32(seed) {
   };
 }
 
-const rand = mulberry32(0xedbe11);
+let rand = mulberry32(0xedbe11);
 
 function pick(items) {
   return items[Math.floor(rand() * items.length)];
@@ -52,8 +53,8 @@ function makeFunction(name) {
   return lines.join('\n');
 }
 
-function generateVendor() {
-  const parts = ["'use strict';", ''];
+function generateVendor(esm) {
+  const parts = esm ? [] : ["'use strict';", ''];
   const names = [];
   for (let i = 0; i < VENDOR_FUNCTIONS; i++) {
     const name = `vendorFn${i}`;
@@ -61,22 +62,28 @@ function generateVendor() {
     parts.push(makeFunction(name));
     parts.push('');
   }
-  parts.push('module.exports = {');
-  parts.push(`  size: ${names.length},`);
-  parts.push('  run(seed) {');
+  if (esm) {
+    parts.push(`export const size = ${names.length};`);
+    parts.push('export function run(seed) {');
+  } else {
+    parts.push('module.exports = {');
+    parts.push(`  size: ${names.length},`);
+    parts.push('  run(seed) {');
+  }
   parts.push('    let acc = seed | 0;');
   // Touch a sample of functions so lazy compilation engines do some real work.
   for (let i = 0; i < VENDOR_FUNCTIONS; i += 50) {
     parts.push(`    acc = vendorFn${i}(acc, ${i});`);
   }
   parts.push('    return acc;');
-  parts.push('  },');
-  parts.push('};');
+  parts.push(esm ? '}' : '  },');
+  if (!esm) parts.push('};');
   return parts.join('\n');
 }
 
-function generateModule(index) {
-  const parts = ["'use strict';", ''];
+function generateModule(index, esm) {
+  const ext = esm ? 'mjs' : 'js';
+  const parts = esm ? [] : ["'use strict';", ''];
   const deps = [];
   for (let d = 1; d <= 3; d++) {
     const target = index - d * (1 + Math.floor(rand() * 4));
@@ -84,7 +91,8 @@ function generateModule(index) {
   }
   const uniqueDeps = [...new Set(deps)];
   for (const dep of uniqueDeps) {
-    parts.push(`const dep${dep} = require('./mod_${String(dep).padStart(3, '0')}.js');`);
+    const spec = `./mod_${String(dep).padStart(3, '0')}.${ext}`;
+    parts.push(esm ? `import * as dep${dep} from '${spec}';` : `const dep${dep} = require('${spec}');`);
   }
   parts.push('');
   const fnCount = 8 + Math.floor(rand() * 5);
@@ -95,8 +103,12 @@ function generateModule(index) {
   // Memoized: the dep graph is a DAG and compute() must walk it once, not
   // exponentially.
   parts.push('let cachedResult = null;');
-  parts.push('module.exports = {');
-  parts.push('  compute(seed) {');
+  if (esm) {
+    parts.push('export function compute(seed) {');
+  } else {
+    parts.push('module.exports = {');
+    parts.push('  compute(seed) {');
+  }
   parts.push('    if (cachedResult !== null) return cachedResult;');
   parts.push('    let acc = seed | 0;');
   for (let f = 0; f < fnCount; f++) {
@@ -107,38 +119,58 @@ function generateModule(index) {
   }
   parts.push('    cachedResult = acc;');
   parts.push('    return acc;');
-  parts.push('  },');
-  parts.push('};');
+  if (esm) {
+    parts.push('}');
+  } else {
+    parts.push('  },');
+    parts.push('};');
+  }
   return parts.join('\n');
 }
 
-rmSync(OUT_DIR, { recursive: true, force: true });
-mkdirSync(OUT_DIR, { recursive: true });
+function generateApp(outDir, esm) {
+  // Re-seed per app so both variants carry identical function bodies.
+  rand = mulberry32(0xedbe11);
+  const ext = esm ? 'mjs' : 'js';
+  rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
 
-let totalBytes = 0;
-const vendor = generateVendor();
-writeFileSync(join(OUT_DIR, 'vendor.js'), vendor);
-totalBytes += vendor.length;
+  let totalBytes = 0;
+  const vendor = generateVendor(esm);
+  writeFileSync(join(outDir, `vendor.${ext}`), vendor);
+  totalBytes += vendor.length;
 
-for (let i = 0; i < MODULE_COUNT; i++) {
-  const source = generateModule(i);
-  writeFileSync(join(OUT_DIR, `mod_${String(i).padStart(3, '0')}.js`), source);
-  totalBytes += source.length;
+  for (let i = 0; i < MODULE_COUNT; i++) {
+    const source = generateModule(i, esm);
+    writeFileSync(join(outDir, `mod_${String(i).padStart(3, '0')}.${ext}`), source);
+    totalBytes += source.length;
+  }
+
+  const mainLines = [];
+  if (esm) {
+    mainLines.push(`import * as vendor from './vendor.${ext}';`);
+    for (let i = 0; i < MODULE_COUNT; i++) {
+      mainLines.push(`import * as mod${i} from './mod_${String(i).padStart(3, '0')}.${ext}';`);
+    }
+  } else {
+    mainLines.push("'use strict';", `const vendor = require('./vendor.${ext}');`);
+    for (let i = 0; i < MODULE_COUNT; i++) {
+      mainLines.push(`const mod${i} = require('./mod_${String(i).padStart(3, '0')}.${ext}');`);
+    }
+  }
+  mainLines.push('let acc = vendor.run(1);');
+  for (let i = 0; i < MODULE_COUNT; i++) {
+    mainLines.push(`acc = (acc + mod${i}.compute(acc)) & 0x7fffffff;`);
+  }
+  mainLines.push("console.log('checksum:' + acc);");
+  const main = mainLines.join('\n');
+  writeFileSync(join(outDir, `main.${ext}`), main);
+  totalBytes += main.length;
+
+  console.log(
+    `generated ${MODULE_COUNT + 2} ${esm ? 'ESM' : 'CJS'} files, ${(totalBytes / 1024 / 1024).toFixed(2)} MB at ${outDir}`,
+  );
 }
 
-const mainLines = ["'use strict';", "const vendor = require('./vendor.js');"];
-for (let i = 0; i < MODULE_COUNT; i++) {
-  mainLines.push(`const mod${i} = require('./mod_${String(i).padStart(3, '0')}.js');`);
-}
-mainLines.push('let acc = vendor.run(1);');
-for (let i = 0; i < MODULE_COUNT; i++) {
-  mainLines.push(`acc = (acc + mod${i}.compute(acc)) & 0x7fffffff;`);
-}
-mainLines.push("console.log('checksum:' + acc);");
-const main = mainLines.join('\n');
-writeFileSync(join(OUT_DIR, 'main.js'), main);
-totalBytes += main.length;
-
-console.log(
-  `generated ${MODULE_COUNT + 2} files, ${(totalBytes / 1024 / 1024).toFixed(2)} MB at ${OUT_DIR}`,
-);
+generateApp(join(BASE_DIR, 'gen'), false);
+generateApp(join(BASE_DIR, 'gen-esm'), true);

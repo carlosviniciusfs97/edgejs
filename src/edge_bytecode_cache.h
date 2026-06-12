@@ -17,9 +17,13 @@ namespace edge_bytecode_cache {
 // file change shape (CJS wrapper text, parameter list, shebang handling, ...).
 constexpr uint32_t kFormatVersion = 1;
 
-// flags bit 0: payload was produced by the CJS function-compile path with
-// params (exports, require, module, __filename, __dirname).
+// Compile shape of the payload; a sidecar is only consumed by the exact shape
+// that produced it.
+// bit 0: CJS function-compile with params (exports, require, module,
+//        __filename, __dirname).
 constexpr uint32_t kFlagCjsFunctionV1 = 1u << 0;
+// bit 1: ES module compile (ModuleWrap / module shape).
+constexpr uint32_t kFlagEsmModuleV1 = 1u << 1;
 
 // Suffix appended to the full source filename. Empty when the active NAPI
 // provider has no bytecode-cache support.
@@ -42,10 +46,11 @@ bool Enabled();
 std::string SidecarPathForSource(const std::string& source_path);
 
 // Reads <source_path><suffix> and validates it against the exact source text
-// about to be compiled. False (and empty payload) on any mismatch; never
-// throws.
+// about to be compiled and the expected compile shape. False (and empty
+// payload) on any mismatch; never throws.
 bool ReadSidecar(const std::string& source_path,
                  std::string_view source_utf8,
+                 uint32_t expected_flags,
                  std::vector<uint8_t>* payload_out);
 
 // Atomically writes the sidecar next to the source (temp file + rename).
@@ -53,6 +58,7 @@ bool ReadSidecar(const std::string& source_path,
 // false, never throws.
 bool WriteSidecar(const std::string& source_path,
                   std::string_view source_utf8,
+                  uint32_t flags,
                   const uint8_t* payload,
                   size_t payload_size);
 
@@ -61,6 +67,7 @@ bool RemoveSidecar(const std::string& source_path);
 // Serialization helpers exposed for tests.
 std::vector<uint8_t> EncodeSidecar(std::string_view engine_tag,
                                    std::string_view source_utf8,
+                                   uint32_t flags,
                                    uint64_t filename_hash,
                                    const uint8_t* payload,
                                    size_t payload_size);
@@ -68,6 +75,7 @@ bool DecodeSidecar(const uint8_t* data,
                    size_t size,
                    std::string_view engine_tag,
                    std::string_view source_utf8,
+                   uint32_t expected_flags,
                    uint64_t expected_filename_hash,
                    std::vector<uint8_t>* payload_out);
 

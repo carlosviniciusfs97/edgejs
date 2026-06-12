@@ -166,8 +166,156 @@ echo '{ "type": "module" }' > "$DIR/package.json"
 echo 'export const x = 1;' > "$DIR/esm.js"
 echo 'module.exports = 1;' > "$DIR/legacy.cjs"
 "$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1 || fail "precompile exited non-zero"
-[ ! -f "$DIR/esm.js$SUFFIX" ] || fail ".js in type=module scope must be skipped"
+[ -f "$DIR/esm.js$SUFFIX" ] || fail ".js in type=module scope must get an ESM-shape sidecar"
 [ -f "$DIR/legacy.cjs$SUFFIX" ] || fail ".cjs must be precompiled regardless of scope"
+pass
+
+# --- ESM sidecars -----------------------------------------------------------------
+begin "esm write-on-first-run then consume"
+DIR="$WORKDIR/esm-first-run"
+mkdir -p "$DIR"
+cat > "$DIR/lib.mjs" <<'EOF'
+export const value = 21;
+EOF
+cat > "$DIR/main.mjs" <<'EOF'
+import { value } from './lib.mjs';
+console.log(value * 2);
+EOF
+out1="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/main.mjs" 2>"$WORKDIR/etrace1.txt")"
+[ "$out1" = "42" ] || fail "first run output: $out1"
+grep -q "write $DIR/main.mjs$SUFFIX" "$WORKDIR/etrace1.txt" || fail "first run did not write esm sidecar"
+out2="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/main.mjs" 2>"$WORKDIR/etrace2.txt")"
+[ "$out2" = "42" ] || fail "second run output: $out2"
+grep -q "hit $DIR/main.mjs$SUFFIX" "$WORKDIR/etrace2.txt" || fail "second run did not consume esm sidecar"
+grep -q "hit $DIR/lib.mjs$SUFFIX" "$WORKDIR/etrace2.txt" || fail "imported module did not consume esm sidecar"
+pass
+
+begin "esm import chain fully cached"
+DIR="$WORKDIR/esm-chain"
+mkdir -p "$DIR"
+echo 'export const c = 7;' > "$DIR/c.mjs"
+printf "import { c } from './c.mjs';\nexport const b = c * 2;\n" > "$DIR/b.mjs"
+printf "import { b } from './b.mjs';\nconsole.log(b * 3);\n" > "$DIR/a.mjs"
+"$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1 || fail "precompile exited non-zero"
+out="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/a.mjs" 2>"$WORKDIR/chain.txt")"
+[ "$out" = "42" ] || fail "chain output: $out"
+hits="$(grep -c "hit " "$WORKDIR/chain.txt")"
+[ "$hits" -eq 3 ] || fail "expected 3 cache hits, got $hits"
+pass
+
+begin "dynamic import and import.meta from cached modules"
+DIR="$WORKDIR/esm-dynamic"
+mkdir -p "$DIR"
+echo 'export const value = 5;' > "$DIR/lib.mjs"
+cat > "$DIR/main.mjs" <<'EOF'
+const mod = await import('./lib.mjs');
+console.log(mod.value, import.meta.url.endsWith('main.mjs'));
+EOF
+"$EDGE_BIN" "$DIR/main.mjs" >/dev/null 2>&1
+out="$("$EDGE_BIN" "$DIR/main.mjs" 2>/dev/null)"
+[ "$out" = "5 true" ] || fail "cached dynamic import / import.meta: $out"
+pass
+
+# Regression: import.meta inside an IMPORTED cached module. The importer's
+# bytecode read used to register stub modules under the dependency's real URL,
+# shadowing the real module in quickjs's name-based import.meta lookup.
+begin "import.meta in imported cached module"
+DIR="$WORKDIR/esm-meta-dep"
+mkdir -p "$DIR"
+cat > "$DIR/dep.mjs" <<'EOF'
+export const fromDep = import.meta.url;
+EOF
+cat > "$DIR/main.mjs" <<'EOF'
+import { fromDep } from './dep.mjs';
+console.log(typeof fromDep, String(fromDep).endsWith('dep.mjs'));
+EOF
+"$EDGE_BIN" "$DIR/main.mjs" >/dev/null 2>&1
+out="$("$EDGE_BIN" "$DIR/main.mjs" 2>/dev/null)"
+[ "$out" = "string true" ] || fail "import.meta in imported cached module: $out"
+pass
+
+begin "top-level await module cached"
+DIR="$WORKDIR/esm-tla"
+mkdir -p "$DIR"
+cat > "$DIR/main.mjs" <<'EOF'
+const v = await Promise.resolve('tla-ok');
+console.log(v);
+EOF
+"$EDGE_BIN" "$DIR/main.mjs" >/dev/null 2>&1
+out="$("$EDGE_BIN" "$DIR/main.mjs" 2>/dev/null)"
+[ "$out" = "tla-ok" ] || fail "cached TLA module: $out"
+pass
+
+begin "corrupted esm sidecar falls back"
+DIR="$WORKDIR/esm-corrupt"
+mkdir -p "$DIR"
+echo 'console.log("esm-fine");' > "$DIR/main.mjs"
+"$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1
+printf 'garbage' > "$DIR/main.mjs$SUFFIX"
+out="$("$EDGE_BIN" "$DIR/main.mjs" 2>/dev/null)"
+[ "$out" = "esm-fine" ] || fail "corrupted esm sidecar broke execution: $out"
+pass
+
+begin "stale esm sidecar falls back"
+DIR="$WORKDIR/esm-stale"
+mkdir -p "$DIR"
+echo 'console.log("esm-old");' > "$DIR/main.mjs"
+"$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1
+echo 'console.log("esm-new");' > "$DIR/main.mjs"
+out="$("$EDGE_BIN" "$DIR/main.mjs" 2>/dev/null)"
+[ "$out" = "esm-new" ] || fail "stale esm sidecar served old code: $out"
+pass
+
+begin "detect-module .js precompiles as ESM and runs cached"
+DIR="$WORKDIR/esm-detect"
+mkdir -p "$DIR"
+echo 'export default 1; console.log("detected");' > "$DIR/ambiguous.js"
+"$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1 || fail "precompile exited non-zero"
+[ -f "$DIR/ambiguous.js$SUFFIX" ] || fail "ESM-syntax .js should get an ESM-shape sidecar"
+out="$("$EDGE_BIN" "$DIR/ambiguous.js" 2>/dev/null)"
+[ "$out" = "detected" ] || fail "detect-module run with sidecar: $out"
+pass
+
+# --- vm cachedData round-trips ----------------------------------------------------
+begin "vm.Script and vm.compileFunction cachedData round-trip"
+DIR="$WORKDIR/vm-cache"
+mkdir -p "$DIR"
+cat > "$DIR/vm-test.cjs" <<'EOF'
+const vm = require('node:vm');
+const script = new vm.Script('1 + 41', { produceCachedData: true });
+if (!script.cachedData || script.cachedData.length === 0) throw new Error('no script cachedData');
+const script2 = new vm.Script('1 + 41', { cachedData: script.cachedData });
+if (script2.cachedDataRejected !== false) throw new Error('script cachedData rejected: ' + script2.cachedDataRejected);
+if (script2.runInThisContext() !== 42) throw new Error('script2 result');
+const fn = vm.compileFunction('return a + b;', ['a', 'b'], { produceCachedData: true, filename: 'fn-test.js' });
+if (!fn.cachedData || fn.cachedData.length === 0) throw new Error('no fn cachedData');
+const fn2 = vm.compileFunction('return a + b;', ['a', 'b'], { cachedData: fn.cachedData, filename: 'fn-test.js' });
+if (fn2(40, 2) !== 42) throw new Error('fn2 result');
+console.log('vm-ok');
+EOF
+out="$("$EDGE_BIN" --no-bytecode-cache "$DIR/vm-test.cjs" 2>&1)"
+[ "$out" = "vm-ok" ] || fail "vm cachedData round-trip: $out"
+pass
+
+begin "vm.SourceTextModule cachedData round-trip"
+DIR="$WORKDIR/vm-module"
+mkdir -p "$DIR"
+cat > "$DIR/vm-module-test.cjs" <<'EOF'
+const vm = require('node:vm');
+async function main() {
+  const m1 = new vm.SourceTextModule('export const x = 42;');
+  const cached = m1.createCachedData();
+  if (!cached || cached.length === 0) throw new Error('no module cachedData');
+  const m2 = new vm.SourceTextModule('export const x = 42;', { cachedData: cached });
+  await m2.link(() => { throw new Error('no links expected'); });
+  await m2.evaluate();
+  if (m2.namespace.x !== 42) throw new Error('module namespace');
+  console.log('vm-module-ok');
+}
+main().catch((err) => { console.error(err.message); process.exit(1); });
+EOF
+out="$("$EDGE_BIN" --no-bytecode-cache --no-warnings --experimental-vm-modules "$DIR/vm-module-test.cjs" 2>/dev/null)"
+[ "$out" = "vm-module-ok" ] || fail "vm.SourceTextModule cachedData round-trip: $out"
 pass
 
 # --- --check stays clean ---------------------------------------------------------
