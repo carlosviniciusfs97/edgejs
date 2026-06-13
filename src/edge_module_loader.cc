@@ -1051,7 +1051,7 @@ static void* AcquireBuiltinBytecode(napi_env env,
                                     int32_t shape,
                                     napi_value params_or_undefined,
                                     napi_value host_defined_option_id) {
-  if (!edge_bytecode_cache::Enabled()) return nullptr;
+  if (!edge_bytecode_cache::BuiltinsCacheEnabled()) return nullptr;
 
   edge_builtin_bytecode::PayloadView view;
   if (edge_builtin_bytecode::TryGet(kind, id, source, &view)) {

@@ -342,8 +342,10 @@ int RunPrecompile(napi_env env, const std::vector<std::string>& paths, std::stri
     }
   }
 
-  std::fprintf(stderr, "edge --precompile: wrote %zu sidecar(s) (*%s), skipped %zu, %zu error(s)\n",
-               written, edge_bytecode_cache::SidecarSuffix(), skipped, failed);
+  std::fprintf(stderr,
+               "edge --precompile: wrote %zu sidecar(s) (__edgecache__/*.jsc), skipped %zu, "
+               "%zu error(s)\n",
+               written, skipped, failed);
   return failed > 0 ? 1 : 0;
 }
 

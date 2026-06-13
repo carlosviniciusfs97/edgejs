@@ -71,7 +71,8 @@ constexpr const char kNativeHelpText[] =
     "  --watch                     run in watch mode\n"
     "  --test                      run tests\n"
     "  --precompile <path>...      compile .js/.cjs files to bytecode sidecars\n"
-    "  --no-bytecode-cache         do not read or write bytecode sidecar files\n"
+    "  --bytecode-cache            enable per-file bytecode sidecars (off by default)\n"
+    "  --no-bytecode-cache         disable all bytecode caching (incl. builtins)\n"
     "  --completion-bash           print source-able bash completion script\n"
     "  -v, --version               print Edge.js / Node.js version\n"
     "  -h, --help                  print this help\n";
@@ -369,18 +370,18 @@ bool IsBooleanOptionEnabled(const std::vector<std::string>& tokens, const char* 
   return false;
 }
 
-// Default-on boolean: disabled only when the last occurrence among
-// --bytecode-cache / --no-bytecode-cache is the negation.
-bool BytecodeCacheDisabledByTokens(const std::vector<std::string>& tokens) {
-  bool disabled = false;
+// --bytecode-cache / --no-bytecode-cache, last occurrence wins. Returns
+// -1 (disable everything), +1 (opt user sidecars in), or 0 (neither given).
+int BytecodeCacheCliOverride(const std::vector<std::string>& tokens) {
+  int override_state = 0;
   for (const auto& token : tokens) {
     if (token == "--no-bytecode-cache") {
-      disabled = true;
+      override_state = -1;
     } else if (token == "--bytecode-cache") {
-      disabled = false;
+      override_state = 1;
     }
   }
-  return disabled;
+  return override_state;
 }
 
 bool TokenHasInlineValue(const std::string& token) {
@@ -1604,12 +1605,17 @@ int EdgeRunCli(int argc, const char* const* argv, std::string* error_out) {
   ApplySupportedV8Flags(raw_exec_argv);
   EDGE_STARTUP_TRACE(startup_trace, "cli.apply-v8-flags");
 
-  const bool bytecode_cache_disabled =
-      BytecodeCacheDisabledByTokens(effective_state.effective_tokens);
+  // Bytecode cache defaults: builtins ON, per-file user sidecars OFF.
+  //   --no-bytecode-cache / --check  -> kill switch (builtins + sidecars off)
+  //   --bytecode-cache / --precompile -> opt user sidecars in
   // --check must never touch sidecars: a syntax check should not write to the
   // checked tree.
-  if (bytecode_cache_disabled || mode == CliMode::kCheck) {
-    edge_bytecode_cache::SetEnabledFromCli(false);
+  const int bytecode_cache_override =
+      BytecodeCacheCliOverride(effective_state.effective_tokens);
+  if (bytecode_cache_override == -1 || mode == CliMode::kCheck) {
+    edge_bytecode_cache::SetCacheDisabledFromCli();
+  } else if (bytecode_cache_override == 1 || saw_precompile) {
+    edge_bytecode_cache::SetSidecarsEnabledFromCli();
   }
   if (HasExactOptionToken(effective_state.effective_tokens, "--completion-bash")) {
     EDGE_STARTUP_TRACE(startup_trace, "cli.dispatch.completion-bash");
@@ -1677,7 +1683,7 @@ int EdgeRunCli(int argc, const char* const* argv, std::string* error_out) {
       conflicting = "--watch";
     } else if (!run_target.empty()) {
       conflicting = "--run";
-    } else if (bytecode_cache_disabled) {
+    } else if (bytecode_cache_override == -1) {
       conflicting = "--no-bytecode-cache";
     }
     if (conflicting != nullptr) {

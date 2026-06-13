@@ -7,8 +7,9 @@
 #include <string_view>
 #include <vector>
 
-// Sidecar bytecode caches: engine-serialized compiled code stored next to the
-// source file ("app.js" -> "app.js.v8b" / "app.js.qjsb"). The payload is
+// Sidecar bytecode caches: engine-serialized compiled code stored in a
+// per-directory "__edgecache__" subdir next to the source, PEP 3147 style
+// ("dir/app.js" -> "dir/__edgecache__/app.js.v8-13-6.jsc"). The payload is
 // opaque engine data (V8 code cache / QuickJS JS_WriteObject bytecode); this
 // module owns the container format and its validation only.
 namespace edge_bytecode_cache {
@@ -29,23 +30,38 @@ constexpr uint32_t kFlagCjsFunctionV1 = 1u << 0;
 // bit 1: ES module compile (ModuleWrap / module shape).
 constexpr uint32_t kFlagEsmModuleV1 = 1u << 1;
 
-// Suffix appended to the full source filename. Empty when the active NAPI
-// provider has no bytecode-cache support.
+// Engine suffix for the consolidated builtins cache file next to the binary
+// (".v8b" / ".qjsb"). User-file sidecars use the
+// __edgecache__/<filename>.<tag>.jsc scheme instead; see SidecarPathForSource.
+// Empty when the active NAPI provider has no bytecode-cache support.
 const char* SidecarSuffix();
 
 // Engine identity baked into sidecar headers, e.g. "v8-11.9.169.7-node.0" or
 // "qjs-ng-0.14.0". Empty disables the cache entirely.
 const std::string& EngineCacheTag();
 
+// Short engine tag for the cache *filename* only (e.g. "v8-13-6" / "qjs-0-14").
+// Coarser than EngineCacheTag (engine + major.minor); the header still carries
+// the full version for the staleness check.
+const std::string& EngineFileTag();
+
 // XXH3-64 over arbitrary bytes (container hashing).
 uint64_t Hash64(const void* data, size_t size);
 
-// The CLI calls this when --no-bytecode-cache is in effect or the mode should
-// never touch sidecars (e.g. --check).
-void SetEnabledFromCli(bool enabled);
+// CLI overrides (win over the EDGE_BYTECODE_CACHE env var):
+//   --no-bytecode-cache / --check  -> SetCacheDisabledFromCli (kill switch)
+//   --bytecode-cache / --precompile -> SetSidecarsEnabledFromCli (opt in)
+void SetCacheDisabledFromCli();
+void SetSidecarsEnabledFromCli();
 
-// True when the provider supports caching, the CLI did not disable it, and
-// EDGE_BYTECODE_CACHE is not set to a falsy value.
+// True when the consolidated builtins (lib/) cache may be read/written. ON by
+// default; off only via the kill switch (--no-bytecode-cache,
+// EDGE_BYTECODE_CACHE=0, --check) or when the provider has no cache support.
+bool BuiltinsCacheEnabled();
+
+// True when per-file user sidecars may be read/written. OFF by default;
+// on only when explicitly opted in (--bytecode-cache, EDGE_BYTECODE_CACHE
+// truthy, or --precompile) and not killed.
 bool Enabled();
 
 // True when EDGE_BYTECODE_CACHE_TRACE is set (shared by the builtins cache).

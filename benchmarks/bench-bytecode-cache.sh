@@ -35,16 +35,17 @@ mkdir -p "$RESULTS_DIR"
 echo "=== Generating workloads ==="
 "$NODE_BIN" benchmarks/generate-bytecode-workload.mjs
 
-# Identify the engine by the sidecar suffix it writes.
+# Identify the engine by the tag the precompile cache writes. User-file caches
+# now live in per-directory __edgecache__ subdirs (__edgecache__/<stem>.<tag>.jsc).
 "$EDGE_BIN" --precompile "$GEN_BASE/gen" >/dev/null
-if compgen -G "$GEN_BASE/gen/*.v8b" >/dev/null; then
+if compgen -G "$GEN_BASE/gen/__edgecache__/*.v8-*.jsc" >/dev/null; then
   LABEL="v8"
   SUFFIX=".v8b"
-elif compgen -G "$GEN_BASE/gen/*.qjsb" >/dev/null; then
+elif compgen -G "$GEN_BASE/gen/__edgecache__/*.qjs-*.jsc" >/dev/null; then
   LABEL="quickjs"
   SUFFIX=".qjsb"
 else
-  echo "error: precompile produced no sidecars in $GEN_BASE/gen" >&2
+  echo "error: precompile produced no __edgecache__/*.jsc in $GEN_BASE/gen" >&2
   exit 1
 fi
 
@@ -53,7 +54,7 @@ run_lane() {
   local gen_dir="$2"
   local main="$3"
 
-  local clean_sidecars="find $gen_dir -name '*$SUFFIX' -delete"
+  local clean_sidecars="find $gen_dir -type d -name __edgecache__ -exec rm -rf {} +"
   local precompile="$EDGE_BIN --precompile $gen_dir >/dev/null"
   local json_out="$RESULTS_DIR/bytecode-cache-$LABEL-$lane.json"
   local csv_out="$RESULTS_DIR/bytecode-cache-$LABEL-$lane.csv"
@@ -70,9 +71,9 @@ run_lane() {
     --prepare "$clean_sidecars" \
     --command-name "cold (no cache)" "$EDGE_BIN --no-bytecode-cache $gen_dir/$main" \
     --prepare "$clean_sidecars" \
-    --command-name "first run (writes sidecars)" "$EDGE_BIN $gen_dir/$main" \
+    --command-name "first run (writes sidecars)" "$EDGE_BIN --bytecode-cache $gen_dir/$main" \
     --prepare "$precompile" \
-    --command-name "warm (precompiled sidecars)" "$EDGE_BIN $gen_dir/$main"
+    --command-name "warm (precompiled sidecars)" "$EDGE_BIN --bytecode-cache $gen_dir/$main"
 
   "$NODE_BIN" - "$json_out" "$LABEL/$lane" <<'EOF'
 const { readFileSync } = require('node:fs');

@@ -151,7 +151,7 @@ bool TryGet(Kind kind, std::string_view id, std::string_view source_utf8, Payloa
   if (out == nullptr) return false;
   out->data = nullptr;
   out->size = 0;
-  if (!edge_bytecode_cache::Enabled()) return false;
+  if (!edge_bytecode_cache::BuiltinsCacheEnabled()) return false;
 
   Store& store = GetStore();
   std::lock_guard<std::mutex> lock(store.mutex);
@@ -177,7 +177,7 @@ void Record(Kind kind,
             std::string_view source_utf8,
             const uint8_t* payload,
             size_t payload_size) {
-  if (!edge_bytecode_cache::Enabled()) return;
+  if (!edge_bytecode_cache::BuiltinsCacheEnabled()) return;
   if (payload == nullptr || payload_size == 0) return;
 
   Store& store = GetStore();
@@ -188,7 +188,7 @@ void Record(Kind kind,
 }
 
 void FlushIfDirty() {
-  if (!edge_bytecode_cache::Enabled()) return;
+  if (!edge_bytecode_cache::BuiltinsCacheEnabled()) return;
 
   Store& store = GetStore();
   std::lock_guard<std::mutex> lock(store.mutex);

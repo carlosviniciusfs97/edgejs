@@ -21,7 +21,8 @@ namespace {
 constexpr char kMagic[8] = {'E', 'D', 'G', 'E', 'J', 'S', 'B', 'C'};
 constexpr size_t kHeaderSize = 48;
 
-std::atomic<bool> g_cli_enabled{true};
+// CLI cache override: 0 = none, +1 = force user sidecars on, -1 = force all off.
+std::atomic<int> g_cli_enabled{0};
 
 bool IsFalsyEnvValue(const char* value) {
   if (value == nullptr || value[0] == '\0') return false;
@@ -72,19 +73,84 @@ const std::string& EngineCacheTag() {
   return tag;
 }
 
+namespace {
+// "13.6.233.17-node.0" -> "13-6"; "0.14.0" -> "0-14". Major.minor only, dots
+// as dashes, so it stays filename-clean.
+std::string MajorMinorDashed(const char* version) {
+  std::string out;
+  int dots = 0;
+  for (const char* p = version; *p != '\0'; ++p) {
+    if (*p == '.') {
+      if (++dots >= 2) break;
+      out.push_back('-');
+    } else if ((*p >= '0' && *p <= '9')) {
+      out.push_back(*p);
+    } else {
+      break;  // stop at the first non-numeric (e.g. "-node...")
+    }
+  }
+  return out;
+}
+}  // namespace
+
+const std::string& EngineFileTag() {
+  // Short, human-readable engine tag for the cache *filename* only (the header
+  // keeps the full EngineCacheTag for the precise staleness check). Coarser
+  // than the header tag, so two patch builds sharing a major.minor reuse one
+  // filename — the header still rejects the stale one and rewrites.
+  static const std::string tag = [] {
+#if defined(EDGE_BUNDLED_NAPI_V8) && defined(EDGE_EMBEDDED_V8_VERSION)
+    return std::string("v8-") + MajorMinorDashed(EDGE_EMBEDDED_V8_VERSION);
+#elif defined(EDGE_NAPI_QUICKJS) && defined(EDGE_EMBEDDED_QUICKJS_VERSION)
+    return std::string("qjs-") + MajorMinorDashed(EDGE_EMBEDDED_QUICKJS_VERSION);
+#else
+    return std::string();
+#endif
+  }();
+  return tag;
+}
+
 uint64_t Hash64(const void* data, size_t size) {
   return XXH3_64bits(data, size);
 }
 
-void SetEnabledFromCli(bool enabled) {
-  g_cli_enabled.store(enabled, std::memory_order_relaxed);
+// Cache control is a tri-state: -1 force-off (kill switch), +1 force-on
+// (opt-in user sidecars), 0 default. The CLI override (set from flags) wins
+// over the EDGE_BYTECODE_CACHE env var, which wins over the built-in default.
+//
+//   builtins cache  : ON  unless something forces off (default-on, our own
+//                     tested lib code; the biggest startup win at low risk).
+//   user sidecars   : OFF unless something forces on (opt-in, since arbitrary
+//                     user code is less battle-tested).
+namespace {
+int EnvOverride() {
+  static const int v = [] {
+    const char* e = std::getenv("EDGE_BYTECODE_CACHE");
+    if (e == nullptr || e[0] == '\0') return 0;
+    return IsFalsyEnvValue(e) ? -1 : 1;  // explicit falsy kills; truthy opts in
+  }();
+  return v;
+}
+int EffectiveOverride() {
+  const int cli = g_cli_enabled.load(std::memory_order_relaxed);
+  return cli != 0 ? cli : EnvOverride();
+}
+}  // namespace
+
+void SetCacheDisabledFromCli() {
+  g_cli_enabled.store(-1, std::memory_order_relaxed);
+}
+
+void SetSidecarsEnabledFromCli() {
+  g_cli_enabled.store(1, std::memory_order_relaxed);
+}
+
+bool BuiltinsCacheEnabled() {
+  return !EngineCacheTag().empty() && EffectiveOverride() != -1;
 }
 
 bool Enabled() {
-  static const bool env_enabled =
-      !IsFalsyEnvValue(std::getenv("EDGE_BYTECODE_CACHE"));
-  return env_enabled && !EngineCacheTag().empty() &&
-         g_cli_enabled.load(std::memory_order_relaxed);
+  return !EngineCacheTag().empty() && EffectiveOverride() == 1;
 }
 
 bool TraceEnabled() {
@@ -96,7 +162,16 @@ bool TraceEnabled() {
 }
 
 std::string SidecarPathForSource(const std::string& source_path) {
-  return source_path + SidecarSuffix();
+  // Caches live in a per-directory "__edgecache__" subdir (PEP 3147
+  // __pycache__ style): "dir/app.js" -> "dir/__edgecache__/app.js.<file-tag>.jsc"
+  // (e.g. "app.js.v8-13-6.jsc" / "app.mjs.qjs-0-14.jsc"). The full source
+  // filename (extension included) keys the entry, so it is unique within the
+  // directory — ".js"/".mjs"/".cjs" siblings never collide. The short engine
+  // tag lets different engines/major.minor versions coexist; the source
+  // identity and full engine version are still validated by the header.
+  const std::filesystem::path source(source_path);
+  const std::string name = source.filename().string() + "." + EngineFileTag() + ".jsc";
+  return (source.parent_path() / "__edgecache__" / name).string();
 }
 
 // Engine-agnostic header (48 bytes): the payload is opaque self-validating
@@ -212,6 +287,12 @@ bool WriteSidecar(const std::string& source_path,
   const std::string sidecar_path = SidecarPathForSource(source_path);
   const std::vector<uint8_t> contents =
       EncodeSidecar(EngineCacheTag(), source_utf8, flags, payload, payload_size);
+
+  // Ensure the __edgecache__ subdir exists (idempotent). The atomic write's
+  // temp file lives inside it, so it must be present first. A read-only tree
+  // makes this fail silently, like the write itself.
+  std::error_code dir_ec;
+  std::filesystem::create_directories(std::filesystem::path(sidecar_path).parent_path(), dir_ec);
 
   if (!io::AtomicWriteFile(sidecar_path, contents.data(), contents.size())) {
     Trace("write-failed", sidecar_path);

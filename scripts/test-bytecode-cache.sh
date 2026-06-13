@@ -11,6 +11,12 @@ if [ ! -x "$EDGE_BIN" ]; then
   exit 1
 fi
 
+# Per-file (user) sidecars are OFF by default; this suite exercises their
+# mechanics, so opt in globally. Kill-switch scenarios (--no-bytecode-cache,
+# EDGE_BYTECODE_CACHE=0, --check) override per-run, and the default-policy
+# scenario clears it with `env -u` to assert the shipped default.
+export EDGE_BYTECODE_CACHE=1
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/edge-bytecode-cache-test.XXXXXX")"
 # Resolve symlinked temp roots (macOS /var -> /private/var) so trace-output
 # greps match the canonical paths the runtime reports.
@@ -37,27 +43,46 @@ pass() {
   fi
 }
 
-sidecar_suffix() {
-  # Detect which suffix this binary writes.
-  local dir="$WORKDIR/suffix-probe"
+# User-file caches live in a per-directory subdir, PEP 3147 __pycache__ style:
+#   <dir>/app.js -> <dir>/__edgecache__/app.js.<engine-tag>.jsc
+# The full source filename (extension kept) keys the entry; the engine/version
+# tag is not known statically, so locate caches by glob and detect the engine
+# from the tag the precompile probe writes.
+sidecar_glob_dir() { dirname "$1"; }
+sidecar_name() { basename "$1"; }
+
+sidecar_path() {  # $1 = source file -> first matching cache file, or empty
+  local dir name matches
+  dir="$(sidecar_glob_dir "$1")"; name="$(sidecar_name "$1")"
+  matches=("$dir"/__edgecache__/"$name".*.jsc)
+  [ -e "${matches[0]}" ] && printf '%s\n' "${matches[0]}"
+}
+sidecar_exists() { [ -n "$(sidecar_path "$1")" ]; }
+sidecar_event() {  # $1 = event (hit/write/remove)  $2 = source file  $3 = trace file
+  grep -F "__edgecache__/$(sidecar_name "$2")." "$3" | grep -q "] $1 "
+}
+
+detect_engine() {
+  local dir="$WORKDIR/engine-probe" f
   mkdir -p "$dir"
   echo "module.exports = 1;" > "$dir/probe.js"
   "$EDGE_BIN" --precompile "$dir" >/dev/null 2>&1
-  if [ -f "$dir/probe.js.v8b" ]; then
-    echo ".v8b"
-  elif [ -f "$dir/probe.js.qjsb" ]; then
-    echo ".qjsb"
-  else
-    echo ""
-  fi
+  f="$(basename "$(sidecar_path "$dir/probe.js")" 2>/dev/null)"
+  case "$f" in
+    probe.js.v8-*) echo "v8" ;;
+    probe.js.qjs-*) echo "qjs" ;;
+    *) echo "" ;;
+  esac
 }
 
-SUFFIX="$(sidecar_suffix)"
-if [ -z "$SUFFIX" ]; then
-  echo "error: could not determine sidecar suffix (precompile probe wrote nothing)" >&2
+ENGINE="$(detect_engine)"
+if [ -z "$ENGINE" ]; then
+  echo "error: could not determine engine (precompile probe wrote no __edgecache__/*.jsc)" >&2
   exit 1
 fi
-echo "testing $EDGE_BIN (sidecar suffix: $SUFFIX)"
+# The consolidated builtins cache keeps its engine suffix (one file by the binary).
+if [ "$ENGINE" = "v8" ]; then SUFFIX=".v8b"; else SUFFIX=".qjsb"; fi
+echo "testing $EDGE_BIN (engine: $ENGINE, builtins suffix: $SUFFIX)"
 
 make_project() {
   local dir="$1"
@@ -77,11 +102,11 @@ DIR="$WORKDIR/precompile"
 make_project "$DIR"
 baseline="$("$EDGE_BIN" --no-bytecode-cache "$DIR/main.js" 2>/dev/null)"
 "$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1 || fail "precompile exited non-zero"
-[ -f "$DIR/main.js$SUFFIX" ] || fail "missing main.js$SUFFIX"
-[ -f "$DIR/lib.js$SUFFIX" ] || fail "missing lib.js$SUFFIX"
+sidecar_exists "$DIR/main.js" || fail "missing main.js cache"
+sidecar_exists "$DIR/lib.js" || fail "missing lib.js cache"
 cached="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/main.js" 2>"$WORKDIR/trace.txt")"
 [ "$cached" = "$baseline" ] || fail "output mismatch: '$cached' vs '$baseline'"
-grep -q "hit $DIR/main.js$SUFFIX" "$WORKDIR/trace.txt" || fail "expected a cache hit for main.js"
+sidecar_event hit "$DIR/main.js" "$WORKDIR/trace.txt" || fail "expected a cache hit for main.js"
 pass
 
 # --- write-on-first-run -------------------------------------------------------
@@ -90,10 +115,10 @@ DIR="$WORKDIR/first-run"
 make_project "$DIR"
 out1="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/main.js" 2>"$WORKDIR/trace1.txt")"
 [ "$out1" = "42" ] || fail "first run output: $out1"
-grep -q "write $DIR/main.js$SUFFIX" "$WORKDIR/trace1.txt" || fail "first run did not write sidecar"
+sidecar_event write "$DIR/main.js" "$WORKDIR/trace1.txt" || fail "first run did not write sidecar"
 out2="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/main.js" 2>"$WORKDIR/trace2.txt")"
 [ "$out2" = "42" ] || fail "second run output: $out2"
-grep -q "hit $DIR/main.js$SUFFIX" "$WORKDIR/trace2.txt" || fail "second run did not consume sidecar"
+sidecar_event hit "$DIR/main.js" "$WORKDIR/trace2.txt" || fail "second run did not consume sidecar"
 pass
 
 # --- corrupted sidecar falls back and is rewritten ----------------------------
@@ -101,10 +126,10 @@ begin "corrupted sidecar falls back"
 DIR="$WORKDIR/corrupt"
 make_project "$DIR"
 "$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1
-printf 'garbage' > "$DIR/main.js$SUFFIX"
+printf 'garbage' > "$(sidecar_path "$DIR/main.js")"
 out="$("$EDGE_BIN" "$DIR/main.js" 2>/dev/null)"
 [ "$out" = "42" ] || fail "corrupted sidecar broke execution: $out"
-size="$(wc -c < "$DIR/main.js$SUFFIX")"
+size="$(wc -c < "$(sidecar_path "$DIR/main.js")")"
 [ "$size" -gt 64 ] || fail "corrupted sidecar was not rewritten (size=$size)"
 pass
 
@@ -130,15 +155,15 @@ cat > "$DIR/main.mjs" <<'RELOC_EOF'
 console.log(import.meta.url.endsWith('relocate-dst/main.mjs') ? 'url-ok' : 'url-stale');
 RELOC_EOF
 "$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1
-[ -f "$DIR/main.mjs$SUFFIX" ] || fail "missing sidecar before relocation"
+sidecar_exists "$DIR/main.mjs" || fail "missing sidecar before relocation"
 mv "$DIR" "$WORKDIR/relocate-dst"
 out="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$WORKDIR/relocate-dst/main.mjs" 2>"$WORKDIR/reloc.txt")"
 [ "$out" = "url-ok" ] || fail "relocated import.meta.url is stale: $out"
-if [ "$SUFFIX" = ".qjsb" ]; then
-  grep -q "remove $WORKDIR/relocate-dst/main.mjs$SUFFIX" "$WORKDIR/reloc.txt" || fail "quickjs did not drop the relocated sidecar"
-  grep -q "write $WORKDIR/relocate-dst/main.mjs$SUFFIX" "$WORKDIR/reloc.txt" || fail "quickjs did not rewrite the relocated sidecar"
+if [ "$ENGINE" = "qjs" ]; then
+  sidecar_event remove "$WORKDIR/relocate-dst/main.mjs" "$WORKDIR/reloc.txt" || fail "quickjs did not drop the relocated sidecar"
+  sidecar_event write "$WORKDIR/relocate-dst/main.mjs" "$WORKDIR/reloc.txt" || fail "quickjs did not rewrite the relocated sidecar"
 else
-  grep -q "hit $WORKDIR/relocate-dst/main.mjs$SUFFIX" "$WORKDIR/reloc.txt" || fail "v8 should consume relocated sidecars"
+  sidecar_event hit "$WORKDIR/relocate-dst/main.mjs" "$WORKDIR/reloc.txt" || fail "v8 should consume relocated sidecars"
 fi
 pass
 
@@ -147,14 +172,14 @@ begin "--no-bytecode-cache writes and reads nothing"
 DIR="$WORKDIR/optout-flag"
 make_project "$DIR"
 "$EDGE_BIN" --no-bytecode-cache "$DIR/main.js" >/dev/null 2>&1
-[ ! -f "$DIR/main.js$SUFFIX" ] || fail "sidecar written despite --no-bytecode-cache"
+! sidecar_exists "$DIR/main.js" || fail "sidecar written despite --no-bytecode-cache"
 pass
 
 begin "EDGE_BYTECODE_CACHE=0 writes and reads nothing"
 DIR="$WORKDIR/optout-env"
 make_project "$DIR"
 EDGE_BYTECODE_CACHE=0 "$EDGE_BIN" "$DIR/main.js" >/dev/null 2>&1
-[ ! -f "$DIR/main.js$SUFFIX" ] || fail "sidecar written despite EDGE_BYTECODE_CACHE=0"
+! sidecar_exists "$DIR/main.js" || fail "sidecar written despite EDGE_BYTECODE_CACHE=0"
 pass
 
 # --- read-only tree ------------------------------------------------------------
@@ -165,7 +190,7 @@ chmod -R a-w "$DIR"
 out="$("$EDGE_BIN" "$DIR/main.js" 2>/dev/null)"
 chmod -R u+w "$DIR"
 [ "$out" = "42" ] || fail "read-only tree broke execution: $out"
-[ ! -f "$DIR/main.js$SUFFIX" ] || fail "sidecar appeared in read-only tree"
+! sidecar_exists "$DIR/main.js" || fail "sidecar appeared in read-only tree"
 pass
 
 # --- shebang and BOM -----------------------------------------------------------
@@ -190,8 +215,8 @@ echo '{ "type": "module" }' > "$DIR/package.json"
 echo 'export const x = 1;' > "$DIR/esm.js"
 echo 'module.exports = 1;' > "$DIR/legacy.cjs"
 "$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1 || fail "precompile exited non-zero"
-[ -f "$DIR/esm.js$SUFFIX" ] || fail ".js in type=module scope must get an ESM-shape sidecar"
-[ -f "$DIR/legacy.cjs$SUFFIX" ] || fail ".cjs must be precompiled regardless of scope"
+sidecar_exists "$DIR/esm.js" || fail ".js in type=module scope must get an ESM-shape sidecar"
+sidecar_exists "$DIR/legacy.cjs" || fail ".cjs must be precompiled regardless of scope"
 pass
 
 # --- ESM sidecars -----------------------------------------------------------------
@@ -207,11 +232,11 @@ console.log(value * 2);
 EOF
 out1="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/main.mjs" 2>"$WORKDIR/etrace1.txt")"
 [ "$out1" = "42" ] || fail "first run output: $out1"
-grep -q "write $DIR/main.mjs$SUFFIX" "$WORKDIR/etrace1.txt" || fail "first run did not write esm sidecar"
+sidecar_event write "$DIR/main.mjs" "$WORKDIR/etrace1.txt" || fail "first run did not write esm sidecar"
 out2="$(EDGE_BYTECODE_CACHE_TRACE=1 "$EDGE_BIN" "$DIR/main.mjs" 2>"$WORKDIR/etrace2.txt")"
 [ "$out2" = "42" ] || fail "second run output: $out2"
-grep -q "hit $DIR/main.mjs$SUFFIX" "$WORKDIR/etrace2.txt" || fail "second run did not consume esm sidecar"
-grep -q "hit $DIR/lib.mjs$SUFFIX" "$WORKDIR/etrace2.txt" || fail "imported module did not consume esm sidecar"
+sidecar_event hit "$DIR/main.mjs" "$WORKDIR/etrace2.txt" || fail "second run did not consume esm sidecar"
+sidecar_event hit "$DIR/lib.mjs" "$WORKDIR/etrace2.txt" || fail "imported module did not consume esm sidecar"
 pass
 
 begin "esm import chain fully cached"
@@ -275,7 +300,7 @@ DIR="$WORKDIR/esm-corrupt"
 mkdir -p "$DIR"
 echo 'console.log("esm-fine");' > "$DIR/main.mjs"
 "$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1
-printf 'garbage' > "$DIR/main.mjs$SUFFIX"
+printf 'garbage' > "$(sidecar_path "$DIR/main.mjs")"
 out="$("$EDGE_BIN" "$DIR/main.mjs" 2>/dev/null)"
 [ "$out" = "esm-fine" ] || fail "corrupted esm sidecar broke execution: $out"
 pass
@@ -295,7 +320,7 @@ DIR="$WORKDIR/esm-detect"
 mkdir -p "$DIR"
 echo 'export default 1; console.log("detected");' > "$DIR/ambiguous.js"
 "$EDGE_BIN" --precompile "$DIR" >/dev/null 2>&1 || fail "precompile exited non-zero"
-[ -f "$DIR/ambiguous.js$SUFFIX" ] || fail "ESM-syntax .js should get an ESM-shape sidecar"
+sidecar_exists "$DIR/ambiguous.js" || fail "ESM-syntax .js should get an ESM-shape sidecar"
 out="$("$EDGE_BIN" "$DIR/ambiguous.js" 2>/dev/null)"
 [ "$out" = "detected" ] || fail "detect-module run with sidecar: $out"
 pass
@@ -395,7 +420,7 @@ begin "--check writes no sidecars"
 DIR="$WORKDIR/checkmode"
 make_project "$DIR"
 "$EDGE_BIN" --check "$DIR/main.js" >/dev/null 2>&1
-[ ! -f "$DIR/main.js$SUFFIX" ] || fail "--check wrote a sidecar"
+! sidecar_exists "$DIR/main.js" || fail "--check wrote a sidecar"
 pass
 
 # --- conflicts -------------------------------------------------------------------
@@ -416,6 +441,25 @@ make_builtins_bin() {
   cp "$EDGE_BIN" "$dir/edge"
   echo 'console.log(1 + 1);' > "$dir/app.js"
 }
+
+# --- shipped default: builtins on, user sidecars off ------------------------------
+# Clear EDGE_BYTECODE_CACHE to see the real default. The builtins cache should
+# be written (on by default), but no per-file user sidecar — that needs opt-in.
+begin "default policy: builtins cached, user sidecars off until opt-in"
+DIR="$WORKDIR/default-policy"
+make_builtins_bin "$DIR"
+out="$(env -u EDGE_BYTECODE_CACHE "$DIR/edge" "$DIR/app.js" 2>/dev/null)"
+[ "$out" = "2" ] || fail "default run output: $out"
+[ -f "$DIR/$BUILTINS_FILE_NAME" ] || fail "builtins cache not written by default"
+! sidecar_exists "$DIR/app.js" || fail "user sidecar written without opt-in"
+# Opt in: --bytecode-cache writes the per-file sidecar.
+env -u EDGE_BYTECODE_CACHE "$DIR/edge" --bytecode-cache "$DIR/app.js" >/dev/null 2>&1
+sidecar_exists "$DIR/app.js" || fail "--bytecode-cache did not write a user sidecar"
+# EDGE_BYTECODE_CACHE=1 also opts in.
+rm -rf "$DIR/__edgecache__"
+EDGE_BYTECODE_CACHE=1 "$DIR/edge" "$DIR/app.js" >/dev/null 2>&1
+sidecar_exists "$DIR/app.js" || fail "EDGE_BYTECODE_CACHE=1 did not write a user sidecar"
+pass
 
 # --- first run writes, second run hits --------------------------------------------
 begin "builtins cache write then hit"

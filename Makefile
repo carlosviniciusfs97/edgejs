@@ -197,6 +197,20 @@ test-bytecode-cache:
 test-bytecode-cache-quickjs:
 	EDGE_BIN=$(BUILD_EDGE_QUICKJS_CLI_DIR)/edge ./scripts/test-bytecode-cache.sh
 
+# Generate the shippable builtins (lib/) bytecode cache next to each binary
+# (<binary>.builtins.v8b / .qjsb). The builtins cache is on by default, so a
+# representative run populates it; ship the produced file alongside the binary
+# so opt-in users (and read-only installs) get the builtin startup win from the
+# first run. Re-run after rebuilding (the engine tag invalidates a stale cache).
+PRECOMPILE_BUILTINS_DRIVER ?= ./benchmarks/precompile-builtins-driver.mjs
+precompile-builtins:
+	@for bin in $(EDGE_BINARY) $(BUILD_EDGE_QUICKJS_CLI_DIR)/edge; do \
+		[ -x "$$bin" ] || continue; \
+		rm -f "$$bin".builtins.*; \
+		"$$bin" "$(PRECOMPILE_BUILTINS_DRIVER)" >/dev/null 2>&1 || true; \
+		ls -la "$$bin".builtins.* 2>/dev/null || echo "no builtins cache produced for $$bin"; \
+	done
+
 clean-edge-quickjs-cli:
 	rm -rf $(BUILD_EDGE_QUICKJS_CLI_DIR)
 

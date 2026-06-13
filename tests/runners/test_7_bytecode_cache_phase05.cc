@@ -270,6 +270,39 @@ TEST_F(Test7BytecodeCachePhase05, SidecarSuffixMatchesProvider) {
 #endif
 }
 
+TEST_F(Test7BytecodeCachePhase05, SidecarPathUsesEdgecacheSubdirKeepingFullFilename) {
+  const std::string& tag = edge_bytecode_cache::EngineFileTag();
+  if (tag.empty()) GTEST_SKIP() << "no bundled engine";
+
+  // The short file tag is "<engine>-<major>-<minor>" — no dots, so it stays a
+  // single clean filename component (e.g. v8-13-6 / qjs-0-14).
+  EXPECT_EQ(tag.find('.'), std::string::npos) << tag;
+#if defined(EDGE_BUNDLED_NAPI_V8)
+  EXPECT_EQ(tag.rfind("v8-", 0), 0u) << tag;
+#elif defined(EDGE_NAPI_QUICKJS)
+  EXPECT_EQ(tag.rfind("qjs-", 0), 0u) << tag;
+#endif
+
+  const std::string path = edge_bytecode_cache::SidecarPathForSource("/foo/bar/app.js");
+  // Caches go in a per-directory __edgecache__ subdir, keyed by the full source
+  // filename (extension included) + the short engine tag.
+  EXPECT_NE(path.find("/foo/bar/__edgecache__/"), std::string::npos) << path;
+  EXPECT_EQ(path, "/foo/bar/__edgecache__/app.js." + tag + ".jsc");
+
+  // The full filename keys the entry, so ".js"/".mjs" siblings never collide.
+  EXPECT_NE(edge_bytecode_cache::SidecarPathForSource("/x/app.js"),
+            edge_bytecode_cache::SidecarPathForSource("/x/app.mjs"));
+  EXPECT_EQ(edge_bytecode_cache::SidecarPathForSource("/x/app.mjs"),
+            "/x/__edgecache__/app.mjs." + tag + ".jsc");
+
+  // A relative/bare source keeps the cache next to it (empty parent dir).
+  EXPECT_EQ(edge_bytecode_cache::SidecarPathForSource("main.mjs"),
+            "__edgecache__/main.mjs." + tag + ".jsc");
+  // Compound names keep every component.
+  EXPECT_EQ(edge_bytecode_cache::SidecarPathForSource("/x/a.test.js"),
+            "/x/__edgecache__/a.test.js." + tag + ".jsc");
+}
+
 #if !defined(_WIN32)
 
 TEST_F(Test7BytecodeCachePhase05, WriteOnFirstRunThenConsume) {
@@ -280,21 +313,21 @@ TEST_F(Test7BytecodeCachePhase05, WriteOnFirstRunThenConsume) {
   project.Write("lib.js", "module.exports = { value: 21 };\n");
   const fs::path main_path =
       project.Write("main.js", "const lib = require('./lib.js');\nconsole.log(lib.value * 2);\n");
-  const fs::path sidecar = fs::path(main_path.string() + edge_bytecode_cache::SidecarSuffix());
+  const fs::path sidecar = edge_bytecode_cache::SidecarPathForSource(main_path.string());
 
   auto disabled = RunEdge(edge_path, {"--no-bytecode-cache", main_path.string()}, project.root());
   EXPECT_EQ(disabled.exit_code, 0) << disabled.stderr_output;
   EXPECT_EQ(disabled.stdout_output, "42\n");
   EXPECT_FALSE(fs::exists(sidecar)) << "--no-bytecode-cache must not write sidecars";
 
-  auto first = RunEdge(edge_path, {main_path.string()}, project.root(),
+  auto first = RunEdge(edge_path, {"--bytecode-cache", main_path.string()}, project.root(),
                        "EDGE_BYTECODE_CACHE_TRACE=1");
   EXPECT_EQ(first.exit_code, 0) << first.stderr_output;
   EXPECT_EQ(first.stdout_output, "42\n");
   EXPECT_TRUE(fs::exists(sidecar)) << "first run should write a sidecar; stderr=" << first.stderr_output;
   EXPECT_NE(first.stderr_output.find("write"), std::string::npos) << first.stderr_output;
 
-  auto second = RunEdge(edge_path, {main_path.string()}, project.root(),
+  auto second = RunEdge(edge_path, {"--bytecode-cache", main_path.string()}, project.root(),
                         "EDGE_BYTECODE_CACHE_TRACE=1");
   EXPECT_EQ(second.exit_code, 0) << second.stderr_output;
   EXPECT_EQ(second.stdout_output, "42\n");
@@ -315,11 +348,11 @@ TEST_F(Test7BytecodeCachePhase05, PrecompileWritesSidecarsWithoutExecuting) {
   EXPECT_EQ(precompiled.stdout_output.find("EXECUTED"), std::string::npos)
       << "--precompile must not execute module bodies";
 
-  const std::string suffix = edge_bytecode_cache::SidecarSuffix();
-  EXPECT_TRUE(fs::exists(fs::path(main_path.string() + suffix)));
-  EXPECT_TRUE(fs::exists(project.root() / ("side_effect.js" + suffix)));
+  EXPECT_TRUE(fs::exists(edge_bytecode_cache::SidecarPathForSource(main_path.string())));
+  EXPECT_TRUE(fs::exists(edge_bytecode_cache::SidecarPathForSource(
+      (project.root() / "side_effect.js").string())));
 
-  auto run = RunEdge(edge_path, {main_path.string()}, project.root(), "EDGE_BYTECODE_CACHE_TRACE=1");
+  auto run = RunEdge(edge_path, {"--bytecode-cache", main_path.string()}, project.root(), "EDGE_BYTECODE_CACHE_TRACE=1");
   EXPECT_EQ(run.exit_code, 0) << run.stderr_output;
   EXPECT_EQ(run.stdout_output, "ok\n");
   EXPECT_NE(run.stderr_output.find("hit"), std::string::npos) << run.stderr_output;
@@ -331,9 +364,9 @@ TEST_F(Test7BytecodeCachePhase05, CorruptedAndStaleSidecarsFallBack) {
 
   TempProjectDir project("edge_bytecode_cache_corrupt");
   const fs::path main_path = project.Write("main.js", "console.log('first');\n");
-  const fs::path sidecar = fs::path(main_path.string() + edge_bytecode_cache::SidecarSuffix());
+  const fs::path sidecar = edge_bytecode_cache::SidecarPathForSource(main_path.string());
 
-  auto first = RunEdge(edge_path, {main_path.string()}, project.root());
+  auto first = RunEdge(edge_path, {"--bytecode-cache", main_path.string()}, project.root());
   ASSERT_EQ(first.exit_code, 0) << first.stderr_output;
   ASSERT_TRUE(fs::exists(sidecar));
 
@@ -350,13 +383,13 @@ TEST_F(Test7BytecodeCachePhase05, CorruptedAndStaleSidecarsFallBack) {
     f.seekp(size - 1);
     f.write(&last, 1);
   }
-  auto corrupted = RunEdge(edge_path, {main_path.string()}, project.root());
+  auto corrupted = RunEdge(edge_path, {"--bytecode-cache", main_path.string()}, project.root());
   EXPECT_EQ(corrupted.exit_code, 0) << corrupted.stderr_output;
   EXPECT_EQ(corrupted.stdout_output, "first\n") << "corrupted sidecar must fall back to source";
 
   // Stale: edit the source, leave the (now mismatched) sidecar in place.
   project.Write("main.js", "console.log('second');\n");
-  auto stale = RunEdge(edge_path, {main_path.string()}, project.root());
+  auto stale = RunEdge(edge_path, {"--bytecode-cache", main_path.string()}, project.root());
   EXPECT_EQ(stale.exit_code, 0) << stale.stderr_output;
   EXPECT_EQ(stale.stdout_output, "second\n") << "stale sidecar must fall back to the new source";
 }
@@ -367,7 +400,7 @@ TEST_F(Test7BytecodeCachePhase05, CheckModeWritesNoSidecars) {
 
   TempProjectDir project("edge_bytecode_cache_check");
   const fs::path main_path = project.Write("main.js", "console.log('never');\n");
-  const fs::path sidecar = fs::path(main_path.string() + edge_bytecode_cache::SidecarSuffix());
+  const fs::path sidecar = edge_bytecode_cache::SidecarPathForSource(main_path.string());
 
   auto checked = RunEdge(edge_path, {"--check", main_path.string()}, project.root());
   EXPECT_EQ(checked.exit_code, 0) << checked.stderr_output;
@@ -402,11 +435,13 @@ TEST_F(Test7BytecodeCachePhase05, EsmSyntaxFilesGetModuleShapeSidecars) {
 
   auto result = RunEdge(edge_path, {"--precompile", project.root().string()}, project.root());
   EXPECT_EQ(result.exit_code, 0) << result.stderr_output;
-  const std::string suffix = edge_bytecode_cache::SidecarSuffix();
-  EXPECT_TRUE(fs::exists(project.root() / ("ok.js" + suffix)));
-  EXPECT_TRUE(fs::exists(project.root() / ("esm.js" + suffix)))
+  EXPECT_TRUE(fs::exists(
+      edge_bytecode_cache::SidecarPathForSource((project.root() / "ok.js").string())));
+  EXPECT_TRUE(fs::exists(
+      edge_bytecode_cache::SidecarPathForSource((project.root() / "esm.js").string())))
       << "ESM-syntax .js should be precompiled with the module shape";
-  EXPECT_TRUE(fs::exists(project.root() / ("mod.mjs" + suffix)));
+  EXPECT_TRUE(fs::exists(
+      edge_bytecode_cache::SidecarPathForSource((project.root() / "mod.mjs").string())));
 }
 
 #endif  // !defined(_WIN32)
