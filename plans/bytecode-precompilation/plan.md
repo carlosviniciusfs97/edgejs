@@ -5,39 +5,65 @@
 Cut process startup time by skipping JS parse/compile for both CommonJS and
 ES modules. Both engines serialize compiled code — V8 via `ScriptCompiler`
 code caches, QuickJS (quickjs-ng) via `JS_WriteObject`/`JS_ReadObject`
-bytecode — and the serialized form is stored as a **sidecar file next to the
-source**:
+bytecode — and the serialized form is stored in a **per-directory
+`__edgecache__/` subdirectory** next to the source, PEP 3147 (`__pycache__`)
+style:
 
 ```
-app.js / app.mjs        the source (unchanged, still authoritative)
-app.js.v8b              V8 code cache        (written by the bundled-v8 build)
-app.js.qjsb             QuickJS bytecode     (written by the quickjs build)
+src/app.js                                  the source (unchanged, authoritative)
+src/__edgecache__/app.js.v8-13-6.jsc        the cache (full filename + short engine tag)
 ```
 
-Both sidecars can coexist; each binary only reads its own suffix.
+A short engine tag — `v8-<major>-<minor>` / `qjs-<major>-<minor>` (e.g.
+`v8-13-6`, `qjs-0-14`) — is baked into the cache filename, so different engines
+and major.minor versions coexist in the same `__edgecache__/`. The header still
+carries the *full* engine version for the staleness check, so two patch builds
+sharing a major.minor reuse one filename and the header rejects + rewrites the
+stale one (correct, just a recompile — not wrong bytecode). The full
+source filename (extension kept) keys the entry (`app.js` → `app.js.<tag>.jsc`),
+so it is unique within the directory and `.js`/`.mjs`/`.cjs` siblings never
+collide. The cache lives in the
+tree (so it travels with the bundle and works read-only in prod when
+precompiled); a read-only source tree silently skips the write, like PEP 3147.
+
+The consolidated builtins cache is separate: one file next to the binary
+(`<exec-path>.builtins.v8b` / `.qjsb`), not a per-directory `__edgecache__`.
 
 ## Behavior
 
-- **Consume (default-on):** when the CJS loader or the ESM `ModuleWrap`
-  binding compiles a file and a valid sidecar exists, the engine consumes it
-  instead of parsing the source. Invalid, stale, or corrupted sidecars are
-  silently ignored (normal compile).
-- **Write-on-first-run (default-on):** when no valid sidecar exists, the
+Two independently-gated caches:
+
+- **Builtins (lib/) cache — ON by default.** Our own bytecode (a fixed set,
+  validated by engine tag + per-builtin source hash, read-only-safe) is the
+  biggest startup win at minimal risk, so it is consumed and written-on-first-
+  run for everyone, into one file next to the binary. Ship the prebuilt file
+  (`make precompile-builtins`) so the first run / read-only installs benefit
+  too.
+- **Per-file user sidecars — OFF by default (opt-in).** Arbitrary user code is
+  less battle-tested, so the per-file `__edgecache__/` sidecars are only read
+  or written when explicitly enabled. Opt in with `--bytecode-cache`,
+  `EDGE_BYTECODE_CACHE=1` (any truthy value), or `--precompile`.
+
+- **Consume:** when caching is active and a valid sidecar/builtin entry exists,
+  the engine consumes it instead of parsing the source. Invalid, stale, or
+  corrupted entries are silently ignored (normal compile).
+- **Write-on-first-run:** when caching is active and no valid entry exists, the
   runtime compiles eagerly to a bytecode handle, persists it atomically (temp
   file + rename), and executes from the same handle — the source is parsed
   exactly once. Failures (read-only filesystem, permissions) are silent.
-- **Explicit precompile:** `edge --precompile <file|dir>...` walks the paths
-  and compiles every eligible file **without executing any module body**:
-  `.cjs` always (CJS shape), `.mjs` always (module shape), `.js` per its
-  nearest `package.json` `type` (an ESM-syntax `.js` in a commonjs scope is
-  retried with the module shape — mirroring runtime detect-module).
-  `node_modules` is included.
-- **Opt-outs:** `--no-bytecode-cache` (CLI) or `EDGE_BYTECODE_CACHE=0` (env)
-  disable both reads and writes. `--check` disables the cache implicitly.
-  `--precompile` conflicts with `--check/--eval/--test/--watch/--interactive/
-  --run/--no-bytecode-cache` (exit 9).
+- **Explicit precompile:** `edge --precompile <file|dir>...` (implies user
+  sidecars on) walks the paths and compiles every eligible file **without
+  executing any module body**: `.cjs` always (CJS shape), `.mjs` always
+  (module shape), `.js` per its nearest `package.json` `type` (an ESM-syntax
+  `.js` in a commonjs scope is retried with the module shape — mirroring
+  runtime detect-module). `node_modules` is included.
+- **Kill switch:** `--no-bytecode-cache` (CLI) or `EDGE_BYTECODE_CACHE=0`
+  (env) disable **everything** including the builtins cache. `--check`
+  disables implicitly (a syntax check must not write to the tree). CLI flags
+  win over the env var. `--precompile` conflicts with `--check/--eval/--test/
+  --watch/--interactive/--run/--no-bytecode-cache` (exit 9).
 - **Tracing:** `EDGE_BYTECODE_CACHE_TRACE=1` prints `hit/miss/write/remove`
-  lines to stderr (used by tests).
+  and `builtin-*`/`builtins-*` lines to stderr (used by tests).
 
 ## Architecture: JSSource + bytecode handles
 
