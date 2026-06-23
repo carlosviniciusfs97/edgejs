@@ -71,6 +71,10 @@
 #include "edge_spawn_sync.h"
 #include "internal_binding/helpers.h"
 
+#if defined(EDGE_NAPI_QUICKJS) && defined(EDGE_QUICKJS_WEBASSEMBLY)
+#include "webassembly/edge_wasm.h"
+#endif
+
 namespace {
 
 thread_local std::string g_edge_current_script_path;
@@ -2774,6 +2778,14 @@ int RunScriptWithGlobals(napi_env env,
       get_linked_binding != nullptr) {
     define_hidden_global("getLinkedBinding", get_linked_binding);
   }
+#if defined(EDGE_NAPI_QUICKJS) && defined(EDGE_QUICKJS_WEBASSEMBLY)
+  if (!EdgeInstallQuickJsWebAssembly(env, error_out)) {
+    if (error_out != nullptr && error_out->empty()) {
+      *error_out = "Failed to install QuickJS WebAssembly";
+    }
+    return 1;
+  }
+#endif
   if (!execute_bootstrapper("internal/per_context/primordials", nullptr)) {
     if (should_abort_worker_bootstrap()) return 1;
     return 1;

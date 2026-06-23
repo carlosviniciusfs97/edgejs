@@ -32,6 +32,22 @@ function(edge_configure_options)
     "Link against a shared/system OpenSSL instead of the vendored OpenSSL"
     OFF
   )
+  option(EDGE_QUICKJS_WEBASSEMBLY
+    "Install a QuickJS-only WebAssembly global backed by Wasmer's wasm_c_api"
+    ON
+  )
+  set(EDGE_QUICKJS_WASMER_VERSION
+    "latest-stable"
+    CACHE STRING "Wasmer C API version for QuickJS WebAssembly, or latest-stable"
+  )
+  set(EDGE_QUICKJS_WASMER_DIST_ROOT
+    "$ENV{EDGE_QUICKJS_WASMER_DIST_ROOT}"
+    CACHE PATH "Path to a Wasmer C API distribution with include/ and lib/libwasmer.a"
+  )
+  option(EDGE_QUICKJS_WASMER_ALLOW_PRERELEASE
+    "Allow prerelease Wasmer C API versions when resolving latest"
+    OFF
+  )
   option(ENABLE_TRACING
     "Compile startup tracing support"
     OFF
@@ -67,6 +83,10 @@ function(edge_configure_options)
   set(EDGE_PREFER_REPO_LOCAL_V8 "${EDGE_PREFER_REPO_LOCAL_V8}" PARENT_SCOPE)
   set(EDGE_BUILD_NAPI_TESTS "${EDGE_BUILD_NAPI_TESTS}" PARENT_SCOPE)
   set(EDGE_SHARED_OPENSSL "${EDGE_SHARED_OPENSSL}" PARENT_SCOPE)
+  set(EDGE_QUICKJS_WEBASSEMBLY "${EDGE_QUICKJS_WEBASSEMBLY}" PARENT_SCOPE)
+  set(EDGE_QUICKJS_WASMER_VERSION "${EDGE_QUICKJS_WASMER_VERSION}" PARENT_SCOPE)
+  set(EDGE_QUICKJS_WASMER_DIST_ROOT "${EDGE_QUICKJS_WASMER_DIST_ROOT}" PARENT_SCOPE)
+  set(EDGE_QUICKJS_WASMER_ALLOW_PRERELEASE "${EDGE_QUICKJS_WASMER_ALLOW_PRERELEASE}" PARENT_SCOPE)
   set(ENABLE_TRACING "${ENABLE_TRACING}" PARENT_SCOPE)
   set(EDGE_SHARED_OPENSSL_INCLUDES "${EDGE_SHARED_OPENSSL_INCLUDES}" PARENT_SCOPE)
   set(EDGE_SHARED_OPENSSL_LIBPATH "${EDGE_SHARED_OPENSSL_LIBPATH}" PARENT_SCOPE)

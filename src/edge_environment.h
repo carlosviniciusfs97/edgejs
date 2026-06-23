@@ -182,6 +182,7 @@ enum EdgeEnvironmentSlotId : size_t {
   kEdgeEnvironmentSlotPrepareStackTraceState,
   kEdgeEnvironmentSlotProfilerState,
   kEdgeEnvironmentSlotLazyPropertyStore,
+  kEdgeEnvironmentSlotQuickJsWebAssemblyState,
 };
 
 namespace edge {
