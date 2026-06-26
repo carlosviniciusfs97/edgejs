@@ -28,3 +28,5 @@ benchmarks/workloads/bytecode-cache/gen-esm/
 /AGENTS.md
 /claude.md
 /docs/superpowers/
+__edgecache__
+
