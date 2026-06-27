@@ -10,7 +10,6 @@ on:
 jobs:
   metadata:
     name: metadata
-    if: ${{ false }}
     runs-on: ubuntu-latest
     outputs:
       edge_version: ${{ steps.version.outputs.edge_version }}
@@ -42,7 +41,6 @@ jobs:
 
   v8-linux:
     name: v8-linux
-    if: ${{ false }}
     runs-on: ubuntu-latest
     env:
       NAPI_V8_BUILD_METHOD: prebuilt
@@ -63,6 +61,7 @@ jobs:
           set -euo pipefail
           git submodule sync --recursive
           git -c protocol.version=2 submodule update --init --recursive --depth=1
+          test -f node/src/node_api_types.h
 
       - name: Install Linux build dependencies
         shell: bash
@@ -108,7 +107,6 @@ jobs:
 
   v8-macos:
     name: v8-macos
-    if: ${{ false }}
     runs-on: macos-latest
     env:
       NAPI_V8_BUILD_METHOD: prebuilt
@@ -129,6 +127,7 @@ jobs:
           set -euo pipefail
           git submodule sync --recursive
           git -c protocol.version=2 submodule update --init --recursive --depth=1
+          test -f node/src/node_api_types.h
 
       - name: Validate public N-API headers stay V8-agnostic
         shell: bash
@@ -167,7 +166,6 @@ jobs:
 
   v8-wasix:
     name: v8-wasix
-    if: ${{ false }}
     runs-on: ubuntu-latest
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -184,11 +182,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install wasixcc
-        uses: wasix-org/wasixcc@v0.4.3
+        uses: wasix-org/wasixcc@v0.4.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          sysroot-tag: v2026-06-25.1
-          version: v0.4.3
+          sysroot-tag: v2026-02-16.1
+          version: v0.4.2
 
       - name: Install wasm-tools
         shell: bash
@@ -221,13 +219,13 @@ jobs:
 
   publish-nightly:
     name: publish-nightly
-    if: ${{ false }}
     runs-on: ubuntu-latest
     needs:
       - metadata
       - v8-linux
       - v8-macos
       - v8-wasix
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     env:
       GH_TOKEN: ${{ secrets.RELEASE_PLEASE_GH_TOKEN }}
       TARGET_REPO: wasmerio/edgejs-nightlies
@@ -369,12 +367,7 @@ jobs:
             "${files[@]}"
 
       - name: Install Wasmer CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl https://get.wasmer.io -sSfL | sh -s "v7.2.0-alpha.3"
-          echo "${HOME}/.wasmer/bin" >> "${GITHUB_PATH}"
-          "${HOME}/.wasmer/bin/wasmer" --version
+        uses: wasmerio/setup-wasmer@v3
 
       - name: Publish to wasmer.wtf
         env:

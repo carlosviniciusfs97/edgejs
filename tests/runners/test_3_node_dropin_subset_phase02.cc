@@ -234,10 +234,16 @@ bool ScriptHasUnsupportedFlagsHeader(const std::filesystem::path& script_path) {
   return false;
 }
 
-#if defined(PROJECT_ROOT_PATH)
+#if defined(NAPI_V8_NODE_ROOT_PATH) || defined(PROJECT_ROOT_PATH)
 std::filesystem::path ResolveNodeTestRootPathForRawScript(std::string_view script_rel) {
   namespace fs = std::filesystem;
+#if defined(PROJECT_ROOT_PATH)
   fs::path node_test_root_path(PROJECT_ROOT_PATH "/test");
+#elif defined(NAPI_V8_NODE_ROOT_PATH)
+  fs::path node_test_root_path = fs::path(NAPI_V8_NODE_ROOT_PATH).parent_path() / "test";
+#else
+  fs::path node_test_root_path("test");
+#endif
   if (!node_test_root_path.is_absolute()) {
     // Resolve relative test_root by walking up from cwd until we find
     // test/<suite>/<script>.
@@ -324,7 +330,7 @@ int RunRawNodeTestScript(napi_env env,
                          const char* node_test_relative_path,
                          std::string* error_out,
                          bool keep_event_loop_alive) {
-#if defined(PROJECT_ROOT_PATH)
+#if defined(NAPI_V8_NODE_ROOT_PATH) || defined(PROJECT_ROOT_PATH)
   namespace fs = std::filesystem;
   ScopedEnvSnapshot env_snapshot;
   std::error_code cwd_ec;
@@ -475,7 +481,7 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
                                      std::string* error_out,
                                      bool redirect_stdio_to_files,
                                      bool use_pseudo_tty) {
-#if defined(PROJECT_ROOT_PATH)
+#if defined(NAPI_V8_NODE_ROOT_PATH) || defined(PROJECT_ROOT_PATH)
 #if defined(_WIN32)
   (void)node_test_relative_path;
   (void)redirect_stdio_to_files;
@@ -828,7 +834,7 @@ TEST_F(Test3NodeDropinSubsetPhase02, OsCheckedCompatTest) {
   EXPECT_TRUE(error.empty()) << "error=" << error;
 }
 
-#if defined(PROJECT_ROOT_PATH)
+#if defined(NAPI_V8_NODE_ROOT_PATH) || defined(PROJECT_ROOT_PATH)
 TEST_F(Test3NodeDropinSubsetPhase02, RawRequireCacheFromNodeTest) {
   EnvScope s(runtime_.get());
   std::string error;
