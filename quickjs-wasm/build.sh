@@ -126,26 +126,14 @@ PY
 
 "${PROJECT_ROOT}/wasix/setup-wasix-deps.sh"
 
-if [[ "${WASIX_FORCE_RECONFIGURE:-0}" == "1" ]]; then
-  if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
-    rm -f "${BUILD_DIR}/CMakeCache.txt"
-  fi
-  if [[ -d "${BUILD_DIR}/CMakeFiles" ]]; then
-    rm -rf "${BUILD_DIR}/CMakeFiles"
-  fi
+if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
+  rm -f "${BUILD_DIR}/CMakeCache.txt"
+fi
+if [[ -d "${BUILD_DIR}/CMakeFiles" ]]; then
+  rm -rf "${BUILD_DIR}/CMakeFiles"
 fi
 
-openssl_wasix_ready() {
-    [[ -f "${OPENSSL_WASIX_DIR}/libcrypto.a" ]] &&
-    [[ -f "${OPENSSL_WASIX_DIR}/libssl.a" ]] &&
-    [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/ssl.h" ]] &&
-    [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/comp.h" ]] &&
-    [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/e_ostime.h" ]] &&
-    [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/lhash.h" ]] &&
-    [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/opensslv.h" ]]
-}
-
-if ! openssl_wasix_ready; then
+if [[ ! -f "${OPENSSL_WASIX_DIR}/libcrypto.a" || ! -f "${OPENSSL_WASIX_DIR}/libssl.a" ]]; then
   echo "Building OpenSSL static libraries for WASIX..."
   (
     cd "${OPENSSL_WASIX_DIR}"
@@ -158,7 +146,7 @@ if ! openssl_wasix_ready; then
     LD=wasixld \
     CFLAGS="--target=wasm32-wasix -matomics -mbulk-memory -mmutable-globals -pthread -mthread-model posix -ftls-model=local-exec -fno-trapping-math -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -DUSE_TIMEGM -DOPENSSL_NO_SECURE_MEMORY -DOPENSSL_NO_DGRAM -DOPENSSL_THREADS -O2" \
     LDFLAGS="-Wl,--allow-undefined" \
-    ./Configure linux-generic32 -static no-shared no-pic no-asm no-dso no-tests no-apps no-afalgeng -DUSE_TIMEGM -DOPENSSL_NO_SECURE_MEMORY -DOPENSSL_NO_DGRAM -DOPENSSL_THREADS
+    ./Configure linux-generic32 -static no-shared no-pic no-asm no-tests no-apps no-afalgeng -DUSE_TIMEGM -DOPENSSL_NO_SECURE_MEMORY -DOPENSSL_NO_DGRAM -DOPENSSL_THREADS
     make build_generated
     make -j4 libcrypto.a libssl.a
     wasixranlib libcrypto.a || true

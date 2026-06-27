@@ -14,8 +14,4 @@ name = "edge"
 module = "edge"
 
 [fs]
-"/etc" = "./etc"
 "/usr/local/ssl" = "../ssl-certs"
-
-[dependencies]
-"wasmer/bash" = "1.0.25"

@@ -10,33 +10,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 
-const harness = require('./lib/framework-test-shared').create({
-  rootDir: path.resolve(__dirname, '..'),
-  toolName: 'framework-test',
-  stateDirName: '.framework-test',
-});
-
-const ROOT_DIR = harness.ROOT_DIR;
-const EXAMPLES_DIR = harness.EXAMPLES_DIR;
-const STATE_DIR = harness.STATE_DIR;
-const LOG_DIR = harness.LOG_DIR;
-const PNPM_STORE_DIR = harness.PNPM_STORE_DIR;
-const installProjects = harness.installProjects;
-const DEFAULT_RUNNER = harness.DEFAULT_RUNNER;
-const DEFAULT_HOST = harness.DEFAULT_HOST;
-const STATIC_SERVER_SCRIPT_BASENAME = '.framework-test-static-server.cjs';
-const LEGACY_STATIC_SERVER_SCRIPT_BASENAME = '.framework-test-static-server.js';
-const STATIC_SERVER_RESOLVER_MARKER = 'framework-test-static-server-v2';
-const ROUTES_JSON_BASENAME = 'routes.json';
-const DEFAULT_ROUTE_MATRIX = {
-  version: 1,
-  routes: [{
-    path: '/',
-    expect: {
-      contentType: 'html',
-    },
-  }],
-};
+const ROOT_DIR = path.resolve(__dirname, '..');
+const EXAMPLES_DIR = path.join(ROOT_DIR, 'wasmer-examples');
+const STATE_DIR = path.join(ROOT_DIR, '.framework-test');
+const LOG_DIR = path.join(STATE_DIR, 'logs');
+const PNPM_STORE_DIR = path.join(STATE_DIR, 'pnpm-store');
+const DEFAULT_RUNNER = path.join(ROOT_DIR, 'build-edge', 'edge');
+const DEFAULT_HOST = '127.0.0.1';
+const STATIC_SERVER_SCRIPT_BASENAME = '.framework-test-static-server.js';
 const SUBMODULE_HINT = 'git submodule update --init --recursive wasmer-examples';
 const NODE_HINT = 'Install Node.js and make sure `node` is on PATH before running framework-test.';
 const PNPM_HINT = 'Install pnpm and make sure it is on PATH. For example: corepack enable pnpm';
@@ -60,12 +41,6 @@ const GENERATED_FRAMEWORK_PATHS = [
   'public/_gatsby',
   'public/page-data',
 ];
-const NEXT_JS_CONFIG_FILES = [
-  'next.config.js',
-  'next.config.mjs',
-  'next.config.cjs',
-];
-const NEXT_TS_CONFIG_FILE = 'next.config.ts';
 const SERVER_READY_TIMEOUT_MS = 45 * 1000;
 const HTTP_REQUEST_TIMEOUT_MS = 5 * 1000;
 const PROCESS_SHUTDOWN_TIMEOUT_MS = 5 * 1000;
@@ -74,8 +49,6 @@ const MAX_HTTP_REDIRECTS = 5;
 const MAX_RESPONSE_BODY_BYTES = 64 * 1024;
 const PORT_BASE = Number(process.env.FRAMEWORK_TEST_PORT_BASE || '4300');
 const PORT_BLOCK_SIZE = Number(process.env.FRAMEWORK_TEST_PORT_BLOCK_SIZE || '10');
-const EDGE_STAGE_SKIP_PROJECTS = parseEdgeStageSkipProjects();
-const NODE_STAGE_SKIP_PROJECTS = parseNodeStageSkipProjects();
 const USE_COLOR = Boolean(process.stdout.isTTY && !process.env.NO_COLOR);
 const ANSI = {
   blue: '\u001b[34m',
@@ -145,7 +118,7 @@ function parseSelector(args) {
 async function test(selector) {
   const prepared = await setup(selector);
   const nodeRunner = HOST_NODE_RUNNER;
-  const stages = harness.buildRunnerStages(nodeRunner, prepared.runner);
+  const stages = buildRunnerStages(nodeRunner, prepared.runner);
 
   printSection('Framework Matrix', 'blue', `${prepared.projects.length} framework${prepared.projects.length === 1 ? '' : 's'}`);
 
@@ -156,15 +129,12 @@ async function test(selector) {
     const skippedProjects = stage.skippedProjects
       ? stage.skippedProjects(prepared.projects, selectedProjects, previousResult)
       : [];
-    const result = await harness.runRunnerStage(stage, selectedProjects, skippedProjects, {
-      prepareProject: prepareProjectForStage,
-      testProject,
-    });
+    const result = await runRunnerStage(stage, selectedProjects, skippedProjects);
     stageResults.push(result);
     previousResult = result;
   }
 
-  harness.printMatrixSummary(stageResults, prepared.projects);
+  printMatrixSummary(stageResults, prepared.projects);
 
   if (stageResults.some((result) => result.failed.length > 0)) {
     fail('framework runtime validation failed');
@@ -174,7 +144,27 @@ async function test(selector) {
 }
 
 function resolveHostNodeRunner() {
-  return harness.resolveHostNodeRunner();
+  const result = spawnSync('node', ['-e', 'process.stdout.write(process.execPath)'], {
+    cwd: ROOT_DIR,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+
+  if (result.error || result.status !== 0 || !result.stdout.trim()) {
+    fail(`node is required for the baseline framework run.\n${NODE_HINT}`);
+  }
+
+  const targetPath = result.stdout.trim();
+  if (!isExecutable(targetPath)) {
+    fail(`resolved node runner is not executable: ${targetPath}\n${NODE_HINT}`);
+  }
+
+  return {
+    color: 'cyan',
+    key: 'node',
+    label: 'Node.js',
+    targetPath,
+  };
 }
 
 const HOST_NODE_RUNNER = resolveHostNodeRunner();
@@ -194,12 +184,9 @@ function buildRunnerStages(nodeRunner, comparisonRunner) {
     return stages;
   }
 
-  const customRunnerLabel = process.env.FRAMEWORK_TEST_RUNNER_LABEL &&
-    process.env.FRAMEWORK_TEST_RUNNER_LABEL.trim();
-  const comparisonLabel = customRunnerLabel ||
-    (path.resolve(comparisonRunner.targetPath) === path.resolve(DEFAULT_RUNNER)
-      ? 'EdgeJS Native'
-      : 'Comparison Runner');
+  const comparisonLabel = path.resolve(comparisonRunner.targetPath) === path.resolve(DEFAULT_RUNNER)
+    ? 'EdgeJS Native'
+    : 'Comparison Runner';
   const comparisonKey = path.resolve(comparisonRunner.targetPath) === path.resolve(DEFAULT_RUNNER)
     ? 'edgejs'
     : 'comparison';
@@ -211,11 +198,6 @@ function buildRunnerStages(nodeRunner, comparisonRunner) {
     runnerCommandParts: [comparisonRunner.targetPath],
   });
   stages.push(comparisonStage);
-
-  if (process.env.FRAMEWORK_TEST_SKIP_SAFE === '1') {
-    logWarn('FRAMEWORK_TEST_SKIP_SAFE=1; skipping the safe stage');
-    return stages;
-  }
 
   if (!supportsSafeRunner(comparisonRunner.targetPath)) {
     logWarn(`comparison runner does not look like an EdgeJS binary (${comparisonRunner.targetPath}); skipping the safe stage`);
@@ -300,23 +282,68 @@ function buildRunnerDisplay(runnerCommandParts) {
 }
 
 function supportsSafeRunner(targetPath) {
-  const baseName = path.basename(targetPath);
-  if (baseName === 'edge-wasix-framework-runner.sh') {
-    return false;
-  }
-
   if (path.resolve(targetPath) === path.resolve(DEFAULT_RUNNER)) {
     return true;
   }
 
-  return /(^|[^a-z])edge(js)?([^a-z]|$)/i.test(baseName);
+  return /(^|[^a-z])edge(js)?([^a-z]|$)/i.test(path.basename(targetPath));
 }
 
 async function runRunnerStage(stage, projects, skippedProjects) {
-  return harness.runRunnerStage(stage, projects, skippedProjects, {
-    prepareProject: prepareProjectForStage,
-    testProject,
-  });
+  printSection(stage.label, stage.color, stage.runnerDisplay);
+
+  if (projects.length === 0) {
+    logSkip(`no frameworks selected for ${stage.label.toLowerCase()}`);
+    const emptyResult = {
+      failed: [],
+      passed: [],
+      skipped,
+      stage,
+      testedProjects: [],
+    };
+    printStageSummary(emptyResult);
+    return emptyResult;
+  }
+
+  const passed = [];
+  const failed = [];
+  const skipped = (skippedProjects || []).slice();
+  for (let index = 0; index < projects.length; index += 1) {
+    const project = projects[index];
+
+    try {
+      const preparation = prepareProjectForStage(project, stage);
+      const result = await testProject(project, stage, index, projects.length, preparation);
+      passed.push({
+        ...result,
+        compatibleLaunchers: preparation.compatibleLaunchers,
+        project,
+      });
+      logSuccess(`validated ${project.name}: HTTP ${result.response.statusCode} via ${result.runtime.name} on ${DEFAULT_HOST}:${result.port}`);
+    } catch (error) {
+      if (error && error.skip) {
+        skipped.push({
+          project,
+          reason: error.detail || error.message || 'skipped',
+        });
+        logSkip(`${project.name} skipped on ${stage.label}: ${error.detail || error.message}`);
+        continue;
+      }
+      const failure = createFailureRecord(project, stage, error);
+      failed.push(failure);
+      logError(`${project.name} failed on ${stage.label}: ${failure.detail}`);
+    }
+  }
+
+  const result = {
+    failed,
+    passed,
+    skipped,
+    stage,
+    testedProjects: projects,
+  };
+  printStageSummary(result);
+  return result;
 }
 
 function prepareProjectForStage(project, stage) {
@@ -480,59 +507,91 @@ function resolveRunnerTarget() {
   return { targetPath };
 }
 
-function parseEdgeStageSkipProjects() {
-  const raw = process.env.FRAMEWORK_TEST_EDGE_SKIP;
-  if (!raw || !raw.trim()) {
-    return new Set();
-  }
+async function installProjects(projects) {
+  log(`running pnpm install in parallel across ${projects.length} framework${projects.length === 1 ? '' : 's'}`);
 
-  return new Set(raw.split(',').map((entry) => entry.trim()).filter(Boolean));
+  let completed = 0;
+  const results = await Promise.all(projects.map(async (project, index) => {
+    log(`pnpm install started for ${project.name} (${index + 1}/${projects.length})`);
+    const result = await installProject(project);
+    completed += 1;
+    const status = result.ok ? 'completed' : 'failed';
+    log(`pnpm install ${status} for ${project.name} (${completed}/${projects.length}, ${formatDuration(result.durationMs)})`);
+    return result;
+  }));
+  const failures = results.filter((result) => !result.ok);
+
+  if (failures.length > 0) {
+    const lines = ['one or more pnpm install commands failed:'];
+    for (const failure of failures) {
+      lines.push(`- ${failure.project.name}: ${failure.logPath}`);
+    }
+    fail(lines.join('\n'));
+  }
 }
 
-function parseNodeStageSkipProjects() {
-  const raw = process.env.FRAMEWORK_TEST_NODE_SKIP;
-  if (!raw || !raw.trim()) {
-    return new Set();
-  }
+function installProject(project) {
+  const logPath = path.join(LOG_DIR, `${project.name}.pnpm-install.log`);
+  const startedAt = Date.now();
 
-  return new Set(raw.split(',').map((entry) => entry.trim()).filter(Boolean));
-}
+  return new Promise((resolve) => {
+    const logStream = fs.createWriteStream(logPath, { flags: 'w' });
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      logStream.end(() => resolve({
+        durationMs: Date.now() - startedAt,
+        ...result,
+      }));
+    };
 
-function maybeSkipStageProject(project, stage) {
-  if (stage.key === 'node' && NODE_STAGE_SKIP_PROJECTS.has(project.name)) {
-    const error = new Error(`${project.name} skipped on ${stage.label}`);
-    error.skip = true;
-    error.detail = 'listed in FRAMEWORK_TEST_NODE_SKIP';
-    return error;
-  }
+    logStream.write(`${formatPrefix('INFO')} pnpm install in ${project.name}${os.EOL}`);
 
-  if (isEdgeRuntimeStage(stage) && EDGE_STAGE_SKIP_PROJECTS.has(project.name)) {
-    const error = new Error(`${project.name} skipped on ${stage.label}`);
-    error.skip = true;
-    error.detail = 'listed in FRAMEWORK_TEST_EDGE_SKIP';
-    return error;
-  }
+    const child = spawn('pnpm', ['install', '--no-lockfile', '--store-dir', PNPM_STORE_DIR], {
+      cwd: project.dir,
+      env: {
+        ...process.env,
+        CI: process.env.CI || 'true',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
 
-  return null;
+    child.stdout.on('data', (chunk) => {
+      logStream.write(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      logStream.write(chunk);
+    });
+
+    child.on('error', (error) => {
+      logStream.write(`${formatPrefix('ERROR')} spawn error: ${error.message}${os.EOL}`);
+      finish({ ok: false, project, logPath });
+    });
+
+    child.on('close', (code, signal) => {
+      if (signal) {
+        logStream.write(`${formatPrefix('WARN')} signal: ${signal}${os.EOL}`);
+      }
+      logStream.write(`${formatPrefix(code === 0 ? 'INFO' : 'ERROR')} exit: ${code}${os.EOL}`);
+      finish({ ok: code === 0, project, logPath });
+    });
+  });
 }
 
 async function testProject(project, stage, index, total, preparation) {
   logProgress(index + 1, total, `[${stage.label}] testing ${project.name}`);
 
-  const skipError = maybeSkipStageProject(project, stage);
-  if (skipError) {
-    throw skipError;
-  }
-
-  assertEdgeRuntimeCompatibleProject(project, stage);
-
   let runtime = detectRuntimeScript(project);
   runtime = resolveRuntimeStrategy(project, runtime);
+  log(`selected runtime for ${project.name}: ${runtime.name} -> ${runtime.command}`);
 
   const portCandidates = buildPortCandidates(index);
   log(`port candidates for ${project.name}: ${portCandidates.join(', ')}`);
 
-  const shouldBuild = shouldBuildProject(project, runtime, stage);
+  const shouldBuild = shouldBuildProject(project, runtime);
   const reuseExistingBuild = Boolean(preparation && preparation.reuseExistingBuild);
 
   if (shouldBuild && !reuseExistingBuild) {
@@ -545,30 +604,11 @@ async function testProject(project, stage, index, total, preparation) {
     log(`skipping build for ${project.name}; runtime script ${runtime.name} is development-oriented`);
   }
 
-  if (isEdgeRuntimeStage(stage)) {
-    runtime = resolveEdgeProductionRuntime(project, runtime, stage);
-  } else {
-    runtime = preferStaticRuntimeOnEdge(project, runtime, stage);
-  }
-  log(`selected runtime for ${project.name}: ${runtime.name} -> ${runtime.command}`);
-
-  const routes = loadRouteMatrix(project, stage, runtime);
-  if (routes.length === 0) {
-    if (isEdgeRuntimeStage(stage)) {
-      const error = new Error(`${project.name} has no routes for ${stage.label}`);
-      error.skip = true;
-      error.detail = 'routes.json limits this project to the Node.js baseline stage';
-      throw error;
-    }
-    fail(`no routes configured for ${project.name} on ${stage.label}`);
-  }
-
   let server = null;
   let activeRuntime = runtime;
   let usedProductionFallback = false;
-  let readinessPath = routeReadinessPath(project, stage, activeRuntime);
   try {
-    server = await startProjectServer(project, runtime, portCandidates, stage, readinessPath);
+    server = await startProjectServer(project, runtime, portCandidates, stage);
   } catch (error) {
     const fallbackRuntime = await maybePrepareProductionFallback(project, stage, runtime, shouldBuild, reuseExistingBuild, error);
     if (!fallbackRuntime) {
@@ -576,18 +616,16 @@ async function testProject(project, stage, index, total, preparation) {
     }
     activeRuntime = fallbackRuntime;
     usedProductionFallback = true;
-    readinessPath = routeReadinessPath(project, stage, activeRuntime);
-    server = await startProjectServer(project, fallbackRuntime, portCandidates, stage, readinessPath);
+    server = await startProjectServer(project, fallbackRuntime, portCandidates, stage);
   }
   try {
-    const routeResults = await validateRouteMatrix(project, activeRuntime, server.port, routes);
+    validateHttpResponse(project, activeRuntime, server.response);
     return {
       buildLogPath: shouldBuild && !reuseExistingBuild ? buildLogPath(project, stage) : null,
       candidate: server.candidate,
       port: server.port,
       project,
       response: server.response,
-      routeResults,
       runtime: activeRuntime,
       serverLogPath: server.logPath,
       usedProductionFallback,
@@ -635,64 +673,10 @@ function isDevelopmentLikeRuntime(runtime) {
     return false;
   }
 
-  const lower = runtime.command.toLowerCase();
-  if (runtime.name === 'dev' || runtime.name === 'develop') {
-    return true;
-  }
-  if (/\bdev\b/.test(lower) || /\bdevelop\b/.test(lower)) {
-    return true;
-  }
-  if (/\bdocusaurus-start\b/.test(lower)) {
-    return true;
-  }
-  if (/\bdocusaurus start\b/.test(lower) && !/\bdocusaurus serve\b/.test(lower)) {
-    return true;
-  }
-  if (/\bgatsby develop\b/.test(lower)) {
-    return true;
-  }
-  if (/\bnext dev\b/.test(lower)) {
-    return true;
-  }
-  if (/\bvite dev\b/.test(lower)) {
-    return true;
-  }
-  if (/\bastro dev\b/.test(lower)) {
-    return true;
-  }
-
-  return false;
-}
-
-function staticRuntimeFor(project, outputDir) {
-  return {
-    command: `internal static server for ${path.basename(outputDir)}/`,
-    mode: 'static-export',
-    name: 'static',
-    outputDir,
-  };
-}
-
-function resolveEdgeProductionRuntime(project, runtime, stage) {
-  if (runtime.mode === 'static-export') {
-    return runtime;
-  }
-
-  if (isDevelopmentLikeRuntime(runtime) || shouldPreferStaticRuntimeOverScript(project, runtime)) {
-    const outputDir = detectStaticProductionOutputDir(project);
-    if (!outputDir) {
-      fail([
-        `${project.name} cannot run on ${stage.label}: EdgeJS runtime stages require prebuilt production artifacts`,
-        `The selected script (${runtime.name}: ${runtime.command}) is development-oriented.`,
-        'Ensure the project has a build script and that `pnpm run build` succeeds on host Node.js first.',
-      ].join('\n'));
-    }
-
-    log(`using static production output for ${project.name} on ${stage.label} instead of ${runtime.name}`);
-    return staticRuntimeFor(project, outputDir);
-  }
-
-  return runtime;
+  return runtime.name === 'dev'
+    || runtime.name === 'develop'
+    || /\bdev\b/.test(runtime.command.toLowerCase())
+    || /\bdevelop\b/.test(runtime.command.toLowerCase());
 }
 
 function resolveProductionFallbackRuntime(project, currentRuntime) {
@@ -706,7 +690,7 @@ function resolveProductionFallbackRuntime(project, currentRuntime) {
     };
   }
 
-  const outputDir = detectStaticProductionOutputDir(project);
+  const outputDir = detectStaticOutputDir(project);
   if (outputDir) {
     return {
       command: `internal static server for ${path.basename(outputDir)}/`,
@@ -718,19 +702,7 @@ function resolveProductionFallbackRuntime(project, currentRuntime) {
 
   const productionScript = detectProductionRuntimeScript(project);
   if (productionScript && (!currentRuntime || productionScript.command.trim() !== currentRuntime.command.trim())) {
-    const fallbackRuntime = resolveRuntimeStrategy(project, productionScript);
-    if (fallbackRuntime.mode === 'package-script' && shouldPreferStaticRuntimeOverScript(project, fallbackRuntime)) {
-      const staticDir = detectStaticProductionOutputDir(project);
-      if (staticDir) {
-        return {
-          command: `internal static server for ${path.basename(staticDir)}/`,
-          mode: 'static-export',
-          name: 'static',
-          outputDir: staticDir,
-        };
-      }
-    }
-    return fallbackRuntime;
+    return resolveRuntimeStrategy(project, productionScript);
   }
 
   return null;
@@ -774,21 +746,6 @@ function scoreProductionRuntimeScript(name, command) {
   if (/\bdev\b|\bdevelop\b/.test(lower)) {
     score -= 200;
   }
-  if (/\bdocusaurus-start\b/.test(lower)) {
-    score -= 200;
-  }
-  if (/\bgatsby develop\b/.test(lower)) {
-    score -= 200;
-  }
-  if (/\bnext dev\b/.test(lower)) {
-    score -= 200;
-  }
-  if (/\bvite dev\b/.test(lower)) {
-    score -= 200;
-  }
-  if (/\bastro dev\b/.test(lower)) {
-    score -= 200;
-  }
   if (/\$port\b|--port\b|(?:^|\s)-p(?:\s|$)|(?:^|\s)-l(?:\s|$)/.test(lower)) {
     score += 10;
   }
@@ -811,154 +768,14 @@ function detectNextPrerenderedOutputDir(project) {
 }
 
 function detectStaticOutputDir(project) {
-  for (const candidate of ['out', 'dist']) {
+  for (const candidate of ['out', 'dist', 'build', '.next']) {
     const target = path.join(project.dir, candidate);
     if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
       return target;
     }
   }
 
-  const buildDir = path.join(project.dir, 'build');
-  if (fs.existsSync(buildDir)
-    && fs.statSync(buildDir).isDirectory()
-    && fs.existsSync(path.join(buildDir, 'index.html'))) {
-    return buildDir;
-  }
-
   return null;
-}
-
-function detectStaticProductionOutputDir(project) {
-  const gatsbyDir = detectGatsbyBuildOutputDir(project);
-  if (gatsbyDir) {
-    return gatsbyDir;
-  }
-
-  const docusaurusV1Dir = detectDocusaurusV1BuildOutputDir(project);
-  if (docusaurusV1Dir) {
-    return docusaurusV1Dir;
-  }
-
-  return detectStaticOutputDir(project);
-}
-
-function projectUsesDocusaurusV1(project) {
-  const deps = {
-    ...(project.manifest.dependencies || {}),
-    ...(project.manifest.devDependencies || {}),
-    ...(project.manifest.peerDependencies || {}),
-  };
-
-  return Object.prototype.hasOwnProperty.call(deps, 'docusaurus')
-    && !Object.prototype.hasOwnProperty.call(deps, '@docusaurus/core');
-}
-
-function detectDocusaurusV1BuildOutputDir(project) {
-  if (!projectUsesDocusaurusV1(project)) {
-    return null;
-  }
-
-  const buildRoot = path.join(project.dir, 'build');
-  if (!fs.existsSync(buildRoot) || !fs.statSync(buildRoot).isDirectory()) {
-    return null;
-  }
-
-  const siteConfigPath = path.join(project.dir, 'siteConfig.js');
-  if (fs.existsSync(siteConfigPath)) {
-    try {
-      const siteConfig = require(siteConfigPath);
-      if (siteConfig && typeof siteConfig.projectName === 'string') {
-        const candidate = path.join(buildRoot, siteConfig.projectName);
-        if (fs.existsSync(path.join(candidate, 'index.html'))) {
-          return candidate;
-        }
-      }
-    } catch (error) {
-      logWarn(`unable to read ${siteConfigPath} while locating Docusaurus v1 output: ${error.message}`);
-    }
-  }
-
-  for (const entry of fs.readdirSync(buildRoot)) {
-    const candidate = path.join(buildRoot, entry);
-    if (!fs.statSync(candidate).isDirectory()) {
-      continue;
-    }
-    if (fs.existsSync(path.join(candidate, 'index.html'))) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
-function projectUsesGatsby(project) {
-  const deps = {
-    ...(project.manifest.dependencies || {}),
-    ...(project.manifest.devDependencies || {}),
-    ...(project.manifest.peerDependencies || {}),
-  };
-
-  return Object.prototype.hasOwnProperty.call(deps, 'gatsby');
-}
-
-function detectGatsbyBuildOutputDir(project) {
-  if (!projectUsesGatsby(project)) {
-    return null;
-  }
-
-  const publicDir = path.join(project.dir, 'public');
-  if (!fs.existsSync(publicDir) || !fs.statSync(publicDir).isDirectory()) {
-    return null;
-  }
-
-  if (!fs.existsSync(path.join(publicDir, 'index.html'))) {
-    return null;
-  }
-
-  const hasGatsbyBuildMarkers = fs.existsSync(path.join(publicDir, 'page-data'))
-    || fs.existsSync(path.join(publicDir, 'chunk-map.json'))
-    || fs.readdirSync(publicDir).some((entry) => /^webpack-runtime-/.test(entry));
-
-  return hasGatsbyBuildMarkers ? publicDir : null;
-}
-
-function shouldPreferStaticRuntimeOverScript(project, runtime) {
-  if (!runtime || typeof runtime.command !== 'string') {
-    return false;
-  }
-
-  const lower = runtime.command.toLowerCase();
-  if (/\bpreview\b/.test(lower) || /\bvite\b/.test(lower)) {
-    return true;
-  }
-
-  if (/\bgatsby serve\b/.test(lower)) {
-    return true;
-  }
-
-  if (/\bdocusaurus serve\b/.test(lower)) {
-    return true;
-  }
-
-  return false;
-}
-
-function preferStaticRuntimeOnEdge(project, runtime, stage) {
-  if (!isEdgeRuntimeStage(stage) || runtime.mode === 'static-export') {
-    return runtime;
-  }
-
-  if (!shouldPreferStaticRuntimeOverScript(project, runtime)) {
-    return runtime;
-  }
-
-  const outputDir = detectStaticProductionOutputDir(project);
-  if (!outputDir) {
-    return runtime;
-  }
-
-  log(`using static production output for ${project.name} on ${stage.label} instead of ${runtime.name}`);
-  return staticRuntimeFor(project, outputDir);
 }
 
 function resolveRuntimeStrategy(project, runtime) {
@@ -977,55 +794,12 @@ function resolveRuntimeStrategy(project, runtime) {
   };
 }
 
-function isEdgeRuntimeStage(stage) {
-  return stage.key !== HOST_NODE_RUNNER.key;
-}
-
-function nodeBuildStage() {
-  return {
-    key: 'node-build',
-    label: 'Node.js build',
-    runnerCommandParts: [HOST_NODE_RUNNER.targetPath],
-  };
-}
-
-function projectUsesNext(project) {
-  const deps = {
-    ...(project.manifest.dependencies || {}),
-    ...(project.manifest.devDependencies || {}),
-    ...(project.manifest.peerDependencies || {}),
-  };
-
-  return Object.prototype.hasOwnProperty.call(deps, 'next');
-}
-
-function hasShippableNextConfig(projectDir) {
-  return NEXT_JS_CONFIG_FILES.some((name) => fs.existsSync(path.join(projectDir, name)));
-}
-
-function hasTypescriptOnlyNextConfig(projectDir) {
-  return fs.existsSync(path.join(projectDir, NEXT_TS_CONFIG_FILE))
-    && !hasShippableNextConfig(projectDir);
-}
-
-function assertEdgeRuntimeCompatibleProject(project, stage) {
-  if (!isEdgeRuntimeStage(stage) || !projectUsesNext(project)) {
-    return;
-  }
-
-  if (!hasTypescriptOnlyNextConfig(project.dir)) {
-    return;
-  }
-
-  fail([
-    `${project.name} is not ready for ${stage.label}: next.config.ts requires SWC at runtime`,
-    'Build with host Node.js (SWC runs during next build), but EdgeJS runtime stages need a JavaScript config.',
-    'Add next.config.js/.mjs/.cjs or remove next.config.ts before testing EdgeJS runtime stages.',
-  ].join('\n'));
-}
-
 function usesNextStaticExport(project) {
-  const nextConfigCandidates = NEXT_JS_CONFIG_FILES.map((name) => path.join(project.dir, name));
+  const nextConfigCandidates = [
+    path.join(project.dir, 'next.config.js'),
+    path.join(project.dir, 'next.config.mjs'),
+    path.join(project.dir, 'next.config.cjs'),
+  ];
 
   for (const configPath of nextConfigCandidates) {
     if (!fs.existsSync(configPath)) {
@@ -1081,13 +855,9 @@ function scoreRuntimeScript(name, command) {
   return score;
 }
 
-function shouldBuildProject(project, runtime, stage) {
+function shouldBuildProject(project, runtime) {
   if (typeof project.scripts.build !== 'string') {
     return false;
-  }
-
-  if (isEdgeRuntimeStage(stage)) {
-    return !detectStaticProductionOutputDir(project);
   }
 
   if (runtime.name === 'dev' || runtime.name === 'develop') {
@@ -1103,19 +873,14 @@ function shouldBuildProject(project, runtime, stage) {
 }
 
 async function runProjectBuild(project, stage) {
-  const buildStage = isEdgeRuntimeStage(stage) ? nodeBuildStage() : stage;
-  if (isEdgeRuntimeStage(stage)) {
-    log(`building ${project.name} with host Node.js; ${stage.label} validates prebuilt artifacts only`);
-  }
-
-  const logPath = buildLogPath(project, buildStage);
+  const logPath = buildLogPath(project, stage);
   removeFileOrSymlink(logPath);
 
   return runProjectCommand({
     description: `build for ${project.name}`,
     detached: false,
     env: makeProjectEnv(),
-    errorMessage: `build failed for ${project.name} on ${buildStage.label}`,
+    errorMessage: `build failed for ${project.name} on ${stage.label}`,
     extraArgs: [],
     logPath,
     project,
@@ -1123,10 +888,9 @@ async function runProjectBuild(project, stage) {
   });
 }
 
-async function startProjectServer(project, runtime, portCandidates, stage, readinessPath) {
-  const readyPath = normalizeRoutePath(readinessPath);
+async function startProjectServer(project, runtime, portCandidates, stage) {
   if (runtime.mode === 'static-export') {
-    return startStaticExportServer(project, runtime, portCandidates, stage, readyPath);
+    return startStaticExportServer(project, runtime, portCandidates, stage);
   }
 
   const logPath = serverLogPath(project, stage);
@@ -1154,7 +918,7 @@ async function startProjectServer(project, runtime, portCandidates, stage, readi
       });
 
       try {
-        const response = await waitForHttpResponse(handle, buildRouteUrl(port, readyPath));
+        const response = await waitForHttpResponse(handle, `http://${DEFAULT_HOST}:${port}/`);
         return {
           candidate,
           handle,
@@ -1182,7 +946,7 @@ async function startProjectServer(project, runtime, portCandidates, stage, readi
   });
 }
 
-async function startStaticExportServer(project, runtime, portCandidates, stage, readinessPath) {
+async function startStaticExportServer(project, runtime, portCandidates, stage) {
   if (!fs.existsSync(runtime.outputDir)) {
     fail(`expected static output directory for ${project.name}: ${runtime.outputDir}`);
   }
@@ -1209,7 +973,7 @@ async function startStaticExportServer(project, runtime, portCandidates, stage, 
     });
 
     try {
-      const response = await waitForHttpResponse(handle, buildRouteUrl(port, readinessPath || '/'));
+      const response = await waitForHttpResponse(handle, `http://${DEFAULT_HOST}:${port}/`);
       return {
         candidate: {
           description: 'static export fallback',
@@ -1299,16 +1063,11 @@ function serverLogPath(project, stage) {
 function ensureStaticServerScript(project) {
   const scriptPath = staticServerScriptPath(project);
   if (fs.existsSync(scriptPath)) {
-    const existing = fs.readFileSync(scriptPath, 'utf8');
-    if (existing.includes(STATIC_SERVER_RESOLVER_MARKER)) {
-      return scriptPath;
-    }
+    return scriptPath;
   }
 
   fs.writeFileSync(scriptPath, [
     "'use strict';",
-    '',
-    `// ${STATIC_SERVER_RESOLVER_MARKER}`,
     '',
     "const fs = require('node:fs');",
     "const http = require('node:http');",
@@ -1329,32 +1088,17 @@ function ensureStaticServerScript(project) {
     "  '.xml': 'application/xml; charset=utf-8',",
     '};',
     '',
-    'function isSafePath(candidate) {',
-    '  const relative = path.relative(root, candidate);',
-    "  return !relative.startsWith('..') && !path.isAbsolute(relative);",
-    '}',
-    '',
     'function resolveFilePath(urlPath) {',
     "  let pathname = decodeURIComponent(urlPath.split('?')[0] || '/');",
-    '  const candidates = [];',
     "  if (pathname.endsWith('/')) {",
-    "    candidates.push(path.resolve(root, `.${pathname}index.html`));",
-    '  } else {',
-    "    candidates.push(path.resolve(root, `.${pathname}`));",
-    "    candidates.push(path.resolve(root, `.${pathname}.html`));",
-    "    candidates.push(path.resolve(root, `.${pathname}/index.html`));",
+    "    pathname += 'index.html';",
     '  }',
-    '',
-    '  for (const candidate of candidates) {',
-    '    if (!isSafePath(candidate)) {',
-    '      continue;',
-    '    }',
-    '    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {',
-    '      return candidate;',
-    '    }',
+    "  const candidate = path.resolve(root, `.${pathname}`);",
+    '  const relative = path.relative(root, candidate);',
+    "  if (relative.startsWith('..') || path.isAbsolute(relative)) {",
+    '    return null;',
     '  }',
-    '',
-    '  return null;',
+    '  return candidate;',
     '}',
     '',
     'const server = http.createServer((request, response) => {',
@@ -1366,6 +1110,12 @@ function ensureStaticServerScript(project) {
     '',
     '  const filePath = resolveFilePath(request.url || "/");',
     '  if (!filePath) {',
+    "    response.statusCode = 403;",
+    "    response.end('Forbidden');",
+    '    return;',
+    '  }',
+    '',
+    '  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {',
     "    response.statusCode = 404;",
     "    response.end('Not Found');",
     '    return;',
@@ -1582,8 +1332,8 @@ async function waitForHttpResponse(handle, url) {
   });
 }
 
-function requestHttp(url, options) {
-  const requestOptions = normalizeRequestHttpOptions(options);
+function requestHttp(url, redirectCount) {
+  const currentRedirectCount = typeof redirectCount === 'number' ? redirectCount : 0;
 
   return new Promise((resolve) => {
     let requestUrl;
@@ -1595,29 +1345,19 @@ function requestHttp(url, options) {
     }
 
     const client = requestUrl.protocol === 'https:' ? https : http;
-    const headers = {
-      Accept: requestOptions.accept,
-      ...requestOptions.headers,
-    };
-    const body = requestOptions.body;
-    if (body != null && !headers['content-type'] && !headers['Content-Type']) {
-      headers['Content-Type'] = requestOptions.contentType;
-    }
-
     const request = client.request(requestUrl, {
-      headers,
-      method: requestOptions.method,
+      headers: {
+        Accept: 'text/html,*/*',
+      },
+      method: 'GET',
     }, (response) => {
-      const responseHeaders = normalizeHeaders(response.headers);
+      const headers = normalizeHeaders(response.headers);
       const statusCode = response.statusCode || 0;
-      const location = responseHeaders.location;
+      const location = headers.location;
 
-      if (statusCode >= 300 && statusCode < 400 && location && requestOptions.redirectCount < MAX_HTTP_REDIRECTS) {
+      if (statusCode >= 300 && statusCode < 400 && location && currentRedirectCount < MAX_HTTP_REDIRECTS) {
         response.resume();
-        resolve(requestHttp(new URL(location, requestUrl).toString(), {
-          ...requestOptions,
-          redirectCount: requestOptions.redirectCount + 1,
-        }));
+        resolve(requestHttp(new URL(location, requestUrl).toString(), currentRedirectCount + 1));
         return;
       }
 
@@ -1639,7 +1379,7 @@ function requestHttp(url, options) {
         resolve({
           body: Buffer.concat(chunks).toString('utf8'),
           finalUrl: requestUrl.toString(),
-          headers: responseHeaders,
+          headers,
           ok: true,
           statusCode,
         });
@@ -1652,56 +1392,8 @@ function requestHttp(url, options) {
     request.on('error', (error) => {
       resolve({ error, ok: false });
     });
-
-    if (body != null) {
-      request.write(body);
-    }
     request.end();
   });
-}
-
-function normalizeRequestHttpOptions(options) {
-  if (typeof options === 'number') {
-    return {
-      accept: 'text/html,*/*',
-      body: null,
-      contentType: 'text/plain; charset=utf-8',
-      headers: {},
-      method: 'GET',
-      redirectCount: options,
-    };
-  }
-
-  const requestOptions = options && typeof options === 'object' ? options : {};
-  const contentTypeMode = requestOptions.contentType || 'html';
-  return {
-    accept: requestOptions.accept || defaultAcceptHeader(contentTypeMode),
-    body: serializeRequestBody(requestOptions.body),
-    contentType: requestOptions.requestContentType || 'application/json; charset=utf-8',
-    headers: requestOptions.headers || {},
-    method: (requestOptions.method || 'GET').toUpperCase(),
-    redirectCount: typeof requestOptions.redirectCount === 'number' ? requestOptions.redirectCount : 0,
-  };
-}
-
-function defaultAcceptHeader(contentTypeMode) {
-  if (contentTypeMode === 'json') {
-    return 'application/json,*/*';
-  }
-  if (contentTypeMode === 'any') {
-    return '*/*';
-  }
-  return 'text/html,*/*';
-}
-
-function serializeRequestBody(body) {
-  if (body == null) {
-    return null;
-  }
-  if (typeof body === 'string' || Buffer.isBuffer(body)) {
-    return body;
-  }
-  return JSON.stringify(body);
 }
 
 function normalizeHeaders(headers) {
@@ -1718,200 +1410,14 @@ function normalizeHeaders(headers) {
 }
 
 function validateHttpResponse(project, runtime, response) {
-  validateRouteResponse({
-    name: 'home',
-    path: '/',
-    expect: {
-      contentType: 'html',
-    },
-  }, response, project, runtime);
-}
-
-function routesJsonPath(project) {
-  return path.join(project.dir, ROUTES_JSON_BASENAME);
-}
-
-function routeReadinessPath(project, stage, runtime) {
-  const routes = loadRouteMatrix(project, stage, runtime);
-  if (routes.length === 0) {
-    return '/';
-  }
-  return routes[0].path;
-}
-
-function loadRouteMatrix(project, stage, runtime) {
-  const configPath = routesJsonPath(project);
-  const config = fs.existsSync(configPath)
-    ? readRouteMatrixConfig(configPath)
-    : DEFAULT_ROUTE_MATRIX;
-
-  return config.routes
-    .map((route, index) => normalizeRouteDefinition(route, index, configPath))
-    .filter((route) => routeAppliesToStage(route, stage, runtime));
-}
-
-function readRouteMatrixConfig(configPath) {
-  const config = readJsonFile(configPath);
-  if (!config || typeof config !== 'object') {
-    fail(`invalid route matrix at ${configPath}: expected an object`);
-  }
-  if (config.version !== 1) {
-    fail(`unsupported route matrix version at ${configPath}: expected version 1`);
-  }
-  if (!Array.isArray(config.routes) || config.routes.length === 0) {
-    fail(`invalid route matrix at ${configPath}: routes must be a non-empty array`);
-  }
-  return config;
-}
-
-function normalizeRouteDefinition(route, index, configPath) {
-  if (!route || typeof route !== 'object') {
-    fail(`invalid route at index ${index} in ${configPath}: expected an object`);
-  }
-  if (typeof route.path !== 'string' || !route.path.startsWith('/')) {
-    fail(`invalid route at index ${index} in ${configPath}: path must start with "/"`);
-  }
-
-  const expect = route.expect && typeof route.expect === 'object' ? route.expect : {};
-  const status = expect.status == null ? [200, 304] : expect.status;
-  const normalizedStatus = Array.isArray(status) ? status : [status];
-
-  return {
-    body: route.body,
-    expect: {
-      bodyContains: Array.isArray(expect.bodyContains) ? expect.bodyContains.slice() : [],
-      bodyRegex: Array.isArray(expect.bodyRegex) ? expect.bodyRegex.slice() : [],
-      contentType: expect.contentType || 'html',
-      status: normalizedStatus,
-    },
-    headers: route.headers && typeof route.headers === 'object' ? route.headers : {},
-    method: (route.method || 'GET').toUpperCase(),
-    name: route.name || route.path,
-    path: normalizeRoutePath(route.path),
-    skipOnStatic: Boolean(route.skipOnStatic),
-    stages: Array.isArray(route.stages) ? route.stages.slice() : null,
-  };
-}
-
-function normalizeRoutePath(routePath) {
-  if (routePath === '/') {
-    return '/';
-  }
-  return routePath.replace(/\/+$/, '') || '/';
-}
-
-function categorizeStage(stage) {
-  if (stage.key === 'node') {
-    return 'node';
-  }
-  if (stage.key.endsWith('-safe')) {
-    return 'safe';
-  }
-  return 'comparison';
-}
-
-function routeAppliesToStage(route, stage, runtime) {
-  if (route.skipOnStatic && runtime && runtime.mode === 'static-export') {
-    return false;
-  }
-
-  if (!route.stages || route.stages.length === 0) {
-    return true;
-  }
-
-  const stageCategory = categorizeStage(stage);
-  return route.stages.includes(stageCategory) || route.stages.includes(stage.key);
-}
-
-function buildRouteUrl(port, routePath) {
-  return `http://${DEFAULT_HOST}:${port}${normalizeRoutePath(routePath)}`;
-}
-
-async function validateRouteMatrix(project, runtime, port, routes) {
-  const routeResults = [];
-  for (const route of routes) {
-    const url = buildRouteUrl(port, route.path);
-    const response = await requestHttp(url, {
-      accept: defaultAcceptHeader(route.expect.contentType),
-      body: route.body,
-      contentType: route.expect.contentType,
-      headers: route.headers,
-      method: route.method,
-    });
-
-    if (!response.ok) {
-      fail(`route "${route.name}" (${route.path}) request failed for ${project.name} via ${runtime.name}: ${response.error.message}`, {
-        detail: `url=${url}`,
-      });
-    }
-
-    validateRouteResponse(route, response, project, runtime);
-    routeResults.push({
-      name: route.name,
-      path: route.path,
-      response,
-      statusCode: response.statusCode,
-    });
-    log(`route "${route.name}" (${route.path}) passed for ${project.name} via ${runtime.name}: HTTP ${response.statusCode}`);
-  }
-
-  if (routeResults.length === 0) {
-    fail(`no routes configured for ${project.name} on ${runtime.name}`);
-  }
-
-  return routeResults;
-}
-
-function validateRouteResponse(route, response, project, runtime) {
-  const label = `route "${route.name}" (${route.path})`;
-  const allowedStatuses = route.expect.status;
-  if (!allowedStatuses.includes(response.statusCode)) {
-    fail(`${label} unexpected HTTP status for ${project.name} via ${runtime.name}: ${response.statusCode} at ${response.finalUrl} (expected ${allowedStatuses.join(' or ')})`);
+  if (response.statusCode < 200 || response.statusCode >= 400) {
+    fail(`unexpected HTTP status for ${project.name} via ${runtime.name}: ${response.statusCode} at ${response.finalUrl}`);
   }
 
   const contentType = response.headers['content-type'] || '';
-  const contentTypeMode = route.expect.contentType;
-  if (contentTypeMode === 'html' && !/text\/html|application\/xhtml\+xml/i.test(contentType) && !bodyLooksLikeHtml(response.body)) {
-    fail(`${label} unexpected response for ${project.name} via ${runtime.name}: content-type ${contentType || 'missing'} at ${response.finalUrl}`);
-  } else if (contentTypeMode === 'json' && !/application\/json/i.test(contentType) && !bodyLooksLikeJson(response.body)) {
-    fail(`${label} unexpected response for ${project.name} via ${runtime.name}: content-type ${contentType || 'missing'} at ${response.finalUrl}`);
+  if (!/text\/html|application\/xhtml\+xml/i.test(contentType) && !bodyLooksLikeHtml(response.body)) {
+    fail(`unexpected response for ${project.name} via ${runtime.name}: content-type ${contentType || 'missing'} at ${response.finalUrl}`);
   }
-
-  for (const substring of route.expect.bodyContains) {
-    if (!response.body.includes(substring)) {
-      const snippet = summarizeBodySnippet(response.body);
-      fail(`${label} expected body to contain ${JSON.stringify(substring)} for ${project.name} via ${runtime.name} at ${response.finalUrl}; body snippet: ${snippet}`);
-    }
-  }
-
-  for (const pattern of route.expect.bodyRegex) {
-    let regex;
-    try {
-      regex = new RegExp(pattern);
-    } catch (error) {
-      fail(`${label} invalid bodyRegex ${JSON.stringify(pattern)} in routes.json for ${project.name}: ${error.message}`);
-    }
-    if (!regex.test(response.body)) {
-      const snippet = summarizeBodySnippet(response.body);
-      fail(`${label} expected body to match /${pattern}/ for ${project.name} via ${runtime.name} at ${response.finalUrl}; body snippet: ${snippet}`);
-    }
-  }
-}
-
-function summarizeBodySnippet(body) {
-  const compact = String(body || '').replace(/\s+/g, ' ').trim();
-  if (!compact) {
-    return '(empty body)';
-  }
-  if (compact.length <= 120) {
-    return compact;
-  }
-  return `${compact.slice(0, 117)}...`;
-}
-
-function bodyLooksLikeJson(body) {
-  const trimmed = String(body || '').trim();
-  return trimmed.startsWith('{') || trimmed.startsWith('[');
 }
 
 function bodyLooksLikeHtml(body) {
@@ -2248,12 +1754,10 @@ function reset(selector) {
 }
 
 function removeGeneratedFrameworkArtifacts(project) {
-  for (const basename of [STATIC_SERVER_SCRIPT_BASENAME, LEGACY_STATIC_SERVER_SCRIPT_BASENAME]) {
-    const staticServerPath = path.join(project.dir, basename);
-    if (fs.existsSync(staticServerPath)) {
-      log(`removing ${staticServerPath}`);
-      fs.rmSync(staticServerPath, { force: true });
-    }
+  const staticServerPath = staticServerScriptPath(project);
+  if (fs.existsSync(staticServerPath)) {
+    log(`removing ${staticServerPath}`);
+    fs.rmSync(staticServerPath, { force: true });
   }
 
   for (const relativePath of GENERATED_FRAMEWORK_PATHS) {
