@@ -5,6 +5,7 @@
 
 #include "binding_registry/binding_registry.h"
 #include "internal_binding/helpers.h"
+#include "edge_active_resource.h"
 #include "edge_environment.h"
 #include "edge_env_loop.h"
 #include "edge_handle_scope.h"
@@ -175,6 +176,7 @@ void EdgeHandleWrapInit(EdgeHandleWrap* wrap, napi_env env) {
   wrap->finalized = false;
   wrap->delete_on_close = false;
   wrap->wrapper_ref_held = false;
+  wrap->in_close_callback = false;
   wrap->state = kEdgeHandleUninitialized;
 }
 
@@ -339,6 +341,80 @@ bool EdgeHandleWrapHasRef(const EdgeHandleWrap* wrap, const uv_handle_t* handle)
 
 bool EdgeHandleWrapEnvCleanupStarted(napi_env env) {
   return EdgeEnvironmentCleanupStarted(env);
+}
+
+namespace {
+
+void UnregisterActiveHandleIfPresent(napi_env env, EdgeHandleWrap* wrap) {
+  if (wrap->active_handle_token == nullptr) return;
+  if (env != nullptr) EdgeUnregisterActiveHandle(env, wrap->active_handle_token);
+  wrap->active_handle_token = nullptr;
+}
+
+}  // namespace
+
+void EdgeHandleWrapCompleteClose(EdgeHandleWrap* wrap, void* native,
+                                 EdgeHandleWrapDeleteFn delete_native) {
+  if (wrap == nullptr || native == nullptr || delete_native == nullptr) return;
+
+  // Claim ownership of deletion for the entire teardown. Detaching, unregistering
+  // the active handle, and running the JS "onclose" callback can each re-enter
+  // the GC and run this wrap's finalizer; while in_close_callback is set the
+  // finalizer only records finalization and defers freeing to us, so the wrap is
+  // never freed while this teardown (or the onclose callback) is on the stack.
+  wrap->in_close_callback = true;
+
+  wrap->state = kEdgeHandleClosed;
+  EdgeHandleWrapDetach(wrap);
+  UnregisterActiveHandleIfPresent(wrap->env, wrap);
+  EdgeHandleWrapMaybeCallOnClose(wrap);
+
+  wrap->in_close_callback = false;
+
+  bool can_delete = wrap->finalized;
+  if (!can_delete && wrap->delete_on_close) {
+    can_delete = EdgeHandleWrapCancelFinalizer(wrap, native);
+  }
+  if (can_delete) {
+    EdgeHandleWrapDeleteRefIfPresent(wrap->env, &wrap->wrapper_ref);
+    delete_native(native);
+  } else {
+    // The handle is closed but the JS wrapper is still reachable; drop the
+    // strong pin so the wrapper becomes collectable. The finalizer will free
+    // the native object when the wrapper is eventually collected.
+    EdgeHandleWrapReleaseWrapperRef(wrap);
+  }
+}
+
+void EdgeHandleWrapFinalizeNative(napi_env env, EdgeHandleWrap* wrap, void* native,
+                                  EdgeHandleWrapDeleteFn delete_native) {
+  if (wrap == nullptr || native == nullptr || delete_native == nullptr) return;
+
+  wrap->finalized = true;
+  EdgeHandleWrapDeleteRefIfPresent(env, &wrap->wrapper_ref);
+
+  // If a close callback is currently tearing this wrap down (this finalizer ran
+  // re-entrantly via the onclose callback), that close path owns the deletion.
+  if (wrap->in_close_callback) return;
+
+  if (wrap->state == kEdgeHandleInitialized) {
+    // The wrapper was collected while the handle is still open. Drop the pin and
+    // start closing it; OnClose (-> EdgeHandleWrapCompleteClose) frees the wrap.
+    wrap->delete_on_close = true;
+    EdgeHandleWrapReleaseWrapperRef(wrap);
+    if (wrap->close_callback != nullptr) wrap->close_callback(wrap->close_data);
+    return;
+  }
+  if (wrap->state == kEdgeHandleClosing) {
+    // A close is already in flight; let its OnClose free the wrap.
+    wrap->delete_on_close = true;
+    return;
+  }
+
+  // Uninitialized or already closed: free now.
+  EdgeHandleWrapDetach(wrap);
+  UnregisterActiveHandleIfPresent(env, wrap);
+  delete_native(native);
 }
 
 void EdgeHandleWrapRunEnvCleanup(napi_env env) {

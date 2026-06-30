@@ -179,6 +179,13 @@ void QueueDestroy(ProcessWrap* wrap) {
   EdgeAsyncWrapQueueDestroyId(wrap->handle_wrap.env, wrap->async_id);
 }
 
+void DeleteProcessWrap(void* data) {
+  auto* wrap = static_cast<ProcessWrap*>(data);
+  if (wrap == nullptr) return;
+  QueueDestroy(wrap);
+  delete wrap;
+}
+
 const char* SignalNameFromNumber(int sig) {
   switch (sig) {
     case 0:
@@ -383,30 +390,9 @@ bool ParseStdioOptions(napi_env env,
 void OnProcessClose(uv_handle_t* handle) {
   auto* wrap = static_cast<ProcessWrap*>(handle->data);
   if (wrap == nullptr) return;
-
-  wrap->handle_wrap.state = kEdgeHandleClosed;
   wrap->alive = false;
   UntrackLiveChildPid(wrap->pid);
-
-  EdgeHandleWrapDetach(&wrap->handle_wrap);
-
-  if (wrap->handle_wrap.active_handle_token != nullptr) {
-    EdgeUnregisterActiveHandle(wrap->handle_wrap.env, wrap->handle_wrap.active_handle_token);
-    wrap->handle_wrap.active_handle_token = nullptr;
-  }
-
-  EdgeHandleWrapMaybeCallOnClose(&wrap->handle_wrap);
-  QueueDestroy(wrap);
-
-  bool can_delete = wrap->handle_wrap.finalized;
-  if (!can_delete && wrap->handle_wrap.delete_on_close) {
-    can_delete = EdgeHandleWrapCancelFinalizer(&wrap->handle_wrap, wrap);
-  }
-  if (can_delete) {
-    delete wrap;
-  } else {
-    EdgeHandleWrapReleaseWrapperRef(&wrap->handle_wrap);
-  }
+  EdgeHandleWrapCompleteClose(&wrap->handle_wrap, wrap, DeleteProcessWrap);
 }
 
 void CloseProcessWrapForCleanup(void* data) {
@@ -459,35 +445,14 @@ void OnProcessExit(uv_process_t* process, int64_t exit_status, int term_signal) 
 void ProcessFinalize(napi_env env, void* data, void* /*hint*/) {
   auto* wrap = static_cast<ProcessWrap*>(data);
   if (wrap == nullptr) return;
-
-  wrap->handle_wrap.finalized = true;
-  EdgeHandleWrapDeleteRefIfPresent(env, &wrap->handle_wrap.wrapper_ref);
-
-  if (wrap->handle_wrap.state == kEdgeHandleUninitialized || wrap->handle_wrap.state == kEdgeHandleClosed) {
-    EdgeHandleWrapDetach(&wrap->handle_wrap);
-    if (wrap->handle_wrap.active_handle_token != nullptr) {
-      EdgeUnregisterActiveHandle(env, wrap->handle_wrap.active_handle_token);
-      wrap->handle_wrap.active_handle_token = nullptr;
-    }
-    QueueDestroy(wrap);
-    delete wrap;
-    return;
+  // If the wrapper is collected while the child is still tracked, stop tracking
+  // it; the shared finalizer initiates close (-> OnProcessClose) which also
+  // untracks, but doing it here keeps the live-child set tight.
+  if (wrap->handle_wrap.state == kEdgeHandleInitialized) {
+    wrap->alive = false;
+    UntrackLiveChildPid(wrap->pid);
   }
-
-  wrap->handle_wrap.delete_on_close = true;
-  wrap->alive = false;
-  UntrackLiveChildPid(wrap->pid);
-  CloseProcessWrapForCleanup(wrap);
-  if (wrap->handle_wrap.state == kEdgeHandleClosing) return;
-
-  if (wrap->handle_wrap.state != kEdgeHandleClosing) {
-    if (wrap->handle_wrap.active_handle_token != nullptr) {
-      EdgeUnregisterActiveHandle(env, wrap->handle_wrap.active_handle_token);
-      wrap->handle_wrap.active_handle_token = nullptr;
-    }
-    QueueDestroy(wrap);
-    delete wrap;
-  }
+  EdgeHandleWrapFinalizeNative(env, &wrap->handle_wrap, wrap, DeleteProcessWrap);
 }
 
 napi_value ProcessCtor(napi_env env, napi_callback_info info) {
@@ -627,7 +592,10 @@ napi_value ProcessSpawn(napi_env env, napi_callback_info info) {
                       wrap,
                       reinterpret_cast<uv_handle_t*>(&wrap->process),
                       CloseProcessWrapForCleanup);
-  EdgeHandleWrapHoldWrapperRef(&wrap->handle_wrap);
+  // No explicit wrapper pin needed: EdgeRegisterActiveHandle already keeps the
+  // JS wrapper alive (a strong keepalive_ref) while the handle is active, and
+  // it is released on close/unregister. The shared close/finalize helpers
+  // handle the re-entrancy safety.
 
   if (rc != 0) {
     wrap->pid = 0;
