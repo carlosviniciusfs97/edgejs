@@ -2538,26 +2538,14 @@ StatWatcherWrap* UnwrapStatWatcher(napi_env env, napi_value this_arg) {
   return static_cast<StatWatcherWrap*>(data);
 }
 
+void DeleteStatWatcherWrap(void* data) {
+  delete static_cast<StatWatcherWrap*>(data);
+}
+
 void OnStatWatcherClosed(uv_handle_t* handle) {
   auto* wrap = static_cast<StatWatcherWrap*>(handle != nullptr ? handle->data : nullptr);
   if (wrap == nullptr) return;
-  wrap->handle_wrap.state = kEdgeHandleClosed;
-  EdgeHandleWrapDetach(&wrap->handle_wrap);
-  if (wrap->handle_wrap.active_handle_token != nullptr) {
-    EdgeUnregisterActiveHandle(wrap->handle_wrap.env, wrap->handle_wrap.active_handle_token);
-    wrap->handle_wrap.active_handle_token = nullptr;
-  }
-  EdgeHandleWrapMaybeCallOnClose(&wrap->handle_wrap);
-  bool can_delete = wrap->handle_wrap.finalized;
-  if (!can_delete && wrap->handle_wrap.delete_on_close) {
-    can_delete = EdgeHandleWrapCancelFinalizer(&wrap->handle_wrap, wrap);
-  }
-  if (can_delete) {
-    EdgeHandleWrapDeleteRefIfPresent(wrap->handle_wrap.env, &wrap->handle_wrap.wrapper_ref);
-    delete wrap;
-  } else {
-    EdgeHandleWrapReleaseWrapperRef(&wrap->handle_wrap);
-  }
+  EdgeHandleWrapCompleteClose(&wrap->handle_wrap, wrap, DeleteStatWatcherWrap);
 }
 
 void CloseStatWatcher(StatWatcherWrap* wrap) {
@@ -2601,21 +2589,7 @@ void OnStatWatcherChange(uv_fs_poll_t* handle, int status, const uv_stat_t* prev
 }
 
 void StatWatcherFinalize(napi_env env, void* data, void* /*hint*/) {
-  auto* wrap = static_cast<StatWatcherWrap*>(data);
-  if (wrap == nullptr) return;
-  wrap->handle_wrap.finalized = true;
-  EdgeHandleWrapDeleteRefIfPresent(env, &wrap->handle_wrap.wrapper_ref);
-  if (wrap->handle_wrap.state == kEdgeHandleUninitialized || wrap->handle_wrap.state == kEdgeHandleClosed) {
-    EdgeHandleWrapDetach(&wrap->handle_wrap);
-    if (wrap->handle_wrap.active_handle_token != nullptr) {
-      EdgeUnregisterActiveHandle(env, wrap->handle_wrap.active_handle_token);
-      wrap->handle_wrap.active_handle_token = nullptr;
-    }
-    delete wrap;
-    return;
-  }
-  wrap->handle_wrap.delete_on_close = true;
-  CloseStatWatcher(wrap);
+  EdgeHandleWrapFinalizeNative(env, &static_cast<StatWatcherWrap*>(data)->handle_wrap, data, DeleteStatWatcherWrap);
 }
 
 napi_value StatWatcherCtor(napi_env env, napi_callback_info info) {
@@ -2671,7 +2645,7 @@ napi_value StatWatcherStart(napi_env env, napi_callback_info info) {
   }
 
   wrap->handle_wrap.state = kEdgeHandleInitialized;
-  EdgeHandleWrapHoldWrapperRef(&wrap->handle_wrap);
+  // Keep-alive comes from EdgeRegisterActiveHandle's strong keepalive_ref.
   if (wrap->handle_wrap.active_handle_token == nullptr) {
     wrap->handle_wrap.active_handle_token =
         EdgeRegisterActiveHandle(env,
