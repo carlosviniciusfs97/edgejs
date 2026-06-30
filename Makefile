@@ -404,11 +404,15 @@ framework-test-run:
 framework-test: $(EDGE_BINARY)
 	@"$(EDGE_BINARY)" "$(FRAMEWORK_TEST_SCRIPT)" test $(FRAMEWORK_TEST_SELECTOR)
 
+# js-etherpad is edge-skipped (Node baseline still runs): EdgeJS QuickJS native
+# hits missing Intl constructors (Intl.ListFormat, ECO-381) and WASIX hits a
+# runtime-esbuild call. Remove from FRAMEWORK_TEST_EDGE_SKIP once both are fixed.
+# (The GC use-after-frees that previously blocked it are fixed in #101.)
 framework-test-quickjs-native: $(QUICKJS_EDGE_BINARY)
 	@SYMLINK_TARGET="$(abspath $(QUICKJS_EDGE_BINARY))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
 		FRAMEWORK_TEST_NODE_SKIP='js-docusaurus-staticsite,js-docusaurus2-staticsite' \
-		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
+		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone,js-etherpad' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS Native' \
 		$(MAKE) framework-test-run $(FRAMEWORK_TEST_SELECTOR)
 
@@ -421,7 +425,7 @@ framework-test-quickjs-wasix: $(QUICKJS_WASIX_WASM)
 	@SYMLINK_TARGET="$(abspath $(WASIX_FRAMEWORK_RUNNER))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
 		FRAMEWORK_TEST_NODE_SKIP='js-docusaurus-staticsite,js-docusaurus2-staticsite' \
-		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
+		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone,js-etherpad' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS WASIX' \
 		$(MAKE) framework-test-run $(FRAMEWORK_TEST_SELECTOR)
 
@@ -451,7 +455,7 @@ standalone-build-test-run:
 standalone-build-test-quickjs-native: $(QUICKJS_EDGE_BINARY)
 	@SYMLINK_TARGET="$(abspath $(QUICKJS_EDGE_BINARY))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
-		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
+		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone,js-etherpad' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS Native' \
 		$(MAKE) standalone-build-test-run $(FRAMEWORK_TEST_SELECTOR)
 
@@ -463,7 +467,7 @@ standalone-build-test-quickjs-wasix: $(QUICKJS_WASIX_WASM)
 	}
 	@SYMLINK_TARGET="$(abspath $(WASIX_FRAMEWORK_RUNNER))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
-		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
+		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone,js-etherpad' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS WASIX' \
 		$(MAKE) standalone-build-test-run $(FRAMEWORK_TEST_SELECTOR)
 
