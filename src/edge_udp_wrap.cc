@@ -760,6 +760,13 @@ void QueueUdpWrapDestroyIfNeeded(UdpWrap* wrap) {
   wrap->async_id = -1;
 }
 
+void DeleteUdpWrap(void* data) {
+  auto* wrap = static_cast<UdpWrap*>(data);
+  if (wrap == nullptr) return;
+  QueueUdpWrapDestroyIfNeeded(wrap);
+  delete wrap;
+}
+
 void SendWrapFinalize(napi_env env, void* data, void* hint) {
   (void)hint;
   auto* wrap = static_cast<SendWrap*>(data);
@@ -773,27 +780,7 @@ void SendWrapFinalize(napi_env env, void* data, void* hint) {
 
 void UdpFinalize(napi_env env, void* data, void* hint) {
   (void)hint;
-  auto* wrap = static_cast<UdpWrap*>(data);
-  if (wrap == nullptr) return;
-  wrap->handle_wrap.finalized = true;
-  EdgeHandleWrapDeleteRefIfPresent(env, &wrap->handle_wrap.wrapper_ref);
-  if (wrap->handle_wrap.state == kEdgeHandleInitialized) {
-    wrap->handle_wrap.delete_on_close = true;
-    EdgeHandleWrapReleaseWrapperRef(&wrap->handle_wrap);
-    CloseUdpWrapForCleanup(wrap);
-    return;
-  }
-  if (wrap->handle_wrap.state == kEdgeHandleClosing) {
-    wrap->handle_wrap.delete_on_close = true;
-    return;
-  }
-  EdgeHandleWrapDetach(&wrap->handle_wrap);
-  if (wrap->handle_wrap.active_handle_token != nullptr) {
-    EdgeUnregisterActiveHandle(env, wrap->handle_wrap.active_handle_token);
-    wrap->handle_wrap.active_handle_token = nullptr;
-  }
-  QueueUdpWrapDestroyIfNeeded(wrap);
-  delete wrap;
+  EdgeHandleWrapFinalizeNative(env, &static_cast<UdpWrap*>(data)->handle_wrap, data, DeleteUdpWrap);
 }
 
 napi_value SendWrapCtor(napi_env env, napi_callback_info info) {
@@ -815,9 +802,8 @@ napi_value UdpCtor(napi_env env, napi_callback_info info) {
   napi_get_cb_info(env, info, &argc, nullptr, &self, nullptr);
   auto* wrap = new UdpWrap(env);
   napi_wrap(env, self, wrap, UdpFinalize, nullptr, &wrap->handle_wrap.wrapper_ref);
-  if (wrap->handle_wrap.state == kEdgeHandleInitialized) {
-    EdgeHandleWrapHoldWrapperRef(&wrap->handle_wrap);
-  }
+  // EdgeRegisterActiveHandle's keepalive_ref keeps the wrapper alive while the
+  // handle is active; no separate pin needed (see EdgeHandleWrapCompleteClose).
   wrap->handle_wrap.active_handle_token =
       EdgeRegisterActiveHandle(
           env, self, "UDPWRAP", UdpHandleHasRef, UdpGetActiveOwner, wrap, CloseUdpWrapForCleanup);
@@ -845,24 +831,7 @@ napi_value UdpCtor(napi_env env, napi_callback_info info) {
 void OnClosed(uv_handle_t* h) {
   auto* wrap = static_cast<UdpWrap*>(h->data);
   if (wrap == nullptr) return;
-  wrap->handle_wrap.state = kEdgeHandleClosed;
-  EdgeHandleWrapDetach(&wrap->handle_wrap);
-  if (wrap->handle_wrap.active_handle_token != nullptr) {
-    EdgeUnregisterActiveHandle(wrap->handle_wrap.env, wrap->handle_wrap.active_handle_token);
-    wrap->handle_wrap.active_handle_token = nullptr;
-  }
-  EdgeHandleWrapMaybeCallOnClose(&wrap->handle_wrap);
-  QueueUdpWrapDestroyIfNeeded(wrap);
-  bool can_delete = wrap->handle_wrap.finalized;
-  if (!can_delete && wrap->handle_wrap.delete_on_close) {
-    can_delete = EdgeHandleWrapCancelFinalizer(&wrap->handle_wrap, wrap);
-  }
-  if (can_delete) {
-    EdgeHandleWrapDeleteRefIfPresent(wrap->handle_wrap.env, &wrap->handle_wrap.wrapper_ref);
-    delete wrap;
-  } else {
-    EdgeHandleWrapReleaseWrapperRef(&wrap->handle_wrap);
-  }
+  EdgeHandleWrapCompleteClose(&wrap->handle_wrap, wrap, DeleteUdpWrap);
 }
 
 void CloseUdpWrapForCleanup(void* data) {

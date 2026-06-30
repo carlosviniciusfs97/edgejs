@@ -3544,45 +3544,32 @@ void ProcessQueuedMessages(MessagePortWrap* wrap, bool force, size_t processing_
   }
 }
 
+void DeleteMessagePortWrap(void* data) {
+  auto* wrap = static_cast<MessagePortWrap*>(data);
+  if (wrap == nullptr) return;
+  if (wrap->async_id > 0) {
+    EdgeAsyncWrapQueueDestroyId(wrap->handle_wrap.env, wrap->async_id);
+    wrap->async_id = 0;
+  }
+  DeleteQueuedMessages(wrap->handle_wrap.env, wrap);
+  delete wrap;
+}
+
 void OnMessagePortClosed(uv_handle_t* handle) {
   auto* wrap = static_cast<MessagePortWrap*>(handle != nullptr ? handle->data : nullptr);
   if (wrap == nullptr) return;
-  wrap->handle_wrap.state = kEdgeHandleClosed;
+  // MessagePort-specific teardown that must happen as the handle closes.
   if (EdgeHandleWrapEnvCleanupStarted(wrap->handle_wrap.env)) {
     wrap->handle_wrap.delete_on_close = true;
   }
   DisentanglePeer(wrap->handle_wrap.env, wrap, true);
-  EdgeHandleWrapDetach(&wrap->handle_wrap);
-  if (wrap->handle_wrap.active_handle_token != nullptr) {
-    EdgeUnregisterActiveHandle(wrap->handle_wrap.env, wrap->handle_wrap.active_handle_token);
-    wrap->handle_wrap.active_handle_token = nullptr;
-  }
-  EdgeHandleWrapMaybeCallOnClose(&wrap->handle_wrap);
   if (wrap->data) {
     std::lock_guard<std::mutex> lock(wrap->data->mutex);
     if (wrap->data->attached_port == wrap) {
       wrap->data->attached_port = nullptr;
     }
   }
-  bool can_delete = wrap->handle_wrap.finalized;
-  if (!can_delete && wrap->handle_wrap.delete_on_close) {
-    can_delete = EdgeHandleWrapCancelFinalizer(&wrap->handle_wrap, wrap);
-  }
-  if (can_delete) {
-    if (wrap->async_id > 0) {
-      EdgeAsyncWrapQueueDestroyId(wrap->handle_wrap.env, wrap->async_id);
-      wrap->async_id = 0;
-    }
-    DeleteQueuedMessages(wrap->handle_wrap.env, wrap);
-    EdgeHandleWrapDeleteRefIfPresent(wrap->handle_wrap.env, &wrap->handle_wrap.wrapper_ref);
-    delete wrap;
-    return;
-  }
-  if (wrap->async_id > 0) {
-    EdgeAsyncWrapQueueDestroyId(wrap->handle_wrap.env, wrap->async_id);
-    wrap->async_id = 0;
-  }
-  EdgeHandleWrapReleaseWrapperRef(&wrap->handle_wrap);
+  EdgeHandleWrapCompleteClose(&wrap->handle_wrap, wrap, DeleteMessagePortWrap);
 }
 
 void OnMessagePortAsync(uv_async_t* handle) {
@@ -3639,30 +3626,7 @@ void CloseMessagePortForCleanup(void* data) {
 }
 
 void MessagePortFinalize(napi_env env, void* data, void* /*hint*/) {
-  auto* wrap = static_cast<MessagePortWrap*>(data);
-  if (wrap == nullptr) return;
-  wrap->handle_wrap.finalized = true;
-  EdgeHandleWrapDeleteRefIfPresent(env, &wrap->handle_wrap.wrapper_ref);
-  if (wrap->handle_wrap.state == kEdgeHandleUninitialized || wrap->handle_wrap.state == kEdgeHandleClosed) {
-    EdgeHandleWrapDetach(&wrap->handle_wrap);
-    DeleteQueuedMessages(env, wrap);
-    if (wrap->async_id > 0) {
-      EdgeAsyncWrapQueueDestroyId(env, wrap->async_id);
-      wrap->async_id = 0;
-    }
-    if (wrap->handle_wrap.active_handle_token != nullptr) {
-      EdgeUnregisterActiveHandle(env, wrap->handle_wrap.active_handle_token);
-      wrap->handle_wrap.active_handle_token = nullptr;
-    }
-    delete wrap;
-    return;
-  }
-  wrap->handle_wrap.delete_on_close = true;
-  if (wrap->handle_wrap.state == kEdgeHandleInitialized &&
-      !uv_is_closing(reinterpret_cast<uv_handle_t*>(&wrap->async))) {
-    wrap->handle_wrap.state = kEdgeHandleClosing;
-    uv_close(reinterpret_cast<uv_handle_t*>(&wrap->async), OnMessagePortClosed);
-  }
+  EdgeHandleWrapFinalizeNative(env, &static_cast<MessagePortWrap*>(data)->handle_wrap, data, DeleteMessagePortWrap);
 }
 
 void InvokePortSymbolHook(napi_env env, napi_value port, napi_value symbol) {
@@ -3796,7 +3760,7 @@ napi_value MessagePortConstructorCallback(napi_env env, napi_callback_info info)
                         wrap,
                         reinterpret_cast<uv_handle_t*>(&wrap->async),
                         CloseMessagePortForCleanup);
-    EdgeHandleWrapHoldWrapperRef(&wrap->handle_wrap);
+    // Keep-alive comes from EdgeRegisterActiveHandle's strong keepalive_ref.
     wrap->async_id = EdgeAsyncWrapNextId(env);
     EdgeAsyncWrapEmitInit(
         env, wrap->async_id, kEdgeProviderMessagePort, EdgeAsyncWrapExecutionAsyncId(env), this_arg);
