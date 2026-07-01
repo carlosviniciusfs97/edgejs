@@ -137,27 +137,17 @@ napi_value CreateFilenameValue(FsEventWrap* wrap, const char* filename) {
   return out;
 }
 
+void DeleteFsEventWrap(void* data) {
+  auto* wrap = static_cast<FsEventWrap*>(data);
+  if (wrap == nullptr) return;
+  EdgeHandleWrapDeleteRefIfPresent(wrap->handle_wrap.env, &wrap->owner_ref);
+  delete wrap;
+}
+
 void OnClosed(uv_handle_t* handle) {
   auto* wrap = static_cast<FsEventWrap*>(handle != nullptr ? handle->data : nullptr);
   if (wrap == nullptr) return;
-  wrap->handle_wrap.state = kEdgeHandleClosed;
-  EdgeHandleWrapDetach(&wrap->handle_wrap);
-  if (wrap->handle_wrap.active_handle_token != nullptr) {
-    EdgeUnregisterActiveHandle(wrap->handle_wrap.env, wrap->handle_wrap.active_handle_token);
-    wrap->handle_wrap.active_handle_token = nullptr;
-  }
-  EdgeHandleWrapMaybeCallOnClose(&wrap->handle_wrap);
-  bool can_delete = wrap->handle_wrap.finalized;
-  if (!can_delete && wrap->handle_wrap.delete_on_close) {
-    can_delete = EdgeHandleWrapCancelFinalizer(&wrap->handle_wrap, wrap);
-  }
-  if (can_delete) {
-    EdgeHandleWrapDeleteRefIfPresent(wrap->handle_wrap.env, &wrap->owner_ref);
-    EdgeHandleWrapDeleteRefIfPresent(wrap->handle_wrap.env, &wrap->handle_wrap.wrapper_ref);
-    delete wrap;
-  } else {
-    EdgeHandleWrapReleaseWrapperRef(&wrap->handle_wrap);
-  }
+  EdgeHandleWrapCompleteClose(&wrap->handle_wrap, wrap, DeleteFsEventWrap);
 }
 
 void CloseFsEvent(FsEventWrap* wrap) {
@@ -171,22 +161,7 @@ void CloseFsEventForCleanup(void* data) {
 }
 
 void FsEventFinalize(napi_env env, void* data, void* /*hint*/) {
-  auto* wrap = static_cast<FsEventWrap*>(data);
-  if (wrap == nullptr) return;
-  wrap->handle_wrap.finalized = true;
-  EdgeHandleWrapDeleteRefIfPresent(env, &wrap->handle_wrap.wrapper_ref);
-  if (wrap->handle_wrap.state == kEdgeHandleUninitialized || wrap->handle_wrap.state == kEdgeHandleClosed) {
-    EdgeHandleWrapDetach(&wrap->handle_wrap);
-    if (wrap->handle_wrap.active_handle_token != nullptr) {
-      EdgeUnregisterActiveHandle(env, wrap->handle_wrap.active_handle_token);
-      wrap->handle_wrap.active_handle_token = nullptr;
-    }
-    EdgeHandleWrapDeleteRefIfPresent(env, &wrap->owner_ref);
-    delete wrap;
-    return;
-  }
-  wrap->handle_wrap.delete_on_close = true;
-  CloseFsEvent(wrap);
+  EdgeHandleWrapFinalizeNative(env, &static_cast<FsEventWrap*>(data)->handle_wrap, data, DeleteFsEventWrap);
 }
 
 void OnEvent(uv_fs_event_t* handle, const char* filename, int events, int status) {
@@ -295,7 +270,7 @@ napi_value FsEventStart(napi_env env, napi_callback_info info) {
   }
 
   wrap->handle_wrap.state = kEdgeHandleInitialized;
-  EdgeHandleWrapHoldWrapperRef(&wrap->handle_wrap);
+  // Keep-alive comes from EdgeRegisterActiveHandle's strong keepalive_ref.
   if (wrap->handle_wrap.active_handle_token == nullptr) {
     wrap->handle_wrap.active_handle_token =
         EdgeRegisterActiveHandle(

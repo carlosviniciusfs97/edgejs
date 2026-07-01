@@ -31,7 +31,10 @@ jobs:
             exit 1
           fi
           edge_version="${major}.${minor}.${patch}"
-          release_tag="${edge_version}-nightly"
+          # Distinct from the QuickJS workflow's "${edge_version}-nightly" tag so
+          # both nightly publishers can target wasmerio/edgejs-nightlies without
+          # clobbering each other's release.
+          release_tag="${edge_version}-v8-nightly"
           release_name="${release_tag}"
           {
             echo "edge_version=${edge_version}"
@@ -61,7 +64,6 @@ jobs:
           set -euo pipefail
           git submodule sync --recursive
           git -c protocol.version=2 submodule update --init --recursive --depth=1
-          test -f node/src/node_api_types.h
 
       - name: Install Linux build dependencies
         shell: bash
@@ -82,6 +84,12 @@ jobs:
           set -euo pipefail
           make build CMAKE_BUILD_TYPE=Release JOBS=4
 
+      - name: Test edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-only TEST_JOBS=4
+
       - name: Generate dist
         shell: bash
         run: |
@@ -94,12 +102,6 @@ jobs:
           name: edge-linux-amd64
           path: edge-linux-amd64.zip
           if-no-files-found: error
-
-      - name: Test edge
-        shell: bash
-        run: |
-          set -euo pipefail
-          make test-only TEST_JOBS=4
 
       - name: sccache stats
         if: always()
@@ -127,7 +129,6 @@ jobs:
           set -euo pipefail
           git submodule sync --recursive
           git -c protocol.version=2 submodule update --init --recursive --depth=1
-          test -f node/src/node_api_types.h
 
       - name: Validate public N-API headers stay V8-agnostic
         shell: bash
@@ -141,6 +142,12 @@ jobs:
           set -euo pipefail
           make build CMAKE_BUILD_TYPE=Release JOBS=4
 
+      - name: Test edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-only TEST_JOBS=4
+
       - name: Generate dist
         shell: bash
         run: |
@@ -153,12 +160,6 @@ jobs:
           name: edge-darwin-arm64
           path: edge-darwin-arm64.zip
           if-no-files-found: error
-
-      - name: Test edge
-        shell: bash
-        run: |
-          set -euo pipefail
-          make test-only TEST_JOBS=4
 
       - name: sccache stats
         if: always()
@@ -182,11 +183,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install wasixcc
-        uses: wasix-org/wasixcc@v0.4.2
+        uses: wasix-org/wasixcc@v0.4.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          sysroot-tag: v2026-02-16.1
-          version: v0.4.2
+          sysroot-tag: v2026-06-25.1
+          version: v0.4.3
 
       - name: Install wasm-tools
         shell: bash
@@ -219,13 +220,13 @@ jobs:
 
   publish-nightly:
     name: publish-nightly
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     needs:
       - metadata
       - v8-linux
       - v8-macos
       - v8-wasix
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     env:
       GH_TOKEN: ${{ secrets.RELEASE_PLEASE_GH_TOKEN }}
       TARGET_REPO: wasmerio/edgejs-nightlies
@@ -367,7 +368,12 @@ jobs:
             "${files[@]}"
 
       - name: Install Wasmer CLI
-        uses: wasmerio/setup-wasmer@v3
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl https://get.wasmer.io -sSfL | sh -s "v7.2.0-alpha.3"
+          echo "${HOME}/.wasmer/bin" >> "${GITHUB_PATH}"
+          "${HOME}/.wasmer/bin/wasmer" --version
 
       - name: Publish to wasmer.wtf
         env:

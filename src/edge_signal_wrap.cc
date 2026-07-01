@@ -87,13 +87,11 @@ void QueueDestroy(SignalWrap* wrap) {
   // EdgeAsyncWrapQueueDestroy(wrap->env, static_cast<double>(wrap->async_id));
 }
 
-void UnregisterActiveHandleIfPresent(SignalWrap* wrap, napi_env env_override = nullptr) {
-  if (wrap == nullptr || wrap->handle_wrap.active_handle_token == nullptr) return;
-  napi_env env = env_override != nullptr ? env_override : wrap->handle_wrap.env;
-  if (env != nullptr) {
-    EdgeUnregisterActiveHandle(env, wrap->handle_wrap.active_handle_token);
-  }
-  wrap->handle_wrap.active_handle_token = nullptr;
+void DeleteSignalWrap(void* data) {
+  auto* wrap = static_cast<SignalWrap*>(data);
+  if (wrap == nullptr) return;
+  QueueDestroy(wrap);
+  delete wrap;
 }
 
 void OnClosed(uv_handle_t* handle);
@@ -139,37 +137,11 @@ void CloseSignalWrapForCleanup(void* data) {
 void OnClosed(uv_handle_t* handle) {
   auto* wrap = static_cast<SignalWrap*>(handle->data);
   if (wrap == nullptr) return;
-  wrap->handle_wrap.state = kEdgeHandleClosed;
-  QueueDestroy(wrap);
-
-  EdgeHandleWrapDetach(&wrap->handle_wrap);
-  UnregisterActiveHandleIfPresent(wrap);
-  EdgeHandleWrapMaybeCallOnClose(&wrap->handle_wrap);
-
-  bool can_delete = wrap->handle_wrap.finalized;
-  if (!can_delete && wrap->handle_wrap.delete_on_close) {
-    can_delete = EdgeHandleWrapCancelFinalizer(&wrap->handle_wrap, wrap);
-  }
-  if (can_delete) {
-    delete wrap;
-  }
+  EdgeHandleWrapCompleteClose(&wrap->handle_wrap, wrap, DeleteSignalWrap);
 }
 
 void SignalFinalize(napi_env env, void* data, void* /*hint*/) {
-  auto* wrap = static_cast<SignalWrap*>(data);
-  if (wrap == nullptr) return;
-  wrap->handle_wrap.finalized = true;
-  EdgeHandleWrapDeleteRefIfPresent(env, &wrap->handle_wrap.wrapper_ref);
-  if (wrap->handle_wrap.state == kEdgeHandleUninitialized || wrap->handle_wrap.state == kEdgeHandleClosed) {
-    EdgeHandleWrapDetach(&wrap->handle_wrap);
-    UnregisterActiveHandleIfPresent(wrap, env);
-    QueueDestroy(wrap);
-    delete wrap;
-    return;
-  }
-  wrap->handle_wrap.delete_on_close = true;
-  CloseSignalWrapHandle(wrap);
-  return;
+  EdgeHandleWrapFinalizeNative(env, &static_cast<SignalWrap*>(data)->handle_wrap, data, DeleteSignalWrap);
 }
 
 napi_value SignalCtor(napi_env env, napi_callback_info info) {
