@@ -183,12 +183,21 @@ jobs:
 
       - name: Test framework apps (QuickJS native)
         shell: bash
+        # Exclude js-gatsby-* on macOS only: `gatsby build` hangs on GitHub
+        # macOS runners (a gatsby-worker/sharp issue), and the harness has no
+        # build-step timeout, so it hangs the whole job. This is the build
+        # step, not EdgeJS running the app. Linux/WASIX build gatsby fine and
+        # keep it covered.
+        env:
+          FRAMEWORK_TEST_EXCLUDE: js-gatsby-staticsite,js-gatsby-staticsite2
         run: |
           set -euo pipefail
           make framework-test-quickjs-native
 
       - name: Test standalone builds (QuickJS native)
         shell: bash
+        env:
+          FRAMEWORK_TEST_EXCLUDE: js-gatsby-staticsite,js-gatsby-staticsite2
         run: |
           set -euo pipefail
           make standalone-build-test-quickjs-native
