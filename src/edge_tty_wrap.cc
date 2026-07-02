@@ -18,6 +18,13 @@
 
 namespace {
 
+// Unique N-API type tag used to safely identify TtyWrap-backed JS objects
+// before downcasting their unwrapped native pointer. See EdgePipeWrapGetStreamBase.
+constexpr napi_type_tag kTtyWrapTypeTag = {
+    0xb7e15162f01d3c9aULL,
+    0x3f84a1b2c3d4e5f6ULL,
+};
+
 struct TtyWrap {
   napi_env env = nullptr;
   EdgeStreamBase base{};
@@ -183,6 +190,7 @@ napi_value TtyCtor(napi_env env, napi_callback_info info) {
             },
             nullptr,
             &wrap->base.wrapper_ref);
+  (void)napi_type_tag_object(env, self, &kTtyWrapTypeTag);
 
   if (wrap->initialized) {
     EdgeStreamBaseSetWrapperRef(&wrap->base, wrap->base.wrapper_ref);
@@ -494,6 +502,12 @@ EdgeStreamBase* EdgeTtyWrapGetStreamBase(napi_env env, napi_value value) {
   napi_valuetype type = napi_undefined;
   if (napi_typeof(env, value, &type) != napi_ok ||
       (type != napi_object && type != napi_function && type != napi_external)) {
+    return nullptr;
+  }
+  // See EdgePipeWrapGetStreamBase: verify the type tag before downcasting the
+  // unwrapped native pointer to avoid an out-of-bounds read on other wrap types.
+  bool is_tty = false;
+  if (napi_check_object_type_tag(env, value, &kTtyWrapTypeTag, &is_tty) != napi_ok || !is_tty) {
     return nullptr;
   }
   TtyWrap* wrap = nullptr;

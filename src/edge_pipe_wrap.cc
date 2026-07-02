@@ -25,6 +25,15 @@ constexpr int kPipeSocket = 0;
 constexpr int kPipeServer = 1;
 constexpr int kPipeIPC = 2;
 
+// Unique N-API type tag used to safely identify PipeWrap-backed JS objects
+// before downcasting their unwrapped native pointer. Without this, napi_unwrap
+// returns the native pointer of *any* wrapped object (e.g. a JsStreamWrap),
+// and reading PipeWrap-specific fields off it is an out-of-bounds read.
+constexpr napi_type_tag kPipeWrapTypeTag = {
+    0xe1c4a2b3d5f60718ULL,
+    0x2938475665748392ULL,
+};
+
 struct PipeWrap;
 
 struct PipeConnectReqWrap {
@@ -310,6 +319,7 @@ napi_value PipeCtor(napi_env env, napi_callback_info info) {
     if (pipe_wrap == nullptr) return;
     EdgeStreamBaseFinalize(&pipe_wrap->base);
   }, nullptr, &wrap->base.wrapper_ref);
+  (void)napi_type_tag_object(env, self, &kPipeWrapTypeTag);
   EdgeStreamBaseSetWrapperRef(&wrap->base, wrap->base.wrapper_ref);
   EdgeStreamBaseSetInitialStreamProperties(&wrap->base, false, false);
   if (socket_type != kPipeIPC) {
@@ -784,6 +794,14 @@ EdgeStreamBase* EdgePipeWrapGetStreamBase(napi_env env, napi_value value) {
   napi_valuetype type = napi_undefined;
   if (napi_typeof(env, value, &type) != napi_ok ||
       (type != napi_object && type != napi_function && type != napi_external)) {
+    return nullptr;
+  }
+  // Confirm this JS object is genuinely a PipeWrap before downcasting the
+  // unwrapped pointer. napi_unwrap succeeds for any wrapped native object, so
+  // without this tag check we could read PipeWrap fields off a smaller wrap
+  // (e.g. JsStreamWrap) and overrun its allocation.
+  bool is_pipe = false;
+  if (napi_check_object_type_tag(env, value, &kPipeWrapTypeTag, &is_pipe) != napi_ok || !is_pipe) {
     return nullptr;
   }
   PipeWrap* wrap = nullptr;
