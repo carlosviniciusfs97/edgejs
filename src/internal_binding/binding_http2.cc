@@ -239,6 +239,13 @@ struct Http2SessionWrap {
   napi_ref parent_handle_ref = nullptr;
   EdgeStreamBase* parent_stream_base = nullptr;
   EdgeStreamListener parent_stream_listener{};
+  // The base our parent_stream_listener is actually registered on. Tracked
+  // separately from parent_stream_base because several paths null the latter
+  // (its "native parent stream is usable" meaning) without unregistering the
+  // listener. Kept in lockstep with registration so Http2SessionFinalize can
+  // always remove the listener before `delete wrap` frees it — otherwise it
+  // dangles in the parent stream's listener_state.current (use-after-free).
+  EdgeStreamBase* parent_stream_listener_base = nullptr;
   int32_t type = kSessionTypeServer;
   int64_t async_id = -1;
   int32_t next_stream_id = 2;
@@ -1442,10 +1449,17 @@ void Http2SessionFinalize(napi_env env, void* data, void* /*hint*/) {
   for (auto& pending : wrap->pending_settings) DeletePendingSettings(env, &pending);
   for (auto& pending : wrap->pending_pings) DeletePendingPing(env, &pending);
   ClearPendingParentRead(wrap);
-  if (wrap->parent_stream_base != nullptr) {
-    (void)EdgeStreamBaseRemoveListener(wrap->parent_stream_base, &wrap->parent_stream_listener);
-    wrap->parent_stream_base = nullptr;
+  // Remove via parent_stream_listener_base, not parent_stream_base: several
+  // paths null parent_stream_base (its "native parent usable" meaning) without
+  // unregistering the listener, so it can be null here while the listener is
+  // still registered. parent_handle_ref keeps the parent base alive until just
+  // below, so the removal is safe. (A no-op if an earlier path already removed
+  // it.)
+  if (wrap->parent_stream_listener_base != nullptr) {
+    (void)EdgeStreamBaseRemoveListener(wrap->parent_stream_listener_base, &wrap->parent_stream_listener);
+    wrap->parent_stream_listener_base = nullptr;
   }
+  wrap->parent_stream_base = nullptr;
   wrap->parent_stream_listener.env = nullptr;
   wrap->parent_stream_listener.on_alloc = nullptr;
   wrap->parent_stream_listener.on_read = nullptr;
@@ -3017,6 +3031,7 @@ napi_value SessionConsume(napi_env env, napi_callback_info info) {
     wrap->parent_stream_listener.on_close = ParentStreamOnClose;
     wrap->parent_stream_listener.data = wrap;
     (void)EdgeStreamBasePushListener(wrap->parent_stream_base, &wrap->parent_stream_listener);
+    wrap->parent_stream_listener_base = wrap->parent_stream_base;
   }
 
   int32_t ignored = 0;
