@@ -15,6 +15,7 @@ const harness = require('./lib/framework-test-shared').create({
   toolName: 'framework-test',
   stateDirName: '.framework-test',
 });
+const databaseHarness = require('./lib/framework-test-db');
 
 const ROOT_DIR = harness.ROOT_DIR;
 const EXAMPLES_DIR = harness.EXAMPLES_DIR;
@@ -595,33 +596,56 @@ async function testProject(project, stage, index, total, preparation) {
   let activeRuntime = runtime;
   let usedProductionFallback = false;
   let readinessPath = routeReadinessPath(project, stage, activeRuntime);
+  const databaseConfig = databaseHarness.readProjectDatabaseConfig(project, routesJsonPath(project));
+  let database = null;
   try {
-    server = await startProjectServer(project, runtime, portCandidates, stage, readinessPath);
-  } catch (error) {
-    const fallbackRuntime = await maybePrepareProductionFallback(project, stage, runtime, shouldBuild, reuseExistingBuild, error);
-    if (!fallbackRuntime) {
-      throw error;
+    if (databaseConfig) {
+      log(`provisioning ${databaseConfig.kind} database for ${project.name} on ${stage.label}`);
+      database = await databaseHarness.startProjectDatabase({
+        config: databaseConfig,
+        project,
+        stage,
+        stateDir: STATE_DIR,
+        pnpmStoreDir: PNPM_STORE_DIR,
+        log,
+        logWarn,
+      });
+      log(`${databaseConfig.kind} ready for ${project.name} at 127.0.0.1:${database.port}`);
     }
-    activeRuntime = fallbackRuntime;
-    usedProductionFallback = true;
-    readinessPath = routeReadinessPath(project, stage, activeRuntime);
-    server = await startProjectServer(project, fallbackRuntime, portCandidates, stage, readinessPath);
-  }
-  try {
-    const routeResults = await validateRouteMatrix(project, activeRuntime, server.port, routes);
-    return {
-      buildLogPath: shouldBuild && !reuseExistingBuild ? buildLogPath(project, stage) : null,
-      candidate: server.candidate,
-      port: server.port,
-      project,
-      response: server.response,
-      routeResults,
-      runtime: activeRuntime,
-      serverLogPath: server.logPath,
-      usedProductionFallback,
-    };
+    const extraEnv = database ? database.env : null;
+
+    try {
+      server = await startProjectServer(project, runtime, portCandidates, stage, readinessPath, extraEnv);
+    } catch (error) {
+      const fallbackRuntime = await maybePrepareProductionFallback(project, stage, runtime, shouldBuild, reuseExistingBuild, error);
+      if (!fallbackRuntime) {
+        throw error;
+      }
+      activeRuntime = fallbackRuntime;
+      usedProductionFallback = true;
+      readinessPath = routeReadinessPath(project, stage, activeRuntime);
+      server = await startProjectServer(project, fallbackRuntime, portCandidates, stage, readinessPath, extraEnv);
+    }
+    try {
+      const routeResults = await validateRouteMatrix(project, activeRuntime, server.port, routes);
+      return {
+        buildLogPath: shouldBuild && !reuseExistingBuild ? buildLogPath(project, stage) : null,
+        candidate: server.candidate,
+        port: server.port,
+        project,
+        response: server.response,
+        routeResults,
+        runtime: activeRuntime,
+        serverLogPath: server.logPath,
+        usedProductionFallback,
+      };
+    } finally {
+      await stopProcess(server.handle);
+    }
   } finally {
-    await stopProcess(server.handle);
+    if (database) {
+      await database.stop();
+    }
   }
 }
 
@@ -1151,7 +1175,7 @@ async function runProjectBuild(project, stage) {
   });
 }
 
-async function startProjectServer(project, runtime, portCandidates, stage, readinessPath) {
+async function startProjectServer(project, runtime, portCandidates, stage, readinessPath, extraEnv) {
   const readyPath = normalizeRoutePath(readinessPath);
   if (runtime.mode === 'static-export') {
     return startStaticExportServer(project, runtime, portCandidates, stage, readyPath);
@@ -1175,7 +1199,7 @@ async function startProjectServer(project, runtime, portCandidates, stage, readi
         description: `runtime ${runtime.name} for ${project.name} on ${DEFAULT_HOST}:${port} using ${candidate.description}`,
         commandDisplay: buildRuntimeShellCommand(project, runtime, candidate.extraArgs),
         detached: true,
-        env: makeProjectEnv(port),
+        env: makeProjectEnv(port, extraEnv),
         logPath,
         project,
         shellCommand: buildRuntimeShellCommand(project, runtime, candidate.extraArgs),
@@ -1438,7 +1462,7 @@ function toProjectRelativePath(projectDir, targetPath) {
   return relativePath.startsWith('.') ? relativePath : `./${relativePath}`;
 }
 
-function makeProjectEnv(port) {
+function makeProjectEnv(port, extraEnv) {
   const env = {
     ...process.env,
     BROWSER: 'none',
@@ -1448,6 +1472,14 @@ function makeProjectEnv(port) {
 
   if (typeof port === 'number') {
     env.PORT = String(port);
+  }
+
+  if (extraEnv) {
+    for (const [name, value] of Object.entries(extraEnv)) {
+      env[name] = typeof port === 'number'
+        ? String(value).split('{port}').join(String(port))
+        : String(value);
+    }
   }
 
   return env;
