@@ -188,8 +188,9 @@ App triage (researched 2026-07-03, per-app package.json + docs verified):
 
 Start order: HedgeDoc (Postgres, **done**) → RSSMonster (MySQL, **done** —
 added the mysql provider via mysql-memory-server plus a `database.setup`
-hook for sequelize migrations/seeds) → Uptime Kuma → Firekylin. One app per
-mergeable change.
+hook for sequelize migrations/seeds) → Uptime Kuma (**done** — drove the
+WASIX process.platform='linux' parity fix and expected-status readiness
+probes) → Firekylin (next). One app per mergeable change.
 
 Note: native addon loading is now deliberately disabled on the native edge
 binaries (process.dlopen throws catchable ERR_DLOPEN_FAILED) so native and
