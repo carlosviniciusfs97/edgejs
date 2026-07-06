@@ -186,9 +186,15 @@ App triage (researched 2026-07-03, per-app package.json + docs verified):
 | Directus | any | **blocked**: `sharp` + `isolated-vm` + `argon2` hard deps (native) |
 | Actual Budget | sqlite-style only | dropped (the one app with no MySQL/Postgres path) |
 
-Start order: HedgeDoc (Postgres) → RSSMonster (MySQL, needs the mysql
-provider in the harness) → Uptime Kuma → Firekylin. One app per mergeable
-change.
+Start order: HedgeDoc (Postgres, **done**) → RSSMonster (MySQL, **done** —
+added the mysql provider via mysql-memory-server plus a `database.setup`
+hook for sequelize migrations/seeds) → Uptime Kuma → Firekylin. One app per
+mergeable change.
+
+Note: native addon loading is now deliberately disabled on the native edge
+binaries (process.dlopen throws catchable ERR_DLOPEN_FAILED) so native and
+WASIX expose the same functionality — apps hard-requiring native addons
+fail identically everywhere.
 
 <details>
 <summary>Original (obsolete) SQLite spike text, kept for history</summary>

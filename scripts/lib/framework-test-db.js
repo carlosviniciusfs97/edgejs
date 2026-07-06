@@ -25,9 +25,15 @@
 //   {port}                                                     — the app port,
 //     expanded later by makeProjectEnv once the harness picks it.
 //
+// An optional `setup` array lists shell commands (e.g. sequelize migrations
+// and seeds) that the harness runs on the host toolchain after the database
+// is up and before the app server starts, with the same env injected.
+//
 // Postgres is provided by the `embedded-postgres` npm package (real zonky.io
-// binaries spawned via initdb/pg_ctl), installed on demand into
-// <stateDir>/db-tools with the same pnpm store the project installs use.
+// binaries spawned via initdb/pg_ctl); MySQL by `mysql-memory-server` (uses a
+// matching system mysqld when available, otherwise downloads official
+// binaries). Both install on demand into <stateDir>/db-tools with the same
+// pnpm store the project installs use.
 
 const fs = require('node:fs');
 const net = require('node:net');
@@ -36,10 +42,15 @@ const { spawnSync } = require('node:child_process');
 const { createRequire } = require('node:module');
 
 const EMBEDDED_POSTGRES_VERSION = '17.10.0-beta.17';
+const MYSQL_MEMORY_SERVER_VERSION = '1.14.1';
+// Semver range: a matching system mysqld is used as is (Linux CI images and
+// most dev machines ship MySQL 8), otherwise the newest matching official
+// binary is downloaded once and cached (the macOS CI case).
+const MYSQL_VERSION_RANGE = '8.x';
 const DB_USER = 'framework';
 const DB_PASSWORD = 'framework';
 const DB_NAME = 'app';
-const SUPPORTED_KINDS = ['postgres'];
+const SUPPORTED_KINDS = ['postgres', 'mysql'];
 
 const activeDatabases = new Set();
 let signalHandlersInstalled = false;
@@ -79,7 +90,17 @@ function readProjectDatabaseConfig(project, routesJsonPath) {
     env[name] = value;
   }
 
-  return { kind: database.kind, env };
+  if (database.setup != null && !Array.isArray(database.setup)) {
+    throw new Error(`invalid database block in ${routesJsonPath}: setup must be an array of shell commands`);
+  }
+  const setup = (database.setup || []).map((command) => {
+    if (typeof command !== 'string' || !command.trim()) {
+      throw new Error(`invalid database setup command in ${routesJsonPath}: expected a non-empty string`);
+    }
+    return command;
+  });
+
+  return { kind: database.kind, env, setup };
 }
 
 function ensureDatabaseTools(stateDir, pnpmStoreDir, log) {
@@ -90,6 +111,7 @@ function ensureDatabaseTools(stateDir, pnpmStoreDir, log) {
     private: true,
     dependencies: {
       'embedded-postgres': EMBEDDED_POSTGRES_VERSION,
+      'mysql-memory-server': MYSQL_MEMORY_SERVER_VERSION,
     },
   };
   const manifestJson = `${JSON.stringify(manifest, null, 2)}\n`;
@@ -100,19 +122,22 @@ function ensureDatabaseTools(stateDir, pnpmStoreDir, log) {
     fs.writeFileSync(manifestPath, manifestJson);
   }
 
-  const installedMarker = path.join(toolsDir, 'node_modules', 'embedded-postgres', 'package.json');
-  let needsInstall = existing !== manifestJson || !fs.existsSync(installedMarker);
-  if (!needsInstall) {
+  let needsInstall = existing !== manifestJson;
+  for (const [name, version] of Object.entries(manifest.dependencies)) {
+    if (needsInstall) {
+      break;
+    }
     try {
+      const installedMarker = path.join(toolsDir, 'node_modules', name, 'package.json');
       const installed = JSON.parse(fs.readFileSync(installedMarker, 'utf8'));
-      needsInstall = installed.version !== EMBEDDED_POSTGRES_VERSION;
+      needsInstall = installed.version !== version;
     } catch {
       needsInstall = true;
     }
   }
 
   if (needsInstall) {
-    log(`installing database tools (embedded-postgres ${EMBEDDED_POSTGRES_VERSION}) into ${toolsDir}`);
+    log(`installing database tools (${Object.entries(manifest.dependencies).map(([n, v]) => `${n} ${v}`).join(', ')}) into ${toolsDir}`);
     const args = ['install', '--no-lockfile', '--config.dangerouslyAllowAllBuilds=true'];
     if (pnpmStoreDir) {
       args.push('--store-dir', pnpmStoreDir);
@@ -153,13 +178,7 @@ function installSignalHandlers() {
   }
 }
 
-async function startProjectDatabase(options) {
-  const { config, project, stage, stateDir, pnpmStoreDir, log, logWarn } = options;
-  if (config.kind !== 'postgres') {
-    throw new Error(`unsupported database kind: ${config.kind}`);
-  }
-
-  const requireTools = ensureDatabaseTools(stateDir, pnpmStoreDir, log);
+async function startPostgres(requireTools, project, stage, stateDir) {
   const embeddedPostgres = requireTools('embedded-postgres');
   const EmbeddedPostgres = embeddedPostgres.default || embeddedPostgres;
 
@@ -175,22 +194,69 @@ async function startProjectDatabase(options) {
     port,
     persistent: false,
     onLog: () => {},
-    onError: (message) => {
-      logWarn(`postgres (${project.name}): ${String(message).trim()}`);
-    },
+    onError: () => {},
   });
 
   await instance.initialise();
   await instance.start();
   await instance.createDatabase(DB_NAME);
 
+  return {
+    port,
+    dataDir,
+    urlScheme: 'postgres',
+    stop: () => instance.stop(),
+  };
+}
+
+async function startMysql(requireTools) {
+  const { createDB } = requireTools('mysql-memory-server');
+
+  // The package creates its `username` user without a password and only for
+  // 'localhost'; apps connect over TCP with credentials, so create the
+  // harness user with a password via the init SQL instead.
+  const instance = await createDB({
+    version: MYSQL_VERSION_RANGE,
+    dbName: DB_NAME,
+    logLevel: 'ERROR',
+    downloadBinaryOnce: true,
+    xEnabled: 'OFF',
+    initSQLString: [
+      `CREATE USER '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';`,
+      `GRANT ALL ON *.* TO '${DB_USER}'@'%' WITH GRANT OPTION;`,
+    ].join('\n'),
+  });
+
+  return {
+    port: instance.port,
+    dataDir: null,
+    urlScheme: 'mysql',
+    stop: () => instance.stop(),
+  };
+}
+
+const PROVIDERS = {
+  postgres: startPostgres,
+  mysql: startMysql,
+};
+
+async function startProjectDatabase(options) {
+  const { config, project, stage, stateDir, pnpmStoreDir, log, logWarn } = options;
+  const provider = PROVIDERS[config.kind];
+  if (!provider) {
+    throw new Error(`unsupported database kind: ${config.kind}`);
+  }
+
+  const requireTools = ensureDatabaseTools(stateDir, pnpmStoreDir, log);
+  const instance = await provider(requireTools, project, stage, stateDir);
+
   const values = {
     dbHost: '127.0.0.1',
-    dbPort: String(port),
+    dbPort: String(instance.port),
     dbUser: DB_USER,
     dbPassword: DB_PASSWORD,
     dbName: DB_NAME,
-    dbUrl: `postgres://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${port}/${DB_NAME}`,
+    dbUrl: `${instance.urlScheme}://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${instance.port}/${DB_NAME}`,
   };
 
   const env = {};
@@ -205,10 +271,10 @@ async function startProjectDatabase(options) {
   env.FRAMEWORK_TEST_EXTRA_ENV = Object.keys(env).join(',');
 
   const handle = {
-    dataDir,
+    dataDir: instance.dataDir,
     env,
     kind: config.kind,
-    port,
+    port: instance.port,
     stopped: false,
     async stop() {
       if (handle.stopped) {
@@ -219,9 +285,11 @@ async function startProjectDatabase(options) {
       try {
         await instance.stop();
       } catch (error) {
-        logWarn(`failed to stop postgres for ${project.name}: ${error.message}`);
+        logWarn(`failed to stop ${config.kind} for ${project.name}: ${error.message}`);
       }
-      fs.rmSync(dataDir, { recursive: true, force: true });
+      if (instance.dataDir) {
+        fs.rmSync(instance.dataDir, { recursive: true, force: true });
+      }
     },
   };
 

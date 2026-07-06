@@ -611,6 +611,9 @@ async function testProject(project, stage, index, total, preparation) {
         logWarn,
       });
       log(`${databaseConfig.kind} ready for ${project.name} at 127.0.0.1:${database.port}`);
+      if (databaseConfig.setup.length > 0) {
+        await runDatabaseSetup(project, stage, databaseConfig.setup, database.env);
+      }
     }
     const extraEnv = database ? database.env : null;
 
@@ -1173,6 +1176,38 @@ async function runProjectBuild(project, stage) {
     project,
     scriptName: 'build',
   });
+}
+
+// Database setup commands (migrations, seeds) always run on the host
+// toolchain, mirroring how builds work. Package .bin launchers prefer the
+// sibling node_modules/.bin/node over PATH, and on Edge stages that is the
+// injected Edge runner — so point it at host Node for the duration of the
+// setup and restore the stage runner afterwards.
+async function runDatabaseSetup(project, stage, commands, extraEnv) {
+  const logPath = path.join(LOG_DIR, `${project.name}.${stage.key}.db-setup.log`);
+  removeFileOrSymlink(logPath);
+
+  injectRunner(project, [HOST_NODE_RUNNER.targetPath]);
+  try {
+    for (let index = 0; index < commands.length; index += 1) {
+      const command = commands[index];
+      log(`running database setup for ${project.name}: ${command}`);
+      await runProjectCommand({
+        append: index > 0,
+        commandDisplay: command,
+        description: `database setup for ${project.name} on ${stage.label}: ${command}`,
+        detached: false,
+        env: makeProjectEnv(undefined, extraEnv),
+        errorMessage: `database setup failed for ${project.name} on ${stage.label}: ${command}`,
+        extraArgs: [],
+        logPath,
+        project,
+        shellCommand: command,
+      });
+    }
+  } finally {
+    injectRunner(project, stage.runnerCommandParts);
+  }
 }
 
 async function startProjectServer(project, runtime, portCandidates, stage, readinessPath, extraEnv) {
@@ -2322,11 +2357,32 @@ function removeGeneratedFrameworkArtifacts(project) {
       continue;
     }
 
+    // Vendored apps may commit prebuilt final artifacts (a release tarball's
+    // public/build, a prebuilt client dist). Those are part of the example,
+    // not stale build output — never delete tracked paths.
+    if (isTrackedExamplePath(project, relativePath)) {
+      log(`keeping ${targetPath} (tracked in the examples repo)`);
+      continue;
+    }
+
     log(`removing ${targetPath}`);
     fs.rmSync(targetPath, { recursive: true, force: true });
   }
 
   maybeRemoveUntrackedPublicDir(project);
+}
+
+function isTrackedExamplePath(project, relativePath) {
+  const tracked = spawnSync('git', ['-C', EXAMPLES_DIR, 'ls-files', '--', `${project.name}/${relativePath}`], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+
+  if (tracked.error || tracked.status !== 0) {
+    return false;
+  }
+
+  return tracked.stdout.trim() !== '';
 }
 
 function maybeRemoveUntrackedPublicDir(project) {
@@ -2335,16 +2391,7 @@ function maybeRemoveUntrackedPublicDir(project) {
     return;
   }
 
-  const tracked = spawnSync('git', ['-C', EXAMPLES_DIR, 'ls-files', '--', `${project.name}/public`], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
-
-  if (tracked.error || tracked.status !== 0) {
-    return;
-  }
-
-  if (tracked.stdout.trim() !== '') {
+  if (isTrackedExamplePath(project, 'public')) {
     return;
   }
 
