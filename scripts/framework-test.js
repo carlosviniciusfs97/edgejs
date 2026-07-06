@@ -595,7 +595,7 @@ async function testProject(project, stage, index, total, preparation) {
   let server = null;
   let activeRuntime = runtime;
   let usedProductionFallback = false;
-  let readinessPath = routeReadinessPath(project, stage, activeRuntime);
+  let readinessProbe = routeReadinessProbe(project, stage, activeRuntime);
   const databaseConfig = databaseHarness.readProjectDatabaseConfig(project, routesJsonPath(project));
   let database = null;
   try {
@@ -618,7 +618,7 @@ async function testProject(project, stage, index, total, preparation) {
     const extraEnv = database ? database.env : null;
 
     try {
-      server = await startProjectServer(project, runtime, portCandidates, stage, readinessPath, extraEnv);
+      server = await startProjectServer(project, runtime, portCandidates, stage, readinessProbe, extraEnv);
     } catch (error) {
       const fallbackRuntime = await maybePrepareProductionFallback(project, stage, runtime, shouldBuild, reuseExistingBuild, error);
       if (!fallbackRuntime) {
@@ -626,8 +626,8 @@ async function testProject(project, stage, index, total, preparation) {
       }
       activeRuntime = fallbackRuntime;
       usedProductionFallback = true;
-      readinessPath = routeReadinessPath(project, stage, activeRuntime);
-      server = await startProjectServer(project, fallbackRuntime, portCandidates, stage, readinessPath, extraEnv);
+      readinessProbe = routeReadinessProbe(project, stage, activeRuntime);
+      server = await startProjectServer(project, fallbackRuntime, portCandidates, stage, readinessProbe, extraEnv);
     }
     try {
       const routeResults = await validateRouteMatrix(project, activeRuntime, server.port, routes);
@@ -1210,10 +1210,10 @@ async function runDatabaseSetup(project, stage, commands, extraEnv) {
   }
 }
 
-async function startProjectServer(project, runtime, portCandidates, stage, readinessPath, extraEnv) {
-  const readyPath = normalizeRoutePath(readinessPath);
+async function startProjectServer(project, runtime, portCandidates, stage, readinessProbe, extraEnv) {
+  const readyPath = normalizeRoutePath(readinessProbe.path);
   if (runtime.mode === 'static-export') {
-    return startStaticExportServer(project, runtime, portCandidates, stage, readyPath);
+    return startStaticExportServer(project, runtime, portCandidates, stage, readinessProbe);
   }
 
   const logPath = serverLogPath(project, stage);
@@ -1241,7 +1241,7 @@ async function startProjectServer(project, runtime, portCandidates, stage, readi
       });
 
       try {
-        const response = await waitForHttpResponse(handle, buildRouteUrl(port, readyPath));
+        const response = await waitForHttpResponse(handle, buildRouteUrl(port, readyPath), readinessProbe);
         return {
           candidate,
           handle,
@@ -1269,7 +1269,7 @@ async function startProjectServer(project, runtime, portCandidates, stage, readi
   });
 }
 
-async function startStaticExportServer(project, runtime, portCandidates, stage, readinessPath) {
+async function startStaticExportServer(project, runtime, portCandidates, stage, readinessProbe) {
   if (!fs.existsSync(runtime.outputDir)) {
     fail(`expected static output directory for ${project.name}: ${runtime.outputDir}`);
   }
@@ -1296,7 +1296,7 @@ async function startStaticExportServer(project, runtime, portCandidates, stage, 
     });
 
     try {
-      const response = await waitForHttpResponse(handle, buildRouteUrl(port, readinessPath || '/'));
+      const response = await waitForHttpResponse(handle, buildRouteUrl(port, readinessProbe.path || '/'), readinessProbe);
       return {
         candidate: {
           description: 'static export fallback',
@@ -1643,9 +1643,16 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\"'\"'`)}'`;
 }
 
-async function waitForHttpResponse(handle, url) {
-  const deadline = Date.now() + SERVER_READY_TIMEOUT_MS;
+async function waitForHttpResponse(handle, url, probe) {
+  const expectedStatus = probe && Array.isArray(probe.status) && probe.status.length > 0
+    ? probe.status
+    : null;
+  const timeoutMs = probe && typeof probe.timeoutMs === 'number' && probe.timeoutMs > 0
+    ? probe.timeoutMs
+    : SERVER_READY_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   let lastError = null;
+  let lastUnexpectedStatus = null;
 
   while (Date.now() < deadline) {
     if (handle.exited) {
@@ -1657,10 +1664,14 @@ async function waitForHttpResponse(handle, url) {
 
     const response = await requestHttp(url);
     if (response.ok) {
-      return response;
+      if (!expectedStatus || expectedStatus.includes(response.statusCode)) {
+        return response;
+      }
+      lastUnexpectedStatus = response.statusCode;
+    } else {
+      lastError = response.error;
     }
 
-    lastError = response.error;
     await delay(HTTP_POLL_INTERVAL_MS);
   }
 
@@ -1671,7 +1682,10 @@ async function waitForHttpResponse(handle, url) {
     });
   }
 
-  fail(`timed out waiting for ${url}${lastError ? `: ${lastError.message}` : ''}`, {
+  const statusDetail = lastUnexpectedStatus !== null
+    ? `: last response HTTP ${lastUnexpectedStatus}, expected ${expectedStatus.join('/')}`
+    : (lastError ? `: ${lastError.message}` : '');
+  fail(`timed out waiting for ${url}${statusDetail}`, {
     detail: summarizeLogFailure(handle.logPath, lastError),
     logPath: handle.logPath,
   });
@@ -1826,12 +1840,25 @@ function routesJsonPath(project) {
   return path.join(project.dir, ROUTES_JSON_BASENAME);
 }
 
-function routeReadinessPath(project, stage, runtime) {
+// Readiness polls the first route until it answers with one of its expected
+// statuses — merely accepting connections is not enough (apps like Uptime
+// Kuma serve a temporary migration page that 404s API routes while their
+// boot-time migrations run). Slow-migrating apps can raise the top-level
+// routes.json `serverReadyTimeoutMs`.
+function routeReadinessProbe(project, stage, runtime) {
   const routes = loadRouteMatrix(project, stage, runtime);
+  const configPath = routesJsonPath(project);
+  const config = fs.existsSync(configPath)
+    ? readRouteMatrixConfig(configPath)
+    : DEFAULT_ROUTE_MATRIX;
+  const timeoutMs = typeof config.serverReadyTimeoutMs === 'number' && config.serverReadyTimeoutMs > 0
+    ? config.serverReadyTimeoutMs
+    : SERVER_READY_TIMEOUT_MS;
+
   if (routes.length === 0) {
-    return '/';
+    return { path: '/', status: null, timeoutMs };
   }
-  return routes[0].path;
+  return { path: routes[0].path, status: routes[0].expect.status.slice(), timeoutMs };
 }
 
 function loadRouteMatrix(project, stage, runtime) {
