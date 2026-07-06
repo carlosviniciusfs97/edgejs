@@ -430,19 +430,38 @@ function discoverProjects(selector) {
     .filter(Boolean)
     .sort((left, right) => left.name.localeCompare(right.name));
 
-  if (projects.length === 0) {
+  // FRAMEWORK_TEST_EXCLUDE fully drops projects from discovery: they are never
+  // built, and no runtime stage is attempted or reported. This is deliberately
+  // stronger than FRAMEWORK_TEST_NODE_SKIP / FRAMEWORK_TEST_EDGE_SKIP (which
+  // only skip a runtime stage but still build the app). We need the stronger
+  // form for js-gatsby-* on macOS: the failure there is `gatsby build` itself
+  // hanging on GitHub macOS runners (a gatsby-worker/sharp issue) — not EdgeJS
+  // running the app — and the harness has no build-step timeout, so a stage
+  // skip alone would still hang the job during the build. See the macOS job in
+  // .github/workflows/test-and-build-quickjs.yml.
+  const excluded = parseExcludedProjects();
+  const discovered = excluded.size > 0
+    ? projects.filter((project) => !excluded.has(project.name))
+    : projects;
+  for (const name of excluded) {
+    if (projects.some((project) => project.name === name)) {
+      log(`excluding ${name} from discovery (FRAMEWORK_TEST_EXCLUDE)`);
+    }
+  }
+
+  if (discovered.length === 0) {
     fail(`wasmer-examples is not initialized or has no js-* packages.\nRun: ${SUBMODULE_HINT}`);
   }
 
   if (!selector) {
-    return projects;
+    return discovered;
   }
 
-  const match = projects.find((project) => project.name === selector);
+  const match = discovered.find((project) => project.name === selector);
   if (!match) {
     fail([
       `unknown framework selector: ${selector}`,
-      `available frameworks: ${projects.map((project) => project.name).join(', ')}`,
+      `available frameworks: ${discovered.map((project) => project.name).join(', ')}`,
     ].join('\n'));
   }
 
@@ -478,6 +497,15 @@ function resolveRunnerTarget() {
   }
 
   return { targetPath };
+}
+
+function parseExcludedProjects() {
+  const raw = process.env.FRAMEWORK_TEST_EXCLUDE;
+  if (!raw || !raw.trim()) {
+    return new Set();
+  }
+
+  return new Set(raw.split(',').map((entry) => entry.trim()).filter(Boolean));
 }
 
 function parseEdgeStageSkipProjects() {

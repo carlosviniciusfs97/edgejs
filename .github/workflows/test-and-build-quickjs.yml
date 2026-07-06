@@ -64,7 +64,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Enable pnpm
         shell: bash
@@ -98,6 +98,12 @@ jobs:
         run: |
           set -euo pipefail
           make test-quickjs-only TEST_JOBS=1
+
+      - name: Test locale (Intl/ICU, QuickJS native)
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-quickjs-intl
 
       - name: Test framework apps (QuickJS native)
         shell: bash
@@ -153,7 +159,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Enable pnpm
         shell: bash
@@ -181,14 +187,29 @@ jobs:
           set -euo pipefail
           make test-quickjs-only TEST_JOBS=1
 
+      - name: Test locale (Intl/ICU, QuickJS native)
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-quickjs-intl
+
       - name: Test framework apps (QuickJS native)
         shell: bash
+        # Exclude js-gatsby-* on macOS only: `gatsby build` hangs on GitHub
+        # macOS runners (a gatsby-worker/sharp issue), and the harness has no
+        # build-step timeout, so it hangs the whole job. This is the build
+        # step, not EdgeJS running the app. Linux/WASIX build gatsby fine and
+        # keep it covered.
+        env:
+          FRAMEWORK_TEST_EXCLUDE: js-gatsby-staticsite,js-gatsby-staticsite2
         run: |
           set -euo pipefail
           make framework-test-quickjs-native
 
       - name: Test standalone builds (QuickJS native)
         shell: bash
+        env:
+          FRAMEWORK_TEST_EXCLUDE: js-gatsby-staticsite,js-gatsby-staticsite2
         run: |
           set -euo pipefail
           make standalone-build-test-quickjs-native
@@ -228,7 +249,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Enable pnpm
         shell: bash
@@ -264,6 +285,12 @@ jobs:
         run: |
           set -euo pipefail
           make test-wasix-quickjs-only TEST_JOBS=1
+
+      - name: Test locale (Intl/ICU, QuickJS WASIX)
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-wasix-quickjs-intl
 
       - name: Test framework apps (QuickJS WASIX)
         shell: bash

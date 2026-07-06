@@ -1,4 +1,4 @@
-.PHONY: build build-edge build-edge-quickjs-cli build-wasix build-quickjs-wasix build-napi build-napi-quickjs build-native-v8 build-native-quickjs build-wasix-napi build-wasix-napi-quickjs build-napi-wasmer-cli test-wasix-napi test-wasix-napi-quickjs test-wasix-napi-cli test-wasix-safe-mode test-wasix-quickjs-only test test-only check-portability clean clean-napi-quickjs clean-edge-quickjs-cli clean-dist dist dist-only framework-test framework-test-quickjs-native framework-test-quickjs-wasix framework-test-run framework-test-reset standalone-build-test standalone-build-test-run standalone-build-test-quickjs-native standalone-build-test-quickjs-wasix
+.PHONY: build build-edge build-edge-quickjs-cli build-wasix build-quickjs-wasix build-napi build-napi-quickjs build-native-v8 build-native-quickjs build-wasix-napi build-wasix-napi-quickjs build-napi-wasmer-cli test-wasix-napi test-wasix-napi-quickjs test-wasix-napi-cli test-wasix-safe-mode test-wasix-quickjs-only test-quickjs-intl test-wasix-quickjs-intl test test-only check-portability clean clean-napi-quickjs clean-edge-quickjs-cli clean-dist dist dist-only framework-test framework-test-quickjs-native framework-test-quickjs-wasix framework-test-run framework-test-reset standalone-build-test standalone-build-test-run standalone-build-test-quickjs-native standalone-build-test-quickjs-wasix
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -85,7 +85,15 @@ EDGE_NODE_TEST_SKIP_CI_20260518 := \
   parallel/test-stream-readable-async-iterators.js \
   parallel/test-zlib-type-error.js \
   pseudo-tty/console_colors.js
-EDGE_NODE_TEST_SKIP_TESTS ?= $(subst $(SPACE),$(COMMA),$(strip $(EDGE_NODE_TEST_SKIP_CI_20260518)))
+# Additional intermittent CI failures quarantined 2026-07-03 (shared by both
+# lanes). test-http-pipeline-requests-connection-leak is a throughput stress
+# test (10k pipelined requests / ~160 MB of responses) that races the 10s
+# per-test timeout under parallel CI load. (test-tls-alert-handling was also
+# quarantined here for a macOS SIGSEGV; that shutdown-request use-after-free is
+# fixed in this change, so it is re-enabled.)
+EDGE_NODE_TEST_SKIP_CI_20260703 := \
+  parallel/test-http-pipeline-requests-connection-leak.js
+EDGE_NODE_TEST_SKIP_TESTS ?= $(subst $(SPACE),$(COMMA),$(strip $(EDGE_NODE_TEST_SKIP_CI_20260518) $(EDGE_NODE_TEST_SKIP_CI_20260703)))
 
 # QuickJS currently cannot parse explicit resource management `using` syntax.
 QUICKJS_SKIP_USING_PARSER_TESTS := parallel/test-stream-duplex-destroy.js,parallel/test-stream-readable-dispose.js,parallel/test-stream-transform-destroy.js,parallel/test-stream-writable-destroy.js
@@ -93,8 +101,7 @@ QUICKJS_SKIP_USING_PARSER_TESTS := parallel/test-stream-duplex-destroy.js,parall
 # tests time out or fail in the QuickJS lane while V8 continues to cover them.
 QUICKJS_SKIP_WORKER_TESTS := parallel/test-diagnostics-channel-worker-threads.js,client-proxy/test-http-proxy-request-invalid-char-in-url.mjs,parallel/test-crypto-key-objects-messageport.js,parallel/test-crypto-prime.js,parallel/test-crypto-worker-thread.js,parallel/test-http2-reset-flood.js,parallel/test-webcrypto-cryptokey-workers.js
 # QuickJS currently regresses TLS close-notify handling under --expose-internals.
-# test-tls-alert-handling intermittently aborts on macOS during alert parsing teardown.
-QUICKJS_SKIP_TLS_TESTS := parallel/test-tls-close-notify.js,parallel/test-tls-alert-handling.js
+QUICKJS_SKIP_TLS_TESTS := parallel/test-tls-close-notify.js
 QUICKJS_SKIP_TESTS ?= $(EDGE_NODE_TEST_SKIP_TESTS),$(QUICKJS_SKIP_USING_PARSER_TESTS),$(QUICKJS_SKIP_WORKER_TESTS),$(QUICKJS_SKIP_TLS_TESTS)
 
 # Expected WASIX environment limits from the 2026-06-23 triage run (1674 passed /
@@ -311,6 +318,35 @@ test-wasix-quickjs-only:
 	  --skip-tests=$(QUICKJS_SKIP_TESTS),$(WASIX_SKIP_ENV_TESTS) \
 	  -j $(TEST_JOBS)
 
+# Node's own Intl / ICU locale tests. Run directly by path (not via a harness
+# category) so we don't have to categorize them in the node-test submodule —
+# the vendored test clone stays pristine. Excludes parallel/test-intl-
+# v8BreakIterator (Intl absent in fresh vm realms) and parallel/test-icu-data-
+# dir (--icu-data-dir handling); both are tracked in ECO-383.
+QUICKJS_INTL_TESTS := \
+  parallel/test-intl \
+  parallel/test-icu-env \
+  parallel/test-icu-minimum-version \
+  parallel/test-icu-stringwidth \
+  parallel/test-icu-transcode
+
+test-quickjs-intl:
+	@set -e; for t in $(QUICKJS_INTL_TESTS); do \
+	  echo "[intl native] $$t"; \
+	  EDGE_BYTECODE_CACHE=0 $(QUICKJS_EDGE_BINARY) "$(CURDIR)/test/$$t.js"; \
+	done
+	@echo "[intl native] all locale tests passed"
+
+test-wasix-quickjs-intl:
+	@command -v "$(WASMER_BIN)" >/dev/null 2>&1 || { \
+		echo "error: $(WASMER_BIN) is required for test-wasix-quickjs-intl" >&2; exit 1; }
+	@set -e; for t in $(QUICKJS_INTL_TESTS); do \
+	  echo "[intl wasix] $$t"; \
+	  WASMER_BIN="$(WASMER_BIN)" EDGEJS_ROOT="$(CURDIR)" WASIX_EDGEJS_PACKAGE_DIR="$(CURDIR)/quickjs-wasm" \
+	    "$(WASIX_QUICKJS_NODE_TEST_RUNNER)" "$(CURDIR)/test/$$t.js"; \
+	done
+	@echo "[intl wasix] all locale tests passed"
+
 test-bytecode-cache:
 	EDGE_BIN=$(EDGE_BINARY) ./scripts/test-bytecode-cache.sh
 
@@ -404,6 +440,10 @@ framework-test-run:
 framework-test: $(EDGE_BINARY)
 	@"$(EDGE_BINARY)" "$(FRAMEWORK_TEST_SCRIPT)" test $(FRAMEWORK_TEST_SELECTOR)
 
+# js-etherpad runs on both EdgeJS QuickJS Native and WASIX edge stages: the
+# ICU-backed Intl surface (ECO-359) supplies Intl.ListFormat, native-function
+# toString matches V8, and the example pre-bundles its client entrypoints at
+# build time so no esbuild runs at runtime. (GC use-after-frees fixed in #101.)
 framework-test-quickjs-native: $(QUICKJS_EDGE_BINARY)
 	@SYMLINK_TARGET="$(abspath $(QUICKJS_EDGE_BINARY))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \

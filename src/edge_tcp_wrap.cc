@@ -27,6 +27,13 @@ namespace {
 constexpr int kTcpSocket = 0;
 constexpr int kTcpServer = 1;
 
+// Unique N-API type tag used to safely identify TcpWrap-backed JS objects
+// before downcasting their unwrapped native pointer. See EdgePipeWrapGetStreamBase.
+constexpr napi_type_tag kTcpWrapTypeTag = {
+    0xa1b2c3d4e5f60789ULL,
+    0x1122334455667788ULL,
+};
+
 struct TcpWrap;
 
 struct ConnectReqWrap {
@@ -357,6 +364,7 @@ napi_value TcpCtor(napi_env env, napi_callback_info info) {
     if (tcp_wrap == nullptr) return;
     EdgeStreamBaseFinalize(&tcp_wrap->base);
   }, nullptr, &wrap->base.wrapper_ref);
+  (void)napi_type_tag_object(env, self, &kTcpWrapTypeTag);
   EdgeStreamBaseSetWrapperRef(&wrap->base, wrap->base.wrapper_ref);
   EdgeStreamBaseSetInitialStreamProperties(&wrap->base, true, true);
   return self;
@@ -926,6 +934,12 @@ EdgeStreamBase* EdgeTcpWrapGetStreamBase(napi_env env, napi_value value) {
   }
   if (type_status != napi_ok ||
       (type != napi_object && type != napi_function && type != napi_external)) {
+    return nullptr;
+  }
+  // See EdgePipeWrapGetStreamBase: verify the type tag before downcasting the
+  // unwrapped native pointer to avoid an out-of-bounds read on other wrap types.
+  bool is_tcp = false;
+  if (napi_check_object_type_tag(env, value, &kTcpWrapTypeTag, &is_tcp) != napi_ok || !is_tcp) {
     return nullptr;
   }
   TcpWrap* wrap = nullptr;
