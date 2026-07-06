@@ -465,7 +465,11 @@ const char* DetectPlatform() {
 #elif defined(__linux__)
   return "linux";
 #elif defined(__wasi__)
-  return "wasi";
+  // WASIX emulates Linux syscall semantics, and native and WASIX must expose
+  // the same functionality: packages that switch on process.platform (e.g.
+  // playwright-core's registry, which throws on unknown platforms at require
+  // time) must behave identically on both targets.
+  return "linux";
 #elif defined(__sun)
   return "sunos";
 #elif defined(_AIX)

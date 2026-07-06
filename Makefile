@@ -121,7 +121,8 @@ WASIX_SKIP_UNIX_SOCKET_TESTS := \
   parallel/test-tls-connect-pipe.js \
   parallel/test-tls-net-connect-prefer-path.js \
   parallel/test-tls-wrap-econnreset-pipe.js \
-  parallel/test-http-client-response-domain.js
+  parallel/test-http-client-response-domain.js \
+  parallel/test-pipe-abstract-socket-http.js
 WASIX_SKIP_CLUSTER_FORK_TESTS := \
   parallel/test-dgram-bind-socket-close-before-cluster-reply.js \
   parallel/test-dgram-cluster-close-during-bind.js \
