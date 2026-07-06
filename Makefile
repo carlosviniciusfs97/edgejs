@@ -462,15 +462,9 @@ framework-test-quickjs-wasix: $(QUICKJS_WASIX_WASM)
 	@SYMLINK_TARGET="$(abspath $(WASIX_FRAMEWORK_RUNNER))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
 		FRAMEWORK_TEST_NODE_SKIP='js-docusaurus-staticsite,js-docusaurus2-staticsite' \
-		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone,js-firekylin' \
+		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS WASIX' \
 		$(MAKE) framework-test-run $(FRAMEWORK_TEST_SELECTOR)
-# js-firekylin is skipped on WASIX: ThinkJS always serves through
-# cluster.fork(). The IPC message channel itself works (libuv-wasix reads
-# IPC streams with plain read() now), but distributing accepted connections
-# to workers needs SCM_RIGHTS-style handle passing, which WASIX does not
-# support — a reuseport-style cluster strategy is the tracked follow-up.
-# The app is green on the Node baseline and QuickJS native.
 
 framework-test-reset:
 	@if [ -x "$(EDGE_BINARY)" ]; then \

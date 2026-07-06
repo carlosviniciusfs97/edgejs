@@ -5242,6 +5242,20 @@ napi_status EdgeInstallProcessObject(napi_env env,
         return napi_generic_failure;
       }
     }
+    // process.platform reports 'linux' under WASIX for package compatibility,
+    // so internal code that must branch on the actual target (e.g. the
+    // cluster reuseport scheduling strategy) uses this flag instead.
+    {
+      napi_value is_wasix = nullptr;
+#if defined(__wasi__)
+      if (napi_get_boolean(env, true, &is_wasix) != napi_ok ||
+#else
+      if (napi_get_boolean(env, false, &is_wasix) != napi_ok ||
+#endif
+          napi_set_named_property(env, binding, "isWasix", is_wasix) != napi_ok) {
+        return napi_generic_failure;
+      }
+    }
     UpdateHrtimeBuffer(env, false);
     if (napi_create_reference(env, binding, 1, &state.binding_ref) != napi_ok || state.binding_ref == nullptr) {
       return napi_generic_failure;
