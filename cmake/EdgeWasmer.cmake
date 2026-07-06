@@ -1,6 +1,9 @@
 function(edge_quickjs_wasmer_asset_name out_var)
-  string(TOLOWER "${CMAKE_SYSTEM_NAME}" _edge_wasmer_system)
-  string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _edge_wasmer_processor)
+  # The Wasmer C API distribution is a build-host artifact: WASIX targets only
+  # consume its headers, so pick the asset by host, not by CMAKE_SYSTEM_NAME
+  # (which is WASI when cross-compiling with the WASIX toolchain).
+  string(TOLOWER "${CMAKE_HOST_SYSTEM_NAME}" _edge_wasmer_system)
+  string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _edge_wasmer_processor)
 
   if(_edge_wasmer_system MATCHES "darwin")
     set(_edge_wasmer_os "darwin")
@@ -9,7 +12,7 @@ function(edge_quickjs_wasmer_asset_name out_var)
   elseif(_edge_wasmer_system MATCHES "windows")
     set(_edge_wasmer_os "windows")
   else()
-    message(FATAL_ERROR "Unsupported Wasmer C API host OS: ${CMAKE_SYSTEM_NAME}")
+    message(FATAL_ERROR "Unsupported Wasmer C API host OS: ${CMAKE_HOST_SYSTEM_NAME}")
   endif()
 
   if(_edge_wasmer_processor MATCHES "^(arm64|aarch64)$")
@@ -22,7 +25,7 @@ function(edge_quickjs_wasmer_asset_name out_var)
   elseif(_edge_wasmer_processor MATCHES "^riscv64$")
     set(_edge_wasmer_arch "riscv64")
   else()
-    message(FATAL_ERROR "Unsupported Wasmer C API host architecture: ${CMAKE_SYSTEM_PROCESSOR}")
+    message(FATAL_ERROR "Unsupported Wasmer C API host architecture: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
   endif()
 
   set(${out_var} "wasmer-${_edge_wasmer_os}-${_edge_wasmer_arch}.tar.gz" PARENT_SCOPE)
