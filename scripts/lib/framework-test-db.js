@@ -44,9 +44,12 @@ const { createRequire } = require('node:module');
 const EMBEDDED_POSTGRES_VERSION = '17.10.0-beta.17';
 const MYSQL_MEMORY_SERVER_VERSION = '1.14.1';
 // Semver range: a matching system mysqld is used as is (Linux CI images and
-// most dev machines ship MySQL 8), otherwise the newest matching official
-// binary is downloaded once and cached (the macOS CI case).
-const MYSQL_VERSION_RANGE = '8.x';
+// most dev machines ship MySQL 8.0), otherwise the newest matching official
+// binary is downloaded once and cached (the macOS CI case). Pinned to 8.0.x
+// because the harness user authenticates with mysql_native_password (apps on
+// the legacy `mysql` 2.x driver — e.g. Firekylin's think-mysql — cannot do
+// caching_sha2_password), and 8.4+ disables that plugin by default.
+const MYSQL_VERSION_RANGE = '8.0.x';
 const DB_USER = 'framework';
 const DB_PASSWORD = 'framework';
 const DB_NAME = 'app';
@@ -222,7 +225,7 @@ async function startMysql(requireTools) {
     downloadBinaryOnce: true,
     xEnabled: 'OFF',
     initSQLString: [
-      `CREATE USER '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';`,
+      `CREATE USER '${DB_USER}'@'%' IDENTIFIED WITH mysql_native_password BY '${DB_PASSWORD}';`,
       `GRANT ALL ON *.* TO '${DB_USER}'@'%' WITH GRANT OPTION;`,
     ].join('\n'),
   });
