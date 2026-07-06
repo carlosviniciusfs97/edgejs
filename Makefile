@@ -185,6 +185,52 @@ WASIX_SKIP_PARITY_TESTS := \
   parallel/test-tls-error-stack.js \
   parallel/test-tls-hello-parser-failure.js \
   parallel/test-tls-junk-server.js
+# WebCrypto tests do CPU-heavy keygen/sign/derive that is slow in wasm and races
+# the 10s timeout under parallel WASIX load. Give the whole suite the scaled
+# timeout rather than chasing them one flake at a time. (test-webcrypto-cryptokey-
+# workers and test-webcrypto-derivebits-argon2 are omitted: they stay skipped in
+# QUICKJS_SKIP_WORKER_TESTS / WASIX_SKIP_CRYPTO_UNSUPPORTED_TESTS respectively.)
+WASIX_SLOW_WEBCRYPTO_TESTS := \
+  parallel/test-crypto-webcrypto-aes-decrypt-tag-too-small.js \
+  parallel/test-global-webcrypto-classes.js \
+  parallel/test-global-webcrypto.js \
+  parallel/test-webcrypto-constructors.js \
+  parallel/test-webcrypto-derivebits-cfrg.js \
+  parallel/test-webcrypto-derivebits-ecdh.js \
+  parallel/test-webcrypto-derivebits-hkdf.js \
+  parallel/test-webcrypto-derivebits.js \
+  parallel/test-webcrypto-derivekey-cfrg.js \
+  parallel/test-webcrypto-derivekey-ecdh.js \
+  parallel/test-webcrypto-derivekey.js \
+  parallel/test-webcrypto-digest.js \
+  parallel/test-webcrypto-encap-decap-ml-kem.js \
+  parallel/test-webcrypto-encrypt-decrypt-aes.js \
+  parallel/test-webcrypto-encrypt-decrypt-chacha20-poly1305.js \
+  parallel/test-webcrypto-encrypt-decrypt.js \
+  parallel/test-webcrypto-encrypt-decrypt-rsa.js \
+  parallel/test-webcrypto-export-import-cfrg.js \
+  parallel/test-webcrypto-export-import-ec.js \
+  parallel/test-webcrypto-export-import.js \
+  parallel/test-webcrypto-export-import-ml-dsa.js \
+  parallel/test-webcrypto-export-import-ml-kem.js \
+  parallel/test-webcrypto-export-import-rsa.js \
+  parallel/test-webcrypto-get-public-key.mjs \
+  parallel/test-webcrypto-getRandomValues.js \
+  parallel/test-webcrypto-internal-slots.mjs \
+  parallel/test-webcrypto-keygen.js \
+  parallel/test-webcrypto-keygen-kmac.js \
+  parallel/test-webcrypto-random.js \
+  parallel/test-webcrypto-sign-verify-ecdsa.js \
+  parallel/test-webcrypto-sign-verify-eddsa.js \
+  parallel/test-webcrypto-sign-verify-hmac.js \
+  parallel/test-webcrypto-sign-verify.js \
+  parallel/test-webcrypto-sign-verify-kmac.js \
+  parallel/test-webcrypto-sign-verify-ml-dsa.js \
+  parallel/test-webcrypto-sign-verify-rsa.js \
+  parallel/test-webcrypto-supports.mjs \
+  parallel/test-webcrypto-util.js \
+  parallel/test-webcrypto-webidl.js \
+  parallel/test-webcrypto-wrap-unwrap.js
 # CI-only harness timeouts under parallel WASIX load (default harness timeout is 10s).
 WASIX_SLOW_TESTS := \
   parallel/test-buffer-constants.js \
@@ -193,7 +239,7 @@ WASIX_SLOW_TESTS := \
   parallel/test-http2-respond-file-with-pipe.js \
   parallel/test-stringbytes-external.js \
   parallel/test-url-parse-invalid-input.js \
-  parallel/test-webcrypto-wrap-unwrap.js
+  $(WASIX_SLOW_WEBCRYPTO_TESTS)
 WASIX_SLOW_TEST_TIMEOUT_SCALE ?= 12
 WASIX_SKIP_ENV_TESTS ?= $(subst $(SPACE),$(COMMA),$(strip \
   $(WASIX_SKIP_UNIX_SOCKET_TESTS) \
