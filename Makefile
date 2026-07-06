@@ -462,9 +462,14 @@ framework-test-quickjs-wasix: $(QUICKJS_WASIX_WASM)
 	@SYMLINK_TARGET="$(abspath $(WASIX_FRAMEWORK_RUNNER))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
 		FRAMEWORK_TEST_NODE_SKIP='js-docusaurus-staticsite,js-docusaurus2-staticsite' \
-		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
+		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone,js-firekylin' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS WASIX' \
 		$(MAKE) framework-test-run $(FRAMEWORK_TEST_SELECTOR)
+# js-firekylin is skipped on WASIX: ThinkJS always serves through
+# cluster.fork(), and the cluster IPC channel is not functional under WASIX
+# (process.send fails with EPIPE — extra fds are not passed through wasmer's
+# process spawn). Tracked as a WASIX runtime capability gap; the app is green
+# on the Node baseline and QuickJS native.
 
 framework-test-reset:
 	@if [ -x "$(EDGE_BINARY)" ]; then \

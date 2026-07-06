@@ -190,7 +190,13 @@ Start order: HedgeDoc (Postgres, **done**) → RSSMonster (MySQL, **done** —
 added the mysql provider via mysql-memory-server plus a `database.setup`
 hook for sequelize migrations/seeds) → Uptime Kuma (**done** — drove the
 WASIX process.platform='linux' parity fix and expected-status readiness
-probes) → Firekylin (next). One app per mergeable change.
+probes) → Firekylin (**done on Node + QuickJS native; skipped on WASIX** —
+ThinkJS serves through cluster.fork() and the cluster IPC channel is broken
+under WASIX: worker process.send fails with EPIPE because extra fds are not
+passed through wasmer's process spawn. Tracked as a WASIX runtime capability
+gap — affects any cluster-based app; also drove the MySQL provider's
+mysql_native_password user + 8.0.x pin for legacy `mysql` 2.x drivers).
+All four planned DB apps are landed.
 
 Note: native addon loading is now deliberately disabled on the native edge
 binaries (process.dlopen throws catchable ERR_DLOPEN_FAILED) so native and
