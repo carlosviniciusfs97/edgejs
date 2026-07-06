@@ -17,6 +17,7 @@ include("${PROJECT_ROOT}/cmake/EdgeNapiProvider.cmake")
 include("${PROJECT_ROOT}/cmake/EdgeOpenSSL.cmake")
 include("${PROJECT_ROOT}/cmake/EdgeOptions.cmake")
 include("${PROJECT_ROOT}/cmake/EdgeVendoredDeps.cmake")
+include("${PROJECT_ROOT}/cmake/EdgeWasmer.cmake")
 
 set(EDGE_VERSION_COMMIT "unknown")
 if(GIT_FOUND)
@@ -42,6 +43,7 @@ endif()
 
 edge_configure_options()
 edge_configure_napi_provider()
+edge_configure_quickjs_webassembly()
 
 # Hard gate: edge runtime/library sources must never directly reference V8.
 file(GLOB_RECURSE EDGE_PURE_SRC_FILES
@@ -258,6 +260,9 @@ add_library(edge_runtime_core OBJECT EXCLUDE_FROM_ALL
   ${EDGE_RUNTIME_CORE_SOURCES}
 )
 edge_apply_runtime_compile_surface(edge_runtime_core)
+if(EDGE_QUICKJS_WEBASSEMBLY_ENABLED)
+  target_compile_definitions(edge_runtime_core PRIVATE EDGE_QUICKJS_WEBASSEMBLY=1)
+endif()
 
 add_library(edge_bindings OBJECT EXCLUDE_FROM_ALL
   ${EDGE_INTERNAL_BINDING_SOURCES}
@@ -280,6 +285,16 @@ add_library(edge_runtime STATIC
 )
 edge_add_builtin_catalog(edge_runtime)
 edge_apply_runtime_compile_surface(edge_runtime)
+if(EDGE_QUICKJS_WEBASSEMBLY_ENABLED)
+  target_sources(edge_runtime PRIVATE
+    src/webassembly/edge_wasm.cc
+  )
+  target_link_libraries(edge_runtime PRIVATE edge_quickjs_wasmer_c_api)
+  target_compile_definitions(edge_runtime PRIVATE
+    EDGE_QUICKJS_WEBASSEMBLY=1
+    $<$<BOOL:${EDGE_IS_WASIX_TARGET}>:EDGE_QUICKJS_WEBASSEMBLY_IMPORTS=1>
+  )
+endif()
 if(EDGE_NAPI_PROVIDER STREQUAL "bundled-v8")
   target_link_libraries(edge_runtime PUBLIC napi_v8)
 elseif(EDGE_NAPI_PROVIDER STREQUAL "quickjs")

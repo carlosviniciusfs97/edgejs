@@ -101,6 +101,24 @@ def skip_import_desc():
         raise SystemExit(f"error: unsupported wasm import kind {kind}")
 
 napi_imports = []
+unexpected_imports = []
+allowed_modules = {
+    "wasi_snapshot_preview1",
+    "wasix_32v1",
+    "wasix_64v1",
+    "wasi",
+    "wasm_c_api_v0",
+}
+allowed_env_imports = {
+    "memory",
+    "uv_cpu_info",
+    "uv_interface_addresses",
+    "uv_free_interface_addresses",
+    "uv_resident_set_memory",
+    "uv_get_free_memory",
+    "uv_get_total_memory",
+    "_Z20OSSL_set_max_threadsP15ossl_lib_ctx_sty",
+}
 while offset < len(data):
     section_id = data[offset]
     offset += 1
@@ -113,12 +131,19 @@ while offset < len(data):
             skip_import_desc()
             if re.match(r"^(napi_|node_api_|unofficial_napi_)", name):
                 napi_imports.append(f"{module}.{name}")
+            if module not in allowed_modules and not (module == "env" and name in allowed_env_imports):
+                unexpected_imports.append(f"{module}.{name}")
         break
     offset = section_end
 
 if napi_imports:
     print("error: QuickJS wasm imports N-API symbols:", file=sys.stderr)
     for item in napi_imports:
+        print(f"  {item}", file=sys.stderr)
+    raise SystemExit(1)
+if unexpected_imports:
+    print("error: QuickJS wasm imports unexpected non-WASI symbols:", file=sys.stderr)
+    for item in unexpected_imports:
         print(f"  {item}", file=sys.stderr)
     raise SystemExit(1)
 PY

@@ -24,6 +24,10 @@ function(edge_configure_napi_provider)
     "N-API provider backend: bundled-v8|imports|quickjs" FORCE)
   if(EDGE_IS_WASIX_TARGET AND EDGE_NAPI_PROVIDER STREQUAL "imports")
     set(EDGE_ALLOW_UNDEFINED_IMPORTS ON CACHE BOOL "" FORCE)
+  elseif(EDGE_IS_WASIX_TARGET AND
+         EDGE_NAPI_PROVIDER STREQUAL "quickjs" AND
+         EDGE_QUICKJS_WEBASSEMBLY)
+    set(EDGE_ALLOW_UNDEFINED_IMPORTS ON CACHE BOOL "" FORCE)
   elseif(EDGE_NAPI_PROVIDER STREQUAL "quickjs")
     set(EDGE_ALLOW_UNDEFINED_IMPORTS OFF CACHE BOOL "" FORCE)
   endif()
