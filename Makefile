@@ -122,25 +122,25 @@ WASIX_SKIP_UNIX_SOCKET_TESTS := \
   parallel/test-tls-net-connect-prefer-path.js \
   parallel/test-tls-wrap-econnreset-pipe.js \
   parallel/test-http-client-response-domain.js \
-  parallel/test-pipe-abstract-socket-http.js
+  parallel/test-pipe-abstract-socket-http.js \
+  parallel/test-http-client-with-create-connection.js
+# Slimmed 2026-07-07 after fork IPC (libuv-wasix plain read) and the cluster
+# reuseport strategy landed: 11 of the original 17 pass and were removed.
+# What remains is UDP cluster listens, which still go through shared-handle
+# passing (the reuseport strategy currently covers TCP only).
+# test-http-client-with-create-connection moved to the unix-socket group and
+# test-crypto-secure-heap to the crypto group (misfiled here; their failures
+# are unrelated to cluster/fork).
+# The known_issues negative test is skipped because its error-swallowing
+# path (exit 0 on any non-success worker message) engages now that fork IPC
+# delivers messages, making the must-fail test "pass" without the upstream
+# known issue being observable under WASIX (UDP cluster binds fail earlier).
 WASIX_SKIP_CLUSTER_FORK_TESTS := \
-  parallel/test-dgram-bind-socket-close-before-cluster-reply.js \
   parallel/test-dgram-cluster-close-during-bind.js \
   parallel/test-dgram-cluster-close-in-listening.js \
   parallel/test-dgram-unref-in-cluster.js \
-  parallel/test-http-server-drop-connections-in-cluster.js \
-  parallel/test-tls-ticket-cluster.js \
-  parallel/test-diagnostics-channel-process.js \
-  parallel/test-http-chunk-problem.js \
-  parallel/test-http-client-with-create-connection.js \
-  parallel/test-http-full-response.js \
-  parallel/test-http-server-stale-close.js \
-  parallel/test-dgram-deprecation-error.js \
-  parallel/test-https-agent-unref-socket.js \
-  parallel/test-crypto-secure-heap.js \
-  parallel/test-domain-top-level-error-handler-throw.js \
-  parallel/test-domain-uncaught-exception.js \
-  sequential/test-dgram-bind-shared-ports.js
+  sequential/test-dgram-bind-shared-ports.js \
+  known_issues/test-dgram-bind-shared-ports-after-port-0.js
 WASIX_SKIP_SUBPROCESS_SHELL_TESTS := \
   parallel/test-stream-pipeline-process.js \
   parallel/test-domain-abort-on-uncaught.js \
@@ -162,7 +162,8 @@ WASIX_SKIP_CRYPTO_UNSUPPORTED_TESTS := \
   parallel/test-crypto-argon2.js \
   parallel/test-crypto-no-algorithm.js \
   parallel/test-webcrypto-derivebits-argon2.js \
-  parallel/test-crypto-pqc-keygen-slh-dsa.js
+  parallel/test-crypto-pqc-keygen-slh-dsa.js \
+  parallel/test-crypto-secure-heap.js
 WASIX_SKIP_TLS_SUBPROCESS_ENV_TESTS := \
   parallel/test-tls-enable-keylog-cli.js \
   parallel/test-tls-env-bad-extra-ca.js \
