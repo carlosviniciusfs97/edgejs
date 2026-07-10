@@ -94,14 +94,6 @@ std::string g_edge_argv0;
 std::string g_process_title = "node";
 uint32_t g_process_debug_port = 9229;
 std::mutex g_process_umask_mutex;
-std::mutex g_process_dlopen_mutex;
-std::map<std::string, std::unique_ptr<uv_lib_t>> g_process_dlopen_handles;
-
-#if defined(__APPLE__) || defined(__linux__) || defined(__sun) || defined(_AIX)
-constexpr int kDefaultDlopenFlags = RTLD_LAZY;
-#else
-constexpr int kDefaultDlopenFlags = 0;
-#endif
 
 #ifndef EDGE_EMBEDDED_V8_VERSION
 #define EDGE_EMBEDDED_V8_VERSION "0.0.0-node.0"
@@ -133,53 +125,6 @@ std::string GetGlibcCompilerVersion() {
   return buf.str();
 #else
   return "";
-#endif
-}
-
-napi_addon_register_func GetNapiInitializerCallback(uv_lib_t* lib) {
-  if (lib == nullptr) return nullptr;
-  void* symbol = nullptr;
-  if (uv_dlsym(lib, "napi_register_module_v1", &symbol) != 0 || symbol == nullptr) {
-    return nullptr;
-  }
-  return reinterpret_cast<napi_addon_register_func>(symbol);
-}
-
-std::string BuildDlopenCacheKey(const std::string& filename, int32_t flags) {
-  return filename + "#" + std::to_string(flags);
-}
-
-int OpenDynamicLibrary(const std::string& filename, int32_t flags, uv_lib_t* lib, std::string* error_out) {
-  if (lib == nullptr) return UV_EINVAL;
-  lib->handle = nullptr;
-  lib->errmsg = nullptr;
-#if defined(__APPLE__) || defined(__linux__) || defined(__sun) || defined(_AIX)
-  lib->handle = dlopen(filename.c_str(), flags);
-  if (lib->handle != nullptr) return 0;
-  if (error_out != nullptr) {
-    const char* error = dlerror();
-    *error_out = (error != nullptr && error[0] != '\0') ? error : ("Cannot open shared object file: '" + filename + "'");
-  }
-  return UV_EINVAL;
-#else
-  const int rc = uv_dlopen(filename.c_str(), lib);
-  if (rc != 0 && error_out != nullptr) {
-    const char* error = uv_dlerror(lib);
-    *error_out = (error != nullptr && error[0] != '\0') ? error : ("Cannot open shared object file: '" + filename + "'");
-  }
-  return rc;
-#endif
-}
-
-void CloseDynamicLibrary(uv_lib_t* lib) {
-  if (lib == nullptr) return;
-#if defined(__APPLE__) || defined(__linux__) || defined(__sun) || defined(_AIX)
-  if (lib->handle != nullptr) {
-    (void)dlclose(lib->handle);
-    lib->handle = nullptr;
-  }
-#else
-  uv_dlclose(lib);
 #endif
 }
 
@@ -465,7 +410,11 @@ const char* DetectPlatform() {
 #elif defined(__linux__)
   return "linux";
 #elif defined(__wasi__)
-  return "wasi";
+  // WASIX emulates Linux syscall semantics, and native and WASIX must expose
+  // the same functionality: packages that switch on process.platform (e.g.
+  // playwright-core's registry, which throws on unknown platforms at require
+  // time) must behave identically on both targets.
+  return "linux";
 #elif defined(__sun)
   return "sunos";
 #elif defined(_AIX)
@@ -4363,85 +4312,17 @@ napi_value ProcessMethodsDlopenCallback(napi_env env, napi_callback_info info) {
   const std::string maybe_name = NapiValueToUtf8(env, argv[1]);
   if (!maybe_name.empty()) filename = maybe_name;
 
-  int32_t flags = kDefaultDlopenFlags;
-  if (argc > 2 && argv[2] != nullptr) {
-    if (napi_get_value_int32(env, argv[2], &flags) != napi_ok) {
-      ThrowTypeErrorWithCode(env, "ERR_INVALID_ARG_TYPE", "flag argument must be an integer.");
-      return nullptr;
-    }
-  }
-  const std::string cache_key = BuildDlopenCacheKey(filename, flags);
-
-  napi_value module = nullptr;
-  if (napi_coerce_to_object(env, argv[0], &module) != napi_ok || module == nullptr) {
-    return nullptr;
-  }
-
-  napi_value exports_value = nullptr;
-  if (napi_get_named_property(env, module, "exports", &exports_value) != napi_ok || exports_value == nullptr) {
-    return nullptr;
-  }
-
-  napi_value exports = nullptr;
-  if (napi_coerce_to_object(env, exports_value, &exports) != napi_ok || exports == nullptr) {
-    return nullptr;
-  }
-
-  napi_addon_register_func init = nullptr;
-  uv_lib_t* lib = nullptr;
-  std::unique_ptr<uv_lib_t> newly_loaded;
-  bool cache_loaded_library = false;
-  {
-    std::lock_guard<std::mutex> lock(g_process_dlopen_mutex);
-    auto it = g_process_dlopen_handles.find(cache_key);
-    if (it != g_process_dlopen_handles.end()) {
-      lib = it->second.get();
-    }
-  }
-
-  if (lib == nullptr) {
-    newly_loaded = std::make_unique<uv_lib_t>();
-    std::string message;
-    if (OpenDynamicLibrary(filename, flags, newly_loaded.get(), &message) != 0) {
-      ThrowErrorWithCode(env, "ERR_DLOPEN_FAILED", message.c_str());
-      return nullptr;
-    }
-    lib = newly_loaded.get();
-    cache_loaded_library = true;
-  }
-
-  init = GetNapiInitializerCallback(lib);
-
-  if (init == nullptr) {
-    const std::string message = "Module did not self-register: '" + filename + "'.";
-    if (cache_loaded_library && newly_loaded != nullptr) {
-      CloseDynamicLibrary(newly_loaded.get());
-    }
-    ThrowErrorWithCode(env, "ERR_DLOPEN_FAILED", message.c_str());
-    return nullptr;
-  }
-
-  napi_value addon_exports = init(env, exports);
-
-  bool has_pending = false;
-  if (napi_is_exception_pending(env, &has_pending) == napi_ok && has_pending) {
-    return nullptr;
-  }
-
-  bool same_exports = false;
-  if (addon_exports != nullptr &&
-      (napi_strict_equals(env, addon_exports, exports, &same_exports) != napi_ok || !same_exports)) {
-    napi_set_named_property(env, module, "exports", addon_exports);
-  }
-
-  if (cache_loaded_library && newly_loaded != nullptr) {
-    std::lock_guard<std::mutex> lock(g_process_dlopen_mutex);
-    g_process_dlopen_handles.emplace(cache_key, std::move(newly_loaded));
-  }
-
-  napi_value undefined = nullptr;
-  napi_get_undefined(env, &undefined);
-  return undefined;
+  // EdgeJS deliberately does not load native addons: the native and WASIX
+  // targets must expose the same functionality, and WASIX has no dynamic
+  // linking. Fail before any dlopen() so no addon static constructor runs
+  // (a constructor referencing an unresolved symbol such as
+  // napi_module_register would abort the whole process uncatchably) and
+  // optional accelerators like bufferutil can fall back to their pure-JS
+  // implementations, exactly as they do under WASIX.
+  const std::string message =
+      "Loading native addons is not supported: '" + filename + "'";
+  ThrowErrorWithCode(env, "ERR_DLOPEN_FAILED", message.c_str());
+  return nullptr;
 }
 
 napi_value ProcessMethodsEmptyArrayCallback(napi_env env, napi_callback_info info) {
