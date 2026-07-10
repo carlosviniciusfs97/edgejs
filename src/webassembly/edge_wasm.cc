@@ -51,15 +51,17 @@ struct WasmInstanceObject {
 struct WasmMemoryObject {
   WasmObjectBase base;
   wasm_memory_t *memory = nullptr;
+  // Cached .buffer ArrayBuffer, detached (and re-minted on next access) when
+  // the backing wasm memory grows/moves — mirroring the JS API's
+  // detach-on-grow semantics that wasm-bindgen's view caching relies on.
+  napi_ref buffer_ref = nullptr;
+  void *buffer_data = nullptr;
+  size_t buffer_size = 0;
 };
 
 struct WasmTableObject {
   WasmObjectBase base;
   wasm_table_t *table = nullptr;
-  bool local_only = false;
-  uint32_t local_size = 0;
-  uint32_t local_max = wasm_limits_max_default;
-  wasm_valkind_t local_element_kind = WASM_FUNCREF;
 };
 
 struct WasmGlobalObject {
@@ -89,6 +91,7 @@ struct WasmState {
   explicit WasmState(napi_env env_in) : env(env_in) {}
 
   ~WasmState() {
+    DeleteRefIfPresent(env, &externref_values_ref);
     DeleteRefIfPresent(env, &pending_import_exception_ref);
     DeleteRefIfPresent(env, &webassembly_ref);
     DeleteRefIfPresent(env, &module_ctor_ref);
@@ -130,6 +133,16 @@ struct WasmState {
   napi_ref table_ctor_ref = nullptr;
   napi_ref global_ctor_ref = nullptr;
   napi_ref pending_import_exception_ref = nullptr;
+  // Externref registry: JS values passed into wasm as externrefs are rooted
+  // in a JS array; the array index rides inside the wasm-side foreign object
+  // as host info. Entries are never released — the wasmer store has no
+  // reference lifetime management yet (WARP-70 Part B), so the extern objects
+  // leak until store death regardless.
+  napi_ref externref_values_ref = nullptr;
+  uint32_t next_externref_id = 1;
+  // Live memory objects whose cached buffers must be revalidated at JS↔wasm
+  // boundaries (wasm-internal memory.grow has no JS-side hook).
+  std::vector<WasmMemoryObject *> live_memories;
 };
 
 struct ImportFuncData {
@@ -581,16 +594,157 @@ bool ParseValueKind(napi_env env, napi_value value, wasm_valkind_t *out) {
   return false;
 }
 
-bool JsToWasmVal(napi_env env, napi_value value, wasm_valkind_t kind,
-                 wasm_val_t *out) {
+napi_value CreateFunctionObject(WasmState *state, const std::string &name,
+                                wasm_func_t *owned_func);
+
+napi_value ExternrefRegistry(WasmState *state) {
+  if (state == nullptr)
+    return nullptr;
+  napi_env env = state->env;
+  napi_value registry = nullptr;
+  if (state->externref_values_ref != nullptr) {
+    if (napi_get_reference_value(env, state->externref_values_ref,
+                                 &registry) != napi_ok)
+      return nullptr;
+    return registry;
+  }
+  if (napi_create_array(env, &registry) != napi_ok || registry == nullptr)
+    return nullptr;
+  if (napi_create_reference(env, registry, 1, &state->externref_values_ref) !=
+      napi_ok) {
+    state->externref_values_ref = nullptr;
+    return nullptr;
+  }
+  return registry;
+}
+
+// Mints an owned wasm reference for an arbitrary JS value. Only JS null (and
+// an absent value) maps to the null reference; undefined is a real externref
+// value (wasm-bindgen roots it in a sentinel table slot).
+bool JsToExternRef(WasmState *state, napi_value value, wasm_ref_t **out) {
+  if (state == nullptr || out == nullptr)
+    return false;
+  *out = nullptr;
+  if (value == nullptr)
+    return true;
+  napi_env env = state->env;
+  napi_valuetype type = napi_undefined;
+  if (napi_typeof(env, value, &type) != napi_ok)
+    return false;
+  if (type == napi_null)
+    return true;
+  napi_value registry = ExternrefRegistry(state);
+  if (registry == nullptr)
+    return false;
+  uint32_t id = state->next_externref_id++;
+  if (napi_set_element(env, registry, id, value) != napi_ok)
+    return false;
+  wasm_foreign_t *foreign = wasm_foreign_new(state->store);
+  if (foreign == nullptr)
+    return false;
+  wasm_ref_t *ref = wasm_foreign_as_ref(foreign);
+  wasm_ref_set_host_info(ref,
+                         reinterpret_cast<void *>(static_cast<uintptr_t>(id)));
+  *out = ref;
+  return true;
+}
+
+bool JsToFuncRef(WasmState *state, napi_value value, wasm_ref_t **out) {
+  if (state == nullptr || out == nullptr)
+    return false;
+  *out = nullptr;
+  if (value == nullptr || IsNullOrUndefined(state->env, value))
+    return true;
+  auto *wrapped =
+      Unwrap<WasmFunctionObject>(state->env, value, WasmObjectKind::kFunction);
+  if (wrapped == nullptr || wrapped->func == nullptr)
+    return false;
+  *out = wasm_func_as_ref(wrapped->func);
+  return *out != nullptr;
+}
+
+bool JsToRef(WasmState *state, napi_value value, wasm_valkind_t kind,
+             wasm_ref_t **out) {
+  return kind == WASM_FUNCREF ? JsToFuncRef(state, value, out)
+                              : JsToExternRef(state, value, out);
+}
+
+// Maps a wasm reference back to JS. Externrefs minted by JsToExternRef
+// round-trip to the exact same JS value via the registry; funcrefs wrap into
+// fresh callable function objects (identity across round-trips is not
+// preserved, which the JS API spec permits). Borrows `ref`.
+napi_value RefToJs(WasmState *state, wasm_ref_t *ref) {
+  if (state == nullptr)
+    return nullptr;
+  napi_env env = state->env;
+  if (ref == nullptr)
+    return Null(env);
+  if (wasm_func_t *func = wasm_ref_as_func(ref); func != nullptr)
+    return CreateFunctionObject(state, std::string(), func);
+  uintptr_t id = reinterpret_cast<uintptr_t>(wasm_ref_get_host_info(ref));
+  if (id == 0)
+    return Null(env);
+  napi_value registry = ExternrefRegistry(state);
+  napi_value out = nullptr;
+  if (registry == nullptr ||
+      napi_get_element(env, registry, static_cast<uint32_t>(id), &out) !=
+          napi_ok)
+    return Null(env);
+  return out;
+}
+
+void RefreshMemoryView(WasmMemoryObject *object) {
+  if (object == nullptr || object->buffer_ref == nullptr ||
+      object->memory == nullptr)
+    return;
+  void *data = wasm_memory_data(object->memory);
+  size_t size = wasm_memory_data_size(object->memory);
+  if (data == object->buffer_data && size == object->buffer_size)
+    return;
+  napi_env env = object->base.state->env;
+  napi_value buffer = nullptr;
+  if (napi_get_reference_value(env, object->buffer_ref, &buffer) == napi_ok &&
+      buffer != nullptr)
+    napi_detach_arraybuffer(env, buffer);
+  DeleteRefIfPresent(env, &object->buffer_ref);
+  object->buffer_data = nullptr;
+  object->buffer_size = 0;
+}
+
+void RefreshMemoryViews(WasmState *state) {
+  if (state == nullptr)
+    return;
+  for (auto *object : state->live_memories)
+    RefreshMemoryView(object);
+}
+
+bool TableElementKind(wasm_table_t *table, wasm_valkind_t *out) {
+  if (table == nullptr || out == nullptr)
+    return false;
+  wasm_tabletype_t *type = wasm_table_type(table);
+  if (type == nullptr)
+    return false;
+  *out = wasm_valtype_kind(wasm_tabletype_element(type));
+  wasm_tabletype_delete(type);
+  return true;
+}
+
+bool JsToWasmVal(WasmState *state, napi_env env, napi_value value,
+                 wasm_valkind_t kind, wasm_val_t *out) {
   if (out == nullptr)
     return false;
   out->kind = kind;
   switch (kind) {
   case WASM_I32: {
     int32_t number = 0;
-    if (napi_get_value_int32(env, value, &number) != napi_ok)
-      return false;
+    if (napi_get_value_int32(env, value, &number) != napi_ok) {
+      // ToInt32 coercion, as the JS API demands (wasm-bindgen glue returns
+      // booleans from predicate imports typed i32).
+      napi_value coerced = nullptr;
+      if (napi_coerce_to_number(env, value, &coerced) != napi_ok ||
+          napi_get_value_int32(env, coerced, &number) != napi_ok)
+        return false;
+    }
     out->of.i32 = number;
     return true;
   }
@@ -608,8 +762,12 @@ bool JsToWasmVal(napi_env env, napi_value value, wasm_valkind_t kind,
   case WASM_F32:
   case WASM_F64: {
     double number = 0;
-    if (napi_get_value_double(env, value, &number) != napi_ok)
-      return false;
+    if (napi_get_value_double(env, value, &number) != napi_ok) {
+      napi_value coerced = nullptr;
+      if (napi_coerce_to_number(env, value, &coerced) != napi_ok ||
+          napi_get_value_double(env, coerced, &number) != napi_ok)
+        return false;
+    }
     if (kind == WASM_F32) {
       out->of.f32 = static_cast<float>(number);
     } else {
@@ -618,17 +776,22 @@ bool JsToWasmVal(napi_env env, napi_value value, wasm_valkind_t kind,
     return true;
   }
   case WASM_EXTERNREF:
-  case WASM_FUNCREF:
-    if (!IsNullOrUndefined(env, value))
+  case WASM_FUNCREF: {
+    wasm_ref_t *ref = nullptr;
+    if (!JsToRef(state, value, kind, &ref))
       return false;
-    out->of.ref = nullptr;
+    // The wasm_val_t owns the boxed reference; wasm_val_delete /
+    // wasm_val_vec_delete frees it.
+    out->of.ref = ref;
     return true;
+  }
   default:
     return false;
   }
 }
 
-napi_value WasmValToJs(napi_env env, const wasm_val_t *value) {
+napi_value WasmValToJs(WasmState *state, napi_env env,
+                       const wasm_val_t *value) {
   if (value == nullptr)
     return Undefined(env);
   napi_value out = nullptr;
@@ -647,7 +810,7 @@ napi_value WasmValToJs(napi_env env, const wasm_val_t *value) {
     break;
   case WASM_EXTERNREF:
   case WASM_FUNCREF:
-    out = Null(env);
+    out = RefToJs(state, value->of.ref);
     break;
   default:
     out = Undefined(env);
@@ -705,6 +868,9 @@ wasm_trap_t *JsImportCallback(void *raw, const wasm_val_vec_t *args,
   }
 
   napi_env env = data->env;
+  // Wasm may have grown its memory since the last JS↔wasm crossing; stale
+  // cached buffers must read as detached before glue code touches them.
+  RefreshMemoryViews(data->state);
   napi_value function = nullptr;
   if (napi_get_reference_value(env, data->function_ref, &function) != napi_ok ||
       function == nullptr) {
@@ -713,7 +879,7 @@ wasm_trap_t *JsImportCallback(void *raw, const wasm_val_vec_t *args,
 
   std::vector<napi_value> js_args(args == nullptr ? 0 : args->size);
   for (size_t i = 0; i < js_args.size(); ++i) {
-    js_args[i] = WasmValToJs(env, &args->data[i]);
+    js_args[i] = WasmValToJs(data->state, env, &args->data[i]);
   }
 
   napi_value global = nullptr;
@@ -742,7 +908,8 @@ wasm_trap_t *JsImportCallback(void *raw, const wasm_val_vec_t *args,
           data->state,
           "WebAssembly import function result type metadata is missing");
     }
-    if (!JsToWasmVal(env, result, data->result_kinds[0], &results->data[0])) {
+    if (!JsToWasmVal(data->state, env, result, data->result_kinds[0],
+                     &results->data[0])) {
       return MakeTrap(
           data->state,
           "WebAssembly import function returned an incompatible value");
@@ -782,10 +949,16 @@ void InstanceFinalize(napi_env env, void *data, void *) {
   delete object;
 }
 
-void MemoryFinalize(napi_env, void *data, void *) {
+void MemoryFinalize(napi_env env, void *data, void *) {
   auto *object = static_cast<WasmMemoryObject *>(data);
   if (object == nullptr)
     return;
+  if (object->base.state != nullptr) {
+    auto &memories = object->base.state->live_memories;
+    memories.erase(std::remove(memories.begin(), memories.end(), object),
+                   memories.end());
+  }
+  DeleteRefIfPresent(env, &object->buffer_ref);
   if (object->memory != nullptr)
     wasm_memory_delete(object->memory);
   delete object;
@@ -871,10 +1044,15 @@ napi_value CreateFunctionObject(WasmState *state, const std::string &name,
             wasm_val_vec_t wasm_results;
             wasm_val_vec_new_uninitialized(&wasm_args, param_count);
             wasm_val_vec_new_uninitialized(&wasm_results, result_count);
+            // Zero-fill: wasm_val_delete on a ref-kind val frees of.ref, so
+            // no slot may hold uninitialized garbage on an early-exit path.
+            if (param_count > 0)
+              std::memset(wasm_args.data, 0, param_count * sizeof(wasm_val_t));
             bool ok = true;
             for (size_t i = 0; i < param_count; ++i) {
               wasm_valkind_t kind = wasm_valtype_kind(params->data[i]);
-              if (!JsToWasmVal(env, argv[i], kind, &wasm_args.data[i])) {
+              if (!JsToWasmVal(function->base.state, env, argv[i], kind,
+                               &wasm_args.data[i])) {
                 ok = false;
                 break;
               }
@@ -882,6 +1060,7 @@ napi_value CreateFunctionObject(WasmState *state, const std::string &name,
             for (size_t i = 0; i < result_count; ++i) {
               wasm_results.data[i].kind =
                   wasm_valtype_kind(result_types->data[i]);
+              wasm_results.data[i].of.ref = nullptr;
             }
             wasm_functype_delete(type);
             if (!ok) {
@@ -895,6 +1074,7 @@ napi_value CreateFunctionObject(WasmState *state, const std::string &name,
             wasm_trap_t *trap =
                 wasm_func_call(function->func, &wasm_args, &wasm_results);
             wasm_val_vec_delete(&wasm_args);
+            RefreshMemoryViews(function->base.state);
             if (trap != nullptr) {
               napi_value pending_exception = nullptr;
               if (TakePendingImportException(function->base.state,
@@ -911,9 +1091,26 @@ napi_value CreateFunctionObject(WasmState *state, const std::string &name,
               return nullptr;
             }
 
-            napi_value out = result_count == 0
-                                 ? Undefined(env)
-                                 : WasmValToJs(env, &wasm_results.data[0]);
+            napi_value out = nullptr;
+            if (result_count == 0) {
+              out = Undefined(env);
+            } else if (result_count == 1) {
+              out = WasmValToJs(function->base.state, env,
+                                &wasm_results.data[0]);
+            } else {
+              // Multi-value results surface as a JS array, as in the JS API
+              // (wasm-bindgen's externref ABI relies on this).
+              if (napi_create_array_with_length(env, result_count, &out) !=
+                  napi_ok) {
+                out = nullptr;
+              } else {
+                for (size_t i = 0; i < result_count; ++i) {
+                  napi_set_element(env, out, static_cast<uint32_t>(i),
+                                   WasmValToJs(function->base.state, env,
+                                               &wasm_results.data[i]));
+                }
+              }
+            }
             wasm_val_vec_delete(&wasm_results);
             return out;
           },
@@ -1341,6 +1538,7 @@ napi_value MemoryConstructor(napi_env env, napi_callback_info info) {
       MemoryFinalize(env, object, nullptr);
       return nullptr;
     }
+    state->live_memories.push_back(object);
     return this_arg;
   }
 
@@ -1391,6 +1589,7 @@ napi_value MemoryConstructor(napi_env env, napi_callback_info info) {
     MemoryFinalize(env, object, nullptr);
     return nullptr;
   }
+  state->live_memories.push_back(object);
   return this_arg;
 }
 
@@ -1405,6 +1604,14 @@ napi_value MemoryBufferGetter(napi_env env, napi_callback_info info) {
     napi_throw_type_error(env, nullptr, "Invalid WebAssembly.Memory");
     return nullptr;
   }
+  RefreshMemoryView(object);
+  if (object->buffer_ref != nullptr) {
+    napi_value cached = nullptr;
+    if (napi_get_reference_value(env, object->buffer_ref, &cached) ==
+            napi_ok &&
+        cached != nullptr)
+      return cached;
+  }
   void *data = wasm_memory_data(object->memory);
   size_t size = wasm_memory_data_size(object->memory);
   napi_value array_buffer = nullptr;
@@ -1415,6 +1622,13 @@ napi_value MemoryBufferGetter(napi_env env, napi_callback_info info) {
     napi_throw_error(env, nullptr,
                      "Failed to create WebAssembly.Memory buffer");
     return nullptr;
+  }
+  if (napi_create_reference(env, array_buffer, 1, &object->buffer_ref) ==
+      napi_ok) {
+    object->buffer_data = data;
+    object->buffer_size = size;
+  } else {
+    object->buffer_ref = nullptr;
   }
   return array_buffer;
 }
@@ -1442,6 +1656,7 @@ napi_value MemoryGrow(napi_env env, napi_callback_info info) {
     napi_throw_range_error(env, nullptr, "WebAssembly.Memory.grow failed");
     return nullptr;
   }
+  RefreshMemoryView(object);
   napi_value out = nullptr;
   napi_create_uint32(env, previous, &out);
   return out;
@@ -1502,20 +1717,32 @@ napi_value TableConstructor(napi_env env, napi_callback_info info) {
     return nullptr;
   }
 
-  if (argc >= 2 && !IsNullOrUndefined(env, argv[1])) {
+  wasm_ref_t *init_ref = nullptr;
+  if (argc >= 2 && !IsNullOrUndefined(env, argv[1]) &&
+      !JsToRef(state, argv[1], element_kind, &init_ref)) {
     napi_throw_type_error(env, nullptr,
-                          "WebAssembly.Table non-null initial values are not "
-                          "supported by this Wasmer C API build");
+                          "Invalid WebAssembly.Table initial value");
+    return nullptr;
+  }
+
+  wasm_tabletype_t *table_type =
+      wasm_tabletype_new(wasm_valtype_new(element_kind), &limits);
+  wasm_table_t *table =
+      table_type == nullptr ? nullptr
+                            : wasm_table_new(state->store, table_type, init_ref);
+  if (table_type != nullptr)
+    wasm_tabletype_delete(table_type);
+  if (init_ref != nullptr)
+    wasm_ref_delete(init_ref);
+  if (table == nullptr) {
+    napi_throw_error(env, nullptr, "Failed to create WebAssembly.Table");
     return nullptr;
   }
 
   auto *object = new WasmTableObject();
   object->base.kind = WasmObjectKind::kTable;
   object->base.state = state;
-  object->local_only = true;
-  object->local_size = limits.min;
-  object->local_max = limits.max;
-  object->local_element_kind = element_kind;
+  object->table = table;
   if (napi_wrap(env, this_arg, object, TableFinalize, nullptr, nullptr) !=
       napi_ok) {
     TableFinalize(env, object, nullptr);
@@ -1530,15 +1757,12 @@ napi_value TableLengthGetter(napi_env env, napi_callback_info info) {
   if (!GetCallback(env, info, &argc, nullptr, &this_arg, nullptr))
     return nullptr;
   auto *object = Unwrap<WasmTableObject>(env, this_arg, WasmObjectKind::kTable);
-  if (object == nullptr || (!object->local_only && object->table == nullptr)) {
+  if (object == nullptr || object->table == nullptr) {
     napi_throw_type_error(env, nullptr, "Invalid WebAssembly.Table");
     return nullptr;
   }
   napi_value out = nullptr;
-  napi_create_uint32(env,
-                     object->local_only ? object->local_size
-                                        : wasm_table_size(object->table),
-                     &out);
+  napi_create_uint32(env, wasm_table_size(object->table), &out);
   return out;
 }
 
@@ -1549,7 +1773,7 @@ napi_value TableGet(napi_env env, napi_callback_info info) {
   if (!GetCallback(env, info, &argc, argv, &this_arg, nullptr))
     return nullptr;
   auto *object = Unwrap<WasmTableObject>(env, this_arg, WasmObjectKind::kTable);
-  if (object == nullptr || (!object->local_only && object->table == nullptr)) {
+  if (object == nullptr || object->table == nullptr) {
     napi_throw_type_error(env, nullptr, "Invalid WebAssembly.Table");
     return nullptr;
   }
@@ -1559,14 +1783,16 @@ napi_value TableGet(napi_env env, napi_callback_info info) {
                           "WebAssembly.Table.get expects an index");
     return nullptr;
   }
-  uint32_t size =
-      object->local_only ? object->local_size : wasm_table_size(object->table);
-  if (index >= size) {
+  if (index >= wasm_table_size(object->table)) {
     napi_throw_range_error(env, nullptr,
                            "WebAssembly.Table.get index is out of range");
     return nullptr;
   }
-  return Null(env);
+  wasm_ref_t *ref = wasm_table_get(object->table, index);
+  napi_value out = RefToJs(object->base.state, ref);
+  if (ref != nullptr)
+    wasm_ref_delete(ref);
+  return out;
 }
 
 napi_value TableSet(napi_env env, napi_callback_info info) {
@@ -1576,7 +1802,7 @@ napi_value TableSet(napi_env env, napi_callback_info info) {
   if (!GetCallback(env, info, &argc, argv, &this_arg, nullptr))
     return nullptr;
   auto *object = Unwrap<WasmTableObject>(env, this_arg, WasmObjectKind::kTable);
-  if (object == nullptr || (!object->local_only && object->table == nullptr)) {
+  if (object == nullptr || object->table == nullptr) {
     napi_throw_type_error(env, nullptr, "Invalid WebAssembly.Table");
     return nullptr;
   }
@@ -1586,17 +1812,28 @@ napi_value TableSet(napi_env env, napi_callback_info info) {
                           "WebAssembly.Table.set expects an index");
     return nullptr;
   }
-  if (argc >= 2 && !IsNullOrUndefined(env, argv[1])) {
-    napi_throw_type_error(env, nullptr,
-                          "WebAssembly.Table.set only supports null values "
-                          "with this Wasmer C API build");
-    return nullptr;
-  }
-  uint32_t size =
-      object->local_only ? object->local_size : wasm_table_size(object->table);
-  if (index >= size) {
+  if (index >= wasm_table_size(object->table)) {
     napi_throw_range_error(env, nullptr,
                            "WebAssembly.Table.set index is out of range");
+    return nullptr;
+  }
+  wasm_valkind_t element_kind = WASM_FUNCREF;
+  if (!TableElementKind(object->table, &element_kind)) {
+    napi_throw_error(env, nullptr, "Failed to read WebAssembly.Table type");
+    return nullptr;
+  }
+  wasm_ref_t *ref = nullptr;
+  if (argc >= 2 &&
+      !JsToRef(object->base.state, argv[1], element_kind, &ref)) {
+    napi_throw_type_error(env, nullptr,
+                          "Invalid value for WebAssembly.Table.set");
+    return nullptr;
+  }
+  bool ok = wasm_table_set(object->table, index, ref);
+  if (ref != nullptr)
+    wasm_ref_delete(ref);
+  if (!ok) {
+    napi_throw_range_error(env, nullptr, "WebAssembly.Table.set failed");
     return nullptr;
   }
   return Undefined(env);
@@ -1609,7 +1846,7 @@ napi_value TableGrow(napi_env env, napi_callback_info info) {
   if (!GetCallback(env, info, &argc, argv, &this_arg, nullptr))
     return nullptr;
   auto *object = Unwrap<WasmTableObject>(env, this_arg, WasmObjectKind::kTable);
-  if (object == nullptr || (!object->local_only && object->table == nullptr)) {
+  if (object == nullptr || object->table == nullptr) {
     napi_throw_type_error(env, nullptr, "Invalid WebAssembly.Table");
     return nullptr;
   }
@@ -1619,21 +1856,23 @@ napi_value TableGrow(napi_env env, napi_callback_info info) {
                           "WebAssembly.Table.grow expects a count");
     return nullptr;
   }
-  if (argc >= 2 && !IsNullOrUndefined(env, argv[1])) {
-    napi_throw_type_error(env, nullptr,
-                          "WebAssembly.Table.grow only supports null initial "
-                          "values with this Wasmer C API build");
+  wasm_valkind_t element_kind = WASM_FUNCREF;
+  if (!TableElementKind(object->table, &element_kind)) {
+    napi_throw_error(env, nullptr, "Failed to read WebAssembly.Table type");
     return nullptr;
   }
-  uint32_t previous =
-      object->local_only ? object->local_size : wasm_table_size(object->table);
-  if (object->local_only) {
-    if (delta > object->local_max || previous > object->local_max - delta) {
-      napi_throw_range_error(env, nullptr, "WebAssembly.Table.grow failed");
-      return nullptr;
-    }
-    object->local_size += delta;
-  } else if (!wasm_table_grow(object->table, delta, nullptr)) {
+  wasm_ref_t *init_ref = nullptr;
+  if (argc >= 2 &&
+      !JsToRef(object->base.state, argv[1], element_kind, &init_ref)) {
+    napi_throw_type_error(env, nullptr,
+                          "Invalid initial value for WebAssembly.Table.grow");
+    return nullptr;
+  }
+  uint32_t previous = wasm_table_size(object->table);
+  bool ok = wasm_table_grow(object->table, delta, init_ref);
+  if (init_ref != nullptr)
+    wasm_ref_delete(init_ref);
+  if (!ok) {
     napi_throw_range_error(env, nullptr, "WebAssembly.Table.grow failed");
     return nullptr;
   }
@@ -1704,7 +1943,7 @@ napi_value GlobalConstructor(napi_env env, napi_callback_info info) {
     initial = zero;
   }
   wasm_val_t initial_value;
-  if (!JsToWasmVal(env, initial, value_kind, &initial_value)) {
+  if (!JsToWasmVal(state, env, initial, value_kind, &initial_value)) {
     napi_throw_type_error(env, nullptr,
                           "Invalid WebAssembly.Global initial value");
     return nullptr;
@@ -1745,7 +1984,7 @@ napi_value GlobalValueGetter(napi_env env, napi_callback_info info) {
   }
   wasm_val_t value;
   wasm_global_get(object->global, &value);
-  napi_value out = WasmValToJs(env, &value);
+  napi_value out = WasmValToJs(object->base.state, env, &value);
   wasm_val_delete(&value);
   return out;
 }
@@ -1772,7 +2011,8 @@ napi_value GlobalValueSetter(napi_env env, napi_callback_info info) {
   }
   wasm_valkind_t kind = wasm_valtype_kind(wasm_globaltype_content(type));
   wasm_val_t value;
-  bool ok = argc >= 1 && JsToWasmVal(env, argv[0], kind, &value);
+  bool ok = argc >= 1 &&
+            JsToWasmVal(object->base.state, env, argv[0], kind, &value);
   wasm_globaltype_delete(type);
   if (!ok) {
     napi_throw_type_error(env, nullptr, "Invalid WebAssembly.Global value");
