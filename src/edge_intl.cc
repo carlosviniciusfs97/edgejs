@@ -404,6 +404,19 @@ bool InstallConstructor(napi_env env,
   return true;
 }
 
+// ECMA-402 legacy behavior: Intl.DateTimeFormat and Intl.NumberFormat may be
+// called as plain functions, acting like `new` (ListFormat et al. still
+// require `new`). Re-dispatches to the installed constructor.
+napi_value ConstructViaNew(napi_env env, const char* name, size_t argc, napi_value* argv) {
+  napi_value global = nullptr, intl = nullptr, ctor = nullptr, instance = nullptr;
+  if (napi_get_global(env, &global) != napi_ok ||
+      napi_get_named_property(env, global, "Intl", &intl) != napi_ok ||
+      napi_get_named_property(env, intl, name, &ctor) != napi_ok || ctor == nullptr)
+    return nullptr;
+  if (napi_new_instance(env, ctor, argc, argv, &instance) != napi_ok) return nullptr;
+  return instance;
+}
+
 // ---------------------------------------------------------------------------
 // Intl.ListFormat  (ulistfmt_*)
 // ---------------------------------------------------------------------------
@@ -775,7 +788,7 @@ napi_value NumberFormatConstructor(napi_env env, napi_callback_info info) {
 
   napi_value new_target = nullptr;
   if (napi_get_new_target(env, info, &new_target) != napi_ok) return nullptr;
-  if (new_target == nullptr) return ThrowType(env, "Constructor Intl.NumberFormat requires 'new'");
+  if (new_target == nullptr) return ConstructViaNew(env, "NumberFormat", argc, argv);
 
   auto* state = new NumberFormatState();
   state->locale = argc > 0 ? ResolveIcuLocale(env, argv[0]) : "en_US";
@@ -1133,7 +1146,7 @@ napi_value DateTimeFormatConstructor(napi_env env, napi_callback_info info) {
 
   napi_value new_target = nullptr;
   if (napi_get_new_target(env, info, &new_target) != napi_ok) return nullptr;
-  if (new_target == nullptr) return ThrowType(env, "Constructor Intl.DateTimeFormat requires 'new'");
+  if (new_target == nullptr) return ConstructViaNew(env, "DateTimeFormat", argc, argv);
 
   auto* state = new DateTimeFormatState();
   state->locale = argc > 0 ? ResolveIcuLocale(env, argv[0]) : "en_US";
