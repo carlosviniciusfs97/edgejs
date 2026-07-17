@@ -87,6 +87,50 @@ jobs:
           set -euo pipefail
           ! grep -nE "v8::|<v8.h>|\"v8.h\"" napi/include/js_native_api.h napi/include/node_api.h
 
+      # Which Wasmer the build links against is controlled by repo Actions
+      # variables (Settings -> Secrets and variables -> Actions -> Variables):
+      # WASMER_SOURCE_REF (build a wasmer commit from source),
+      # WASMER_ARTIFACT_RUN_ID (prebuilt dist from a wasmer Builds run; needs
+      # the WASMER_ARTIFACTS_TOKEN secret), or neither for the released
+      # version (WASMER_RELEASE_VERSION overrides the pin). See
+      # scripts/ci/provision-wasmer.sh.
+      - name: Resolve Wasmer provisioning
+        id: wasmer-provision
+        shell: bash
+        env:
+          WASMER_SOURCE_REF: ${{ vars.WASMER_SOURCE_REF }}
+          WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
+          WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
+        run: ./scripts/ci/provision-wasmer.sh resolve native
+
+      # Explicit restore/save (not actions/cache) so the expensive source
+      # build is saved right after provisioning succeeds, even when a later
+      # test step fails — iterating on a red branch shouldn't rebuild wasmer.
+      - name: Restore Wasmer source build cache
+        id: wasmer-cache
+        if: steps.wasmer-provision.outputs.mode == 'source'
+        uses: actions/cache/restore@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
+
+      - name: Provision Wasmer
+        shell: bash
+        env:
+          WASMER_SOURCE_REF: ${{ vars.WASMER_SOURCE_REF }}
+          WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
+          WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
+          WASMER_RELEASE_VERSION: ${{ vars.WASMER_RELEASE_VERSION }}
+          GH_TOKEN: ${{ secrets.WASMER_ARTIFACTS_TOKEN }}
+        run: ./scripts/ci/provision-wasmer.sh native
+
+      - name: Save Wasmer source build cache
+        if: steps.wasmer-provision.outputs.mode == 'source' && steps.wasmer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
+
       - name: Build edge (QuickJS)
         shell: bash
         run: |
@@ -174,6 +218,44 @@ jobs:
         run: |
           set -euo pipefail
           ! grep -nE "v8::|<v8.h>|\"v8.h\"" napi/include/js_native_api.h napi/include/node_api.h
+
+      # See the quickjs-linux job for how Wasmer provisioning modes work.
+      - name: Resolve Wasmer provisioning
+        id: wasmer-provision
+        shell: bash
+        env:
+          WASMER_SOURCE_REF: ${{ vars.WASMER_SOURCE_REF }}
+          WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
+          WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
+        run: ./scripts/ci/provision-wasmer.sh resolve native
+
+      # Explicit restore/save (not actions/cache) so the expensive source
+      # build is saved right after provisioning succeeds, even when a later
+      # test step fails — iterating on a red branch shouldn't rebuild wasmer.
+      - name: Restore Wasmer source build cache
+        id: wasmer-cache
+        if: steps.wasmer-provision.outputs.mode == 'source'
+        uses: actions/cache/restore@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
+
+      - name: Provision Wasmer
+        shell: bash
+        env:
+          WASMER_SOURCE_REF: ${{ vars.WASMER_SOURCE_REF }}
+          WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
+          WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
+          WASMER_RELEASE_VERSION: ${{ vars.WASMER_RELEASE_VERSION }}
+          GH_TOKEN: ${{ secrets.WASMER_ARTIFACTS_TOKEN }}
+        run: ./scripts/ci/provision-wasmer.sh native
+
+      - name: Save Wasmer source build cache
+        if: steps.wasmer-provision.outputs.mode == 'source' && steps.wasmer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
 
       - name: Build edge (QuickJS)
         shell: bash
@@ -266,13 +348,46 @@ jobs:
           sysroot-tag: v2026-06-25.1
           version: v0.4.3
 
-      - name: Install Wasmer CLI
+      # See the quickjs-linux job for how Wasmer provisioning modes work. In
+      # source mode this builds the wasmer CLI (with LLVM, since the WASIX
+      # runner scripts pass --llvm); the release C-API headers still serve the
+      # edge compile, as WASIX resolves the symbols at runtime via the host.
+      - name: Resolve Wasmer provisioning
+        id: wasmer-provision
         shell: bash
-        run: |
-          set -euo pipefail
-          curl https://get.wasmer.io -sSfL | sh -s "v7.2.0"
-          echo "${HOME}/.wasmer/bin" >> "${GITHUB_PATH}"
-          "${HOME}/.wasmer/bin/wasmer" --version
+        env:
+          WASMER_SOURCE_REF: ${{ vars.WASMER_SOURCE_REF }}
+          WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
+          WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
+        run: ./scripts/ci/provision-wasmer.sh resolve wasix
+
+      # Explicit restore/save (not actions/cache) so the expensive source
+      # build is saved right after provisioning succeeds, even when a later
+      # test step fails — iterating on a red branch shouldn't rebuild wasmer.
+      - name: Restore Wasmer source build cache
+        id: wasmer-cache
+        if: steps.wasmer-provision.outputs.mode == 'source'
+        uses: actions/cache/restore@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
+
+      - name: Provision Wasmer
+        shell: bash
+        env:
+          WASMER_SOURCE_REF: ${{ vars.WASMER_SOURCE_REF }}
+          WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
+          WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
+          WASMER_RELEASE_VERSION: ${{ vars.WASMER_RELEASE_VERSION }}
+          GH_TOKEN: ${{ secrets.WASMER_ARTIFACTS_TOKEN }}
+        run: ./scripts/ci/provision-wasmer.sh wasix
+
+      - name: Save Wasmer source build cache
+        if: steps.wasmer-provision.outputs.mode == 'source' && steps.wasmer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
 
       - name: Build edge (QuickJS WASIX)
         shell: bash

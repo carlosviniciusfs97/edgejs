@@ -28,8 +28,12 @@ function(edge_configure_options)
     "Install a QuickJS-only WebAssembly global backed by Wasmer's wasm_c_api"
     ON
   )
+  set(_edge_quickjs_wasmer_version_default "latest-stable")
+  if(NOT "$ENV{EDGE_QUICKJS_WASMER_VERSION}" STREQUAL "")
+    set(_edge_quickjs_wasmer_version_default "$ENV{EDGE_QUICKJS_WASMER_VERSION}")
+  endif()
   set(EDGE_QUICKJS_WASMER_VERSION
-    "latest-stable"
+    "${_edge_quickjs_wasmer_version_default}"
     CACHE STRING "Wasmer C API version for QuickJS WebAssembly, or latest-stable"
   )
   set(EDGE_QUICKJS_WASMER_DIST_ROOT
