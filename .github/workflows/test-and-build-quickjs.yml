@@ -169,6 +169,8 @@ jobs:
           path: |
             .framework-test*/logs
             .standalone-build-test*/logs
+          # The state dirs are dotdirs, which upload-artifact excludes by default.
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
@@ -315,6 +317,8 @@ jobs:
           path: |
             .framework-test*/logs
             .standalone-build-test*/logs
+          # The state dirs are dotdirs, which upload-artifact excludes by default.
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
@@ -449,6 +453,8 @@ jobs:
           path: |
             .framework-test*/logs
             .standalone-build-test*/logs
+          # The state dirs are dotdirs, which upload-artifact excludes by default.
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
