@@ -103,9 +103,13 @@ jobs:
           WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
         run: ./scripts/ci/provision-wasmer.sh resolve native
 
-      - name: Cache Wasmer source build
+      # Explicit restore/save (not actions/cache) so the expensive source
+      # build is saved right after provisioning succeeds, even when a later
+      # test step fails — iterating on a red branch shouldn't rebuild wasmer.
+      - name: Restore Wasmer source build cache
+        id: wasmer-cache
         if: steps.wasmer-provision.outputs.mode == 'source'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .wasmer-provision
           key: ${{ steps.wasmer-provision.outputs.cache_key }}
@@ -119,6 +123,13 @@ jobs:
           WASMER_RELEASE_VERSION: ${{ vars.WASMER_RELEASE_VERSION }}
           GH_TOKEN: ${{ secrets.WASMER_ARTIFACTS_TOKEN }}
         run: ./scripts/ci/provision-wasmer.sh native
+
+      - name: Save Wasmer source build cache
+        if: steps.wasmer-provision.outputs.mode == 'source' && steps.wasmer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
 
       - name: Build edge (QuickJS)
         shell: bash
@@ -218,9 +229,13 @@ jobs:
           WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
         run: ./scripts/ci/provision-wasmer.sh resolve native
 
-      - name: Cache Wasmer source build
+      # Explicit restore/save (not actions/cache) so the expensive source
+      # build is saved right after provisioning succeeds, even when a later
+      # test step fails — iterating on a red branch shouldn't rebuild wasmer.
+      - name: Restore Wasmer source build cache
+        id: wasmer-cache
         if: steps.wasmer-provision.outputs.mode == 'source'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .wasmer-provision
           key: ${{ steps.wasmer-provision.outputs.cache_key }}
@@ -234,6 +249,13 @@ jobs:
           WASMER_RELEASE_VERSION: ${{ vars.WASMER_RELEASE_VERSION }}
           GH_TOKEN: ${{ secrets.WASMER_ARTIFACTS_TOKEN }}
         run: ./scripts/ci/provision-wasmer.sh native
+
+      - name: Save Wasmer source build cache
+        if: steps.wasmer-provision.outputs.mode == 'source' && steps.wasmer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
 
       - name: Build edge (QuickJS)
         shell: bash
@@ -339,9 +361,13 @@ jobs:
           WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
         run: ./scripts/ci/provision-wasmer.sh resolve wasix
 
-      - name: Cache Wasmer source build
+      # Explicit restore/save (not actions/cache) so the expensive source
+      # build is saved right after provisioning succeeds, even when a later
+      # test step fails — iterating on a red branch shouldn't rebuild wasmer.
+      - name: Restore Wasmer source build cache
+        id: wasmer-cache
         if: steps.wasmer-provision.outputs.mode == 'source'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .wasmer-provision
           key: ${{ steps.wasmer-provision.outputs.cache_key }}
@@ -355,6 +381,13 @@ jobs:
           WASMER_RELEASE_VERSION: ${{ vars.WASMER_RELEASE_VERSION }}
           GH_TOKEN: ${{ secrets.WASMER_ARTIFACTS_TOKEN }}
         run: ./scripts/ci/provision-wasmer.sh wasix
+
+      - name: Save Wasmer source build cache
+        if: steps.wasmer-provision.outputs.mode == 'source' && steps.wasmer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .wasmer-provision
+          key: ${{ steps.wasmer-provision.outputs.cache_key }}
 
       - name: Build edge (QuickJS WASIX)
         shell: bash
