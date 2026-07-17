@@ -2516,7 +2516,7 @@ function printStageSummary(result) {
   if (result.failed.length > 0) {
     logError(`${result.stage.label} failed (${result.failed.length}): ${result.failed.map((entry) => entry.project.name).join(', ')}`);
     for (const failure of result.failed) {
-      process.stderr.write(`${colorize('  FAIL', 'red', ['bold'])} ${failure.project.name}: ${failure.detail}${failure.logPath ? ` [log: ${failure.logPath}]` : ''}${os.EOL}`);
+      process.stderr.write(`${colorize('  FAIL', 'red', ['bold'])} ${failure.project.name}: ${failure.message && failure.message !== failure.detail ? `${failure.message} (${failure.detail})` : failure.detail}${failure.logPath ? ` [log: ${failure.logPath}]` : ''}${os.EOL}`);
     }
   } else {
     logSuccess(`${result.stage.label} failed (0): none`);
@@ -2559,7 +2559,7 @@ function printMatrixSummary(stageResults, allProjects) {
 
     logError(`regressions (${regressions.length}) where ${previousResult.stage.label} passed but ${currentResult.stage.label} failed`);
     for (const regression of regressions) {
-      process.stderr.write(`${colorize('  FAIL', 'red', ['bold'])} ${regression.project.name}: ${regression.detail}${regression.logPath ? ` [log: ${regression.logPath}]` : ''}${os.EOL}`);
+      process.stderr.write(`${colorize('  FAIL', 'red', ['bold'])} ${regression.project.name}: ${regression.message && regression.message !== regression.detail ? `${regression.message} (${regression.detail})` : regression.detail}${regression.logPath ? ` [log: ${regression.logPath}]` : ''}${os.EOL}`);
     }
   }
 }

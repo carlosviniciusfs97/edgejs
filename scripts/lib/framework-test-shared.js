@@ -1344,7 +1344,10 @@ function create(options) {
         }
         const failure = createFailureRecord(project, stage, error);
         failed.push(failure);
-        logError(`${project.name} failed on ${stage.label}: ${failure.detail}`);
+        const failureText = failure.message && failure.message !== failure.detail
+          ? `${failure.message} (${failure.detail})`
+          : failure.detail;
+        logError(`${project.name} failed on ${stage.label}: ${failureText}`);
       }
     }
 
