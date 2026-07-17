@@ -445,6 +445,17 @@ jobs:
           set -euo pipefail
           make standalone-build-test-quickjs-wasix
 
+      # The exact wasm binary is needed to reproduce CI-only runtime failures
+      # locally (the CI wasixcc toolchain/sysroot differs from dev setups).
+      - name: Upload WASIX wasm on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-edgejs-wasm
+          path: build-quickjs-wasix/edgejs.wasm
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Upload harness logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
