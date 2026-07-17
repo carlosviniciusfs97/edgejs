@@ -68,7 +68,12 @@ const NEXT_JS_CONFIG_FILES = [
 ];
 const NEXT_TS_CONFIG_FILE = 'next.config.ts';
 const SERVER_READY_TIMEOUT_MS = 45 * 1000;
-const HTTP_REQUEST_TIMEOUT_MS = 5 * 1000;
+// Kept in sync with framework-test-shared.js: overridable because the QuickJS
+// stages legitimately exceed the default on slow CI runners (js-umami's login
+// route takes >5s on a 4-core GitHub runner under WASIX).
+const HTTP_REQUEST_TIMEOUT_MS = Number(process.env.FRAMEWORK_TEST_HTTP_TIMEOUT_MS || '') > 0
+  ? Number(process.env.FRAMEWORK_TEST_HTTP_TIMEOUT_MS)
+  : 5 * 1000;
 const PROCESS_SHUTDOWN_TIMEOUT_MS = 5 * 1000;
 const HTTP_POLL_INTERVAL_MS = 500;
 const MAX_HTTP_REDIRECTS = 5;
