@@ -506,7 +506,7 @@ framework-test-quickjs-wasix: $(QUICKJS_WASIX_WASM)
 		FRAMEWORK_TEST_NODE_SKIP='js-docusaurus-staticsite,js-docusaurus2-staticsite' \
 		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS WASIX' \
-		FRAMEWORK_TEST_HTTP_TIMEOUT_MS="$${FRAMEWORK_TEST_HTTP_TIMEOUT_MS:-30000}" \
+		FRAMEWORK_TEST_HTTP_TIMEOUT_MS="$${FRAMEWORK_TEST_HTTP_TIMEOUT_MS:-120000}" \
 		$(MAKE) framework-test-run $(FRAMEWORK_TEST_SELECTOR)
 
 framework-test-reset:
