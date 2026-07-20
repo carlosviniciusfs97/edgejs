@@ -188,9 +188,11 @@ App triage (researched 2026-07-03, per-app package.json + docs verified):
 
 Start order: HedgeDoc (Postgres, **done**) → RSSMonster (MySQL, **done** —
 added the mysql provider via mysql-memory-server plus a `database.setup`
-hook for sequelize migrations/seeds) → Uptime Kuma (**done** — drove the
-WASIX process.platform='linux' parity fix and expected-status readiness
-probes) → Firekylin (**done — full matrix including WASIX**; drove three runtime
+hook for sequelize migrations/seeds) → Uptime Kuma (**done on native; skipped
+on the WASIX edge stage** — playwright-core's registry throws
+`Unsupported platform: wasi` at require time, and the process.platform='linux'
+parity change it originally drove was not merged; also drove the
+expected-status readiness probes) → Firekylin (**done — full matrix including WASIX**; drove three runtime
 fixes: libuv-wasix IPC reads (fork/process.send channels now work under
 WASIX), SO_REUSEPORT enablement in libuv-wasix, and a WASIX cluster
 reuseport scheduling strategy in edge's lib/internal/cluster — workers bind

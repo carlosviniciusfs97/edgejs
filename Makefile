@@ -486,15 +486,29 @@ framework-test: $(EDGE_BINARY)
 # ICU-backed Intl surface (ECO-359) supplies Intl.ListFormat, native-function
 # toString matches V8, and the example pre-bundles its client entrypoints at
 # build time so no esbuild runs at runtime. (GC use-after-frees fixed in #101.)
+# js-hedgedoc is skipped on the native edge stage only. It ships the optional
+# ws accelerators bufferutil/utf-8-validate, whose prebuilds are legacy
+# NAPI_MODULE-style: they call the unexported napi_module_register from a
+# static constructor during dlopen, killing the process with an uncatchable
+# `undefined symbol: napi_module_register` (exit 127) before any JS runs.
+# WASIX has no dynamic linking, so the same app passes there. Re-enable by
+# either dropping those two optional dependencies from the example (ws falls
+# back to its pure-JS implementations) or by landing an early, catchable
+# process.dlopen failure on native.
 framework-test-quickjs-native: $(QUICKJS_EDGE_BINARY)
 	@SYMLINK_TARGET="$(abspath $(QUICKJS_EDGE_BINARY))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
 		FRAMEWORK_TEST_NODE_SKIP='js-docusaurus-staticsite,js-docusaurus2-staticsite' \
-		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
+		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone,js-hedgedoc' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS Native' \
 		FRAMEWORK_TEST_HTTP_TIMEOUT_MS="$${FRAMEWORK_TEST_HTTP_TIMEOUT_MS:-30000}" \
 		$(MAKE) framework-test-run $(FRAMEWORK_TEST_SELECTOR)
 
+# js-uptime-kuma is skipped on the WASIX edge stage only. It depends on
+# playwright-core, whose registry throws `Unsupported platform: <platform>` at
+# require time for anything that is not linux/darwin/win32, and
+# process.platform is 'wasi' under WASIX. Native (platform 'linux') is
+# unaffected. Re-enable if process.platform ever reports 'linux' under WASIX.
 framework-test-quickjs-wasix: $(QUICKJS_WASIX_WASM)
 	@chmod +x "$(WASIX_FRAMEWORK_RUNNER)"
 	@command -v "$(WASMER_BIN)" >/dev/null 2>&1 || { \
@@ -504,7 +518,7 @@ framework-test-quickjs-wasix: $(QUICKJS_WASIX_WASM)
 	@SYMLINK_TARGET="$(abspath $(WASIX_FRAMEWORK_RUNNER))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
 		FRAMEWORK_TEST_NODE_SKIP='js-docusaurus-staticsite,js-docusaurus2-staticsite' \
-		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone' \
+		FRAMEWORK_TEST_EDGE_SKIP='js-astro-ssr-standalone,js-uptime-kuma' \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS QuickJS WASIX' \
 		FRAMEWORK_TEST_HTTP_TIMEOUT_MS="$${FRAMEWORK_TEST_HTTP_TIMEOUT_MS:-120000}" \
 		$(MAKE) framework-test-run $(FRAMEWORK_TEST_SELECTOR)
