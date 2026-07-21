@@ -95,14 +95,12 @@ EDGE_NODE_TEST_SKIP_CI_20260703 := \
   parallel/test-http-pipeline-requests-connection-leak.js
 EDGE_NODE_TEST_SKIP_TESTS ?= $(subst $(SPACE),$(COMMA),$(strip $(EDGE_NODE_TEST_SKIP_CI_20260518) $(EDGE_NODE_TEST_SKIP_CI_20260703)))
 
-# QuickJS currently cannot parse explicit resource management `using` syntax.
-QUICKJS_SKIP_USING_PARSER_TESTS := parallel/test-stream-duplex-destroy.js,parallel/test-stream-readable-dispose.js,parallel/test-stream-transform-destroy.js,parallel/test-stream-writable-destroy.js
 # QuickJS worker_threads/MessagePort support is incomplete; these worker-backed
 # tests time out or fail in the QuickJS lane while V8 continues to cover them.
 QUICKJS_SKIP_WORKER_TESTS := parallel/test-diagnostics-channel-worker-threads.js,client-proxy/test-http-proxy-request-invalid-char-in-url.mjs,parallel/test-crypto-key-objects-messageport.js,parallel/test-crypto-prime.js,parallel/test-crypto-worker-thread.js,parallel/test-http2-reset-flood.js,parallel/test-webcrypto-cryptokey-workers.js
 # QuickJS currently regresses TLS close-notify handling under --expose-internals.
 QUICKJS_SKIP_TLS_TESTS := parallel/test-tls-close-notify.js
-QUICKJS_SKIP_TESTS ?= $(EDGE_NODE_TEST_SKIP_TESTS),$(QUICKJS_SKIP_USING_PARSER_TESTS),$(QUICKJS_SKIP_WORKER_TESTS),$(QUICKJS_SKIP_TLS_TESTS)
+QUICKJS_SKIP_TESTS ?= $(EDGE_NODE_TEST_SKIP_TESTS),$(QUICKJS_SKIP_WORKER_TESTS),$(QUICKJS_SKIP_TLS_TESTS)
 
 # Expected WASIX environment limits from the 2026-06-23 triage run (1674 passed /
 # 64 failed). These 52 tests are unix sockets, cluster/fork, subprocess/shell,
