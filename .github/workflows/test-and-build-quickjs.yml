@@ -149,6 +149,12 @@ jobs:
           set -euo pipefail
           make test-quickjs-intl
 
+      - name: Test language (explicit resource management, QuickJS native)
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-quickjs-lang
+
       - name: Test framework apps (QuickJS native)
         shell: bash
         run: |
@@ -274,6 +280,12 @@ jobs:
         run: |
           set -euo pipefail
           make test-quickjs-intl
+
+      - name: Test language (explicit resource management, QuickJS native)
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-quickjs-lang
 
       - name: Test framework apps (QuickJS native)
         shell: bash
