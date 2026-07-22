@@ -1,4 +1,4 @@
-.PHONY: build build-edge build-edge-quickjs-cli build-wasix build-quickjs-wasix build-napi build-napi-quickjs build-native-v8 build-native-quickjs build-wasix-napi build-wasix-napi-quickjs build-napi-wasmer-cli test-wasix-napi test-wasix-napi-quickjs test-wasix-napi-cli test-wasix-safe-mode test-wasix-quickjs-only test-quickjs-intl test-wasix-quickjs-intl test test-only check-portability clean clean-napi-quickjs clean-edge-quickjs-cli clean-dist dist dist-only framework-test framework-test-quickjs-native framework-test-quickjs-wasix framework-test-run framework-test-reset standalone-build-test standalone-build-test-run standalone-build-test-quickjs-native standalone-build-test-quickjs-wasix
+.PHONY: build build-edge build-edge-quickjs-cli build-wasix build-quickjs-wasix build-napi build-napi-quickjs build-native-v8 build-native-quickjs build-wasix-napi build-wasix-napi-quickjs build-napi-wasmer-cli test-wasix-napi test-wasix-napi-quickjs test-wasix-napi-cli test-wasix-safe-mode test-wasix-quickjs-only test-quickjs-intl test-quickjs-lang test-wasix-quickjs-intl test test-only check-portability clean clean-napi-quickjs clean-edge-quickjs-cli clean-dist dist dist-only framework-test framework-test-quickjs-native framework-test-quickjs-wasix framework-test-run framework-test-reset standalone-build-test standalone-build-test-run standalone-build-test-quickjs-native standalone-build-test-quickjs-wasix
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -95,14 +95,12 @@ EDGE_NODE_TEST_SKIP_CI_20260703 := \
   parallel/test-http-pipeline-requests-connection-leak.js
 EDGE_NODE_TEST_SKIP_TESTS ?= $(subst $(SPACE),$(COMMA),$(strip $(EDGE_NODE_TEST_SKIP_CI_20260518) $(EDGE_NODE_TEST_SKIP_CI_20260703)))
 
-# QuickJS currently cannot parse explicit resource management `using` syntax.
-QUICKJS_SKIP_USING_PARSER_TESTS := parallel/test-stream-duplex-destroy.js,parallel/test-stream-readable-dispose.js,parallel/test-stream-transform-destroy.js,parallel/test-stream-writable-destroy.js
 # QuickJS worker_threads/MessagePort support is incomplete; these worker-backed
 # tests time out or fail in the QuickJS lane while V8 continues to cover them.
 QUICKJS_SKIP_WORKER_TESTS := parallel/test-diagnostics-channel-worker-threads.js,client-proxy/test-http-proxy-request-invalid-char-in-url.mjs,parallel/test-crypto-key-objects-messageport.js,parallel/test-crypto-prime.js,parallel/test-crypto-worker-thread.js,parallel/test-http2-reset-flood.js,parallel/test-webcrypto-cryptokey-workers.js
 # QuickJS currently regresses TLS close-notify handling under --expose-internals.
 QUICKJS_SKIP_TLS_TESTS := parallel/test-tls-close-notify.js
-QUICKJS_SKIP_TESTS ?= $(EDGE_NODE_TEST_SKIP_TESTS),$(QUICKJS_SKIP_USING_PARSER_TESTS),$(QUICKJS_SKIP_WORKER_TESTS),$(QUICKJS_SKIP_TLS_TESTS)
+QUICKJS_SKIP_TESTS ?= $(EDGE_NODE_TEST_SKIP_TESTS),$(QUICKJS_SKIP_WORKER_TESTS),$(QUICKJS_SKIP_TLS_TESTS)
 
 # Expected WASIX environment limits from the 2026-06-23 triage run (1674 passed /
 # 64 failed). These 52 tests are unix sockets, cluster/fork, subprocess/shell,
@@ -382,6 +380,20 @@ test-quickjs-intl:
 	  EDGE_BYTECODE_CACHE=0 $(QUICKJS_EDGE_BINARY) "$(CURDIR)/test/$$t.js"; \
 	done
 	@echo "[intl native] all locale tests passed"
+
+# Language-level tests run directly against the QuickJS edge binary. These are
+# edgejs-owned (under tests/js, not the vendored node-test submodule) and are
+# self-contained, so they need neither the node-test harness nor a module
+# category.
+QUICKJS_LANG_TESTS := \
+  quickjs-explicit-resource-management
+
+test-quickjs-lang:
+	@set -e; for t in $(QUICKJS_LANG_TESTS); do \
+	  echo "[lang native] $$t"; \
+	  EDGE_BYTECODE_CACHE=0 $(QUICKJS_EDGE_BINARY) "$(CURDIR)/tests/js/$$t.js"; \
+	done
+	@echo "[lang native] all language tests passed"
 
 test-wasix-quickjs-intl:
 	@command -v "$(WASMER_BIN)" >/dev/null 2>&1 || { \
