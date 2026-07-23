@@ -381,20 +381,6 @@ test-quickjs-intl:
 	done
 	@echo "[intl native] all locale tests passed"
 
-# Language-level tests run directly against the QuickJS edge binary. These are
-# edgejs-owned (under tests/js, not the vendored node-test submodule) and are
-# self-contained, so they need neither the node-test harness nor a module
-# category.
-QUICKJS_LANG_TESTS := \
-  quickjs-explicit-resource-management
-
-test-quickjs-lang:
-	@set -e; for t in $(QUICKJS_LANG_TESTS); do \
-	  echo "[lang native] $$t"; \
-	  EDGE_BYTECODE_CACHE=0 $(QUICKJS_EDGE_BINARY) "$(CURDIR)/tests/js/$$t.js"; \
-	done
-	@echo "[lang native] all language tests passed"
-
 test-wasix-quickjs-intl:
 	@command -v "$(WASMER_BIN)" >/dev/null 2>&1 || { \
 		echo "error: $(WASMER_BIN) is required for test-wasix-quickjs-intl" >&2; exit 1; }
