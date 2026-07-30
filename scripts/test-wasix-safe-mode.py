@@ -5,12 +5,24 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
 IGNORED_STDERR_PATTERNS = (
     re.compile(r"Skipping duplicate additional import env\.memory"),
 )
+
+
+@dataclass(frozen=True)
+class Case:
+    name: str
+    script: str
+    expected_stdout: str = ""
+    # Cases that exercise process termination expect a specific exit status and
+    # are allowed to say so on stderr; everything else must exit 0 silently.
+    expected_returncode: int = 0
+    expected_stderr_contains: str = ""
 
 
 def sanitize_stderr(stderr: str) -> str:
@@ -23,8 +35,8 @@ def sanitize_stderr(stderr: str) -> str:
     return "\n".join(lines)
 
 
-def run_case(wasmer_bin: str, package_dir: Path, timeout: int, name: str, script: str,
-             expected_stdout: str) -> None:
+def run_case(wasmer_bin: str, package_dir: Path, timeout: int, case: Case) -> None:
+    name = case.name
     cmd = [
         wasmer_bin,
         "run",
@@ -33,7 +45,7 @@ def run_case(wasmer_bin: str, package_dir: Path, timeout: int, name: str, script
         "--net",
         "--",
         "-e",
-        script,
+        case.script,
     ]
 
     try:
@@ -55,60 +67,90 @@ def run_case(wasmer_bin: str, package_dir: Path, timeout: int, name: str, script
     stdout = completed.stdout
     stderr = sanitize_stderr(completed.stderr)
 
-    if completed.returncode != 0:
+    if completed.returncode != case.expected_returncode:
         raise RuntimeError(
-            f"{name} exited with {completed.returncode}\n"
+            f"{name} exited with {completed.returncode}, "
+            f"expected {case.expected_returncode}\n"
             f"stdout: {stdout}\n"
             f"stderr: {stderr}"
         )
 
-    if stdout != expected_stdout:
+    if stdout != case.expected_stdout:
         raise RuntimeError(
             f"{name} stdout mismatch\n"
-            f"expected: {expected_stdout!r}\n"
+            f"expected: {case.expected_stdout!r}\n"
             f"actual:   {stdout!r}\n"
             f"stderr: {stderr}"
         )
 
-    if stderr:
+    if case.expected_stderr_contains:
+        if case.expected_stderr_contains not in stderr:
+            raise RuntimeError(
+                f"{name} stderr missing expected text\n"
+                f"expected to contain: {case.expected_stderr_contains!r}\n"
+                f"stderr: {stderr}"
+            )
+    elif stderr:
         raise RuntimeError(
             f"{name} emitted unexpected stderr\n"
             f"stderr: {stderr}"
         )
 
-    print(f"[ok] {name}: {stdout.strip()}")
+    print(f"[ok] {name}: {stdout.strip() or completed.returncode}")
 
 
-def build_cases(host: str, include_network: bool) -> list[tuple[str, str, str]]:
+def build_cases(host: str, include_network: bool) -> list[Case]:
     cases = [
-        (
-            "queueMicrotask",
-            "console.log('A'); queueMicrotask(() => console.log('B')); console.log('C');",
-            "A\nC\nB\n",
+        Case(
+            name="queueMicrotask",
+            script="console.log('A'); queueMicrotask(() => console.log('B')); console.log('C');",
+            expected_stdout="A\nC\nB\n",
         ),
-        (
-            "blob.arrayBuffer",
-            "new Blob([new Uint8Array([65,66,67])]).arrayBuffer().then((ab) => console.log('BLOB', ab.byteLength));",
-            "BLOB 3\n",
+        Case(
+            name="blob.arrayBuffer",
+            script="new Blob([new Uint8Array([65,66,67])]).arrayBuffer().then((ab) => console.log('BLOB', ab.byteLength));",
+            expected_stdout="BLOB 3\n",
+        ),
+        # Regression coverage for the signal handler arity bug. SIGINT and
+        # SIGTERM are installed by RegisterSignalHandler() as three-argument
+        # sa_sigaction handlers; when SA_SIGINFO was missing, wasix-libc
+        # dispatched them through the one-argument signature and the
+        # mismatched call_indirect trapped ("indirect call type mismatch"),
+        # killing the instance with exit 27 before node::SignalExit could run.
+        #
+        # Without a JS listener the signal must instead reach SignalExit, which
+        # re-raises so the default disposition terminates the process. Note
+        # this only reproduces under WASIX: on native ABIs the surplus
+        # arguments are harmless, so the equivalent native test cannot catch it.
+        Case(
+            name="SIGINT without a JS listener terminates",
+            script="process.kill(process.pid, 'SIGINT'); setTimeout(() => console.log('NOT REACHED'), 500);",
+            expected_returncode=127,
+            expected_stderr_contains="termination signal",
+        ),
+        Case(
+            name="SIGTERM reaches a JS listener",
+            script="process.on('SIGTERM', () => { console.log('HANDLED'); process.exit(0); }); process.kill(process.pid, 'SIGTERM'); setTimeout(() => {}, 5000);",
+            expected_stdout="HANDLED\n",
         ),
     ]
 
     if include_network:
         cases.extend([
-            (
-                f"fetch http://{host}/",
-                f"const keepAlive = setTimeout(() => {{}}, 30000); fetch('http://{host}/').then((r) => console.log('FETCH', r.status)).catch((e) => {{ console.error('FETCHERR', e && (e.stack || e.message || e)); process.exitCode = 1; }}).finally(() => clearTimeout(keepAlive));",
-                "FETCH 200\n",
+            Case(
+                name=f"fetch http://{host}/",
+                script=f"const keepAlive = setTimeout(() => {{}}, 30000); fetch('http://{host}/').then((r) => console.log('FETCH', r.status)).catch((e) => {{ console.error('FETCHERR', e && (e.stack || e.message || e)); process.exitCode = 1; }}).finally(() => clearTimeout(keepAlive));",
+                expected_stdout="FETCH 200\n",
             ),
-            (
-                f"https.get https://{host}/",
-                f"require('node:https').get({{ hostname: '{host}', port: 443, path: '/', servername: '{host}' }}, (r) => {{ console.log('HTTPS', r.statusCode); r.resume(); }}).on('error', (e) => {{ console.error('HTTPSERR', e && (e.stack || e.message || e)); process.exit(1); }});",
-                "HTTPS 200\n",
+            Case(
+                name=f"https.get https://{host}/",
+                script=f"require('node:https').get({{ hostname: '{host}', port: 443, path: '/', servername: '{host}' }}, (r) => {{ console.log('HTTPS', r.statusCode); r.resume(); }}).on('error', (e) => {{ console.error('HTTPSERR', e && (e.stack || e.message || e)); process.exit(1); }});",
+                expected_stdout="HTTPS 200\n",
             ),
-            (
-                f"tls.connect verified {host}",
-                f"const tls=require('node:tls'); const s=tls.connect(443,'{host}',{{servername:'{host}'}},()=>{{ console.log('TLS CONNECTED', s.authorized); s.destroy(); }}); s.on('close',()=>console.log('TLS CLOSE')); process.on('exit',(code)=>console.log('TLS EXIT', code)); s.on('error',(e)=>{{ console.error('TLSERR', e && (e.stack || e.message || e)); process.exitCode = 1; }});",
-                "TLS CONNECTED true\nTLS CLOSE\nTLS EXIT 0\n",
+            Case(
+                name=f"tls.connect verified {host}",
+                script=f"const tls=require('node:tls'); const s=tls.connect(443,'{host}',{{servername:'{host}'}},()=>{{ console.log('TLS CONNECTED', s.authorized); s.destroy(); }}); s.on('close',()=>console.log('TLS CLOSE')); process.on('exit',(code)=>console.log('TLS EXIT', code)); s.on('error',(e)=>{{ console.error('TLSERR', e && (e.stack || e.message || e)); process.exitCode = 1; }});",
+                expected_stdout="TLS CONNECTED true\nTLS CLOSE\nTLS EXIT 0\n",
             ),
         ])
 
@@ -151,8 +193,8 @@ def main() -> int:
 
     cases = build_cases(args.https_host, include_network=args.include_network)
 
-    for name, script, expected_stdout in cases:
-        run_case(args.wasmer_bin, package_dir, args.timeout, name, script, expected_stdout)
+    for case in cases:
+        run_case(args.wasmer_bin, package_dir, args.timeout, case)
 
     if not args.include_network:
         print("Skipped outbound network smoke tests; pass --include-network to run them.")
