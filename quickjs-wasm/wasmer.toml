@@ -17,8 +17,24 @@ module = "edge"
 name = "node"
 module = "edge"
 
+[[command]]
+name = "pnpm"
+module = "edge"
+runner = "wasi"
+
+[command.annotations.wasi]
+main-args = ["/pnpm/edge-pnpm.cjs"]
+env = [
+  "HOME=/tmp",
+  "npm_config_node_linker=hoisted",
+  "npm_config_package_import_method=copy",
+  "npm_config_store_dir=/tmp/.pnpm-store",
+  "npm_config_update_notifier=false",
+]
+
 [fs]
 "/etc" = "./etc"
+"/pnpm" = "./pnpm"
 "/usr/local/ssl" = "../ssl-certs"
 
 [dependencies]

@@ -217,7 +217,7 @@ plans/quickjs-wasm/development/troubleshooting/node-compat/edgejs/012_v8_ctest_e
 Most recent Wasmer deploy troubleshooting note:
 
 ```text
-plans/quickjs-wasm/development/troubleshooting/wasmer-deploy/004_wasix_safe_mode_https_exit.md
+plans/quickjs-wasm/development/troubleshooting/wasmer-deploy/005_pnpm_cli_wasix_futimes.md
 ```
 
 Important commands:

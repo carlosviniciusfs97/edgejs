@@ -22,6 +22,54 @@ symbols such as `napi_*`, `node_api_*`, or `unofficial_napi_*`.
 ## Run
 
 ```sh
-wasmer run quickjs-wasm/wasmer.toml -- --version
-wasmer run quickjs-wasm/wasmer.toml -- -e "console.log('hello from quickjs')"
+wasmer run quickjs-wasm -- --version
+wasmer run quickjs-wasm -- -e "console.log('hello from quickjs')"
 ```
+
+The `edge` command remains the default entrypoint. The package also exposes
+`node` as an alias for it.
+
+## pnpm
+
+The `pnpm` command runs the pinned pnpm 10.34.5 pure-JavaScript CLI. The build
+stages pnpm's bundle and package-import worker with verified checksums. A small
+package-local launcher adapts unsupported WASIX filesystem metadata operations;
+it does not change EdgeJS's global `fs` behavior. Arguments after `--` are
+forwarded to pnpm:
+
+```sh
+wasmer run quickjs-wasm --command=pnpm --volume=. -- --version
+```
+
+Run an install from the project directory with networking enabled and mount
+that directory read-write into the guest:
+
+```sh
+wasmer run quickjs-wasm --command=pnpm --net --volume=. -- install react
+```
+
+`--command=pnpm` selects the pnpm entrypoint, `--net` permits registry access,
+and the `--volume=.` shorthand exposes the current project as pnpm's writable
+working directory. The separator `--` ends Wasmer's options; everything after
+it is a pnpm argument. Commands that do not need registry access may omit
+`--net`.
+
+The WASIX command uses pnpm's hoisted linker and copy import method. This makes
+installed dependencies real directories that EdgeJS can resolve and avoids a
+Wasmer 7.2.1 linked-inode rename failure. Its content-addressed store is kept at
+`/tmp/.pnpm-store` inside the guest. The store is intentionally ephemeral and
+does not assume the mounted project is available at `/home`. The packaged
+command also disables pnpm's update-available notification through
+`npm_config_update_notifier=false`.
+
+Run the end-to-end package smoke test with:
+
+```sh
+make test-wasix-pnpm WASMER_BIN=wasmer
+```
+
+It stages pnpm, installs pinned React in a temporary mounted project, checks the
+manifest, lockfile, and ephemeral store path, confirms that the update
+notification stays hidden, and resolves the installed package through Edge
+QuickJS. Commands that delegate to an external executable still require that
+executable to be packaged; for example, this package does not include `npm`.

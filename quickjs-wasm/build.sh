@@ -218,4 +218,6 @@ fi
 
 check_no_napi_imports "${BUILD_DIR}/edgejs.wasm"
 
+"${SCRIPT_DIR}/stage-pnpm.sh"
+
 echo "Built QuickJS WASIX targets at ${BUILD_DIR}/edge.wasm and ${BUILD_DIR}/edgejs.wasm"
