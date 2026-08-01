@@ -1818,7 +1818,11 @@ void OnGetAddrInfo(uv_getaddrinfo_t* req, int status, addrinfo* res) {
         // WASIX's resolver returns an unspecified socket type even when the
         // request carried a SOCK_STREAM hint. The address is still valid for
         // Node's lookup API; only reject an explicitly different type.
+#if defined(__wasi__)
         if (p->ai_socktype != 0 && p->ai_socktype != SOCK_STREAM) continue;
+#else
+        if (p->ai_socktype != SOCK_STREAM) continue;
+#endif
 
         const void* addr = nullptr;
         if (want_ipv4 && p->ai_family == AF_INET) {
