@@ -1,7 +1,7 @@
 [package]
 entrypoint = "edgejs"
 name = "wasmer/edgejs"
-version = "0.1.1"
+version = "0.1.2"
 
 # [fs]
 # "/node-lib" = "./lib"
