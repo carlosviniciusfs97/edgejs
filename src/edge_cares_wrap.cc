@@ -1946,7 +1946,15 @@ napi_value CaresGetAddrInfo(napi_env env, napi_callback_info info) {
   addrinfo hints{};
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_family = (family == 4) ? AF_INET : ((family == 6) ? AF_INET6 : AF_UNSPEC);
+  // WASIX networking is virtual, so musl's AI_ADDRCONFIG probe (a UDP
+  // connection to a loopback address) does not describe TCP reachability and
+  // may legitimately be unsupported by the provider. The resolver itself
+  // already filters address families, so omit only that host-interface hint.
+#if defined(__wasi__)
+  hints.ai_flags = hints_flags & ~AI_ADDRCONFIG;
+#else
   hints.ai_flags = hints_flags;
+#endif
 
   uv_loop_t* loop = EdgeGetEnvLoop(env);
   int rc = loop != nullptr
