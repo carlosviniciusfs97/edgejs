@@ -1815,7 +1815,10 @@ void OnGetAddrInfo(uv_getaddrinfo_t* req, int status, addrinfo* res) {
 
     auto add = [&](bool want_ipv4, bool want_ipv6) {
       for (addrinfo* p = res; p != nullptr; p = p->ai_next) {
-        if (p->ai_socktype != SOCK_STREAM) continue;
+        // WASIX's resolver returns an unspecified socket type even when the
+        // request carried a SOCK_STREAM hint. The address is still valid for
+        // Node's lookup API; only reject an explicitly different type.
+        if (p->ai_socktype != 0 && p->ai_socktype != SOCK_STREAM) continue;
 
         const void* addr = nullptr;
         if (want_ipv4 && p->ai_family == AF_INET) {
