@@ -1295,6 +1295,9 @@ std::vector<ProcessVersionEntry> BuildProcessVersionEntries(bool has_intl) {
       {"zlib", ZLIB_VERSION},
       {"zstd", ZSTD_VERSION_STRING},
   };
+#if defined(__wasm32__) && defined(EDGE_WEBCONTAINER_VERSION)
+  version_entries.push_back({"webcontainer", EDGE_WEBCONTAINER_VERSION});
+#endif
   const std::string openssl_version = GetOpenSslVersion();
   if (!openssl_version.empty() && openssl_version != "0.0.0") {
     version_entries.push_back({"ncrypto", NCRYPTO_VERSION});

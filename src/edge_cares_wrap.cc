@@ -1815,7 +1815,14 @@ void OnGetAddrInfo(uv_getaddrinfo_t* req, int status, addrinfo* res) {
 
     auto add = [&](bool want_ipv4, bool want_ipv6) {
       for (addrinfo* p = res; p != nullptr; p = p->ai_next) {
+        // WASIX's resolver returns an unspecified socket type even when the
+        // request carried a SOCK_STREAM hint. The address is still valid for
+        // Node's lookup API; only reject an explicitly different type.
+#if defined(__wasi__)
+        if (p->ai_socktype != 0 && p->ai_socktype != SOCK_STREAM) continue;
+#else
         if (p->ai_socktype != SOCK_STREAM) continue;
+#endif
 
         const void* addr = nullptr;
         if (want_ipv4 && p->ai_family == AF_INET) {
@@ -1943,7 +1950,15 @@ napi_value CaresGetAddrInfo(napi_env env, napi_callback_info info) {
   addrinfo hints{};
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_family = (family == 4) ? AF_INET : ((family == 6) ? AF_INET6 : AF_UNSPEC);
+  // WASIX networking is virtual, so musl's AI_ADDRCONFIG probe (a UDP
+  // connection to a loopback address) does not describe TCP reachability and
+  // may legitimately be unsupported by the provider. The resolver itself
+  // already filters address families, so omit only that host-interface hint.
+#if defined(__wasi__)
+  hints.ai_flags = hints_flags & ~AI_ADDRCONFIG;
+#else
   hints.ai_flags = hints_flags;
+#endif
 
   uv_loop_t* loop = EdgeGetEnvLoop(env);
   int rc = loop != nullptr

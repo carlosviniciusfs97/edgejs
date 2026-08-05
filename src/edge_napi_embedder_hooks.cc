@@ -9,9 +9,13 @@
 
 #include "unofficial_napi.h"
 
-namespace {
-
-uint64_t DetectTotalMemory() {
+uint64_t EdgeGetTotalMemory() {
+#if defined(__wasi__) || defined(__wasm32__)
+  // The JS Wasmer runtime currently caps shared WebAssembly memories at 1 GiB.
+  // WASIX does not expose host physical-memory discovery, so report that
+  // effective process budget instead of zero or an arbitrary stub value.
+  return uint64_t{1024} * 1024 * 1024;
+#else
 #if defined(_SC_PHYS_PAGES)
   const long pages = sysconf(_SC_PHYS_PAGES);
 #if defined(_SC_PAGE_SIZE)
@@ -26,12 +30,15 @@ uint64_t DetectTotalMemory() {
   }
 #endif
   return 0;
+#endif
 }
+
+namespace {
 
 napi_status GetEmbedderMemoryInfo(void* /*target*/,
                                   unofficial_napi_embedder_memory_info* info_out) {
   if (info_out == nullptr) return napi_invalid_arg;
-  info_out->total_memory = DetectTotalMemory();
+  info_out->total_memory = EdgeGetTotalMemory();
   info_out->constrained_memory = 0;
   return napi_ok;
 }

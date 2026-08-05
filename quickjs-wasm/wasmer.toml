@@ -1,6 +1,6 @@
 [package]
 name = "wasmer/edgejs-quickjs"
-version = "0.1.0"
+version = "0.1.4"
 description = "Edge.js with an embedded QuickJS N-API provider"
 entrypoint = "edge"
 
@@ -13,8 +13,45 @@ abi = "wasi"
 name = "edge"
 module = "edge"
 
+[[command]]
+name = "node"
+module = "edge"
+
+[[command]]
+name = "pnpm"
+module = "edge"
+runner = "wasi"
+
+[command.annotations.wasi]
+main-args = ["/pnpm/edge-pnpm.cjs"]
+env = [
+  "HOME=/tmp",
+  "npm_config_network_concurrency=4",
+  "npm_config_node_linker=hoisted",
+  "npm_config_package_import_method=copy",
+  "npm_config_store_dir=/tmp/.pnpm-store",
+  "npm_config_update_notifier=false",
+]
+
+[[command]]
+name = "npm"
+module = "edge"
+runner = "wasi"
+
+[command.annotations.wasi]
+main-args = ["/pnpm/edge-pnpm.cjs"]
+env = [
+  "HOME=/tmp",
+  "npm_config_network_concurrency=4",
+  "npm_config_node_linker=hoisted",
+  "npm_config_package_import_method=copy",
+  "npm_config_store_dir=/tmp/.pnpm-store",
+  "npm_config_update_notifier=false",
+]
+
 [fs]
 "/etc" = "./etc"
+"/pnpm" = "./pnpm"
 "/usr/local/ssl" = "../ssl-certs"
 
 [dependencies]

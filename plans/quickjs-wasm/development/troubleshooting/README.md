@@ -107,3 +107,4 @@ duplicating issue details.
 | 🟢 | High | [002_quickjs_wasix_napi_import_module_mismatch.md](wasmer-deploy/002_quickjs_wasix_napi_import_module_mismatch.md) | QuickJS WASIX N-API import module mismatch |
 | 🟠 | High | [003_ci_safe_mode_missing_quickjs_artifact.md](wasmer-deploy/003_ci_safe_mode_missing_quickjs_artifact.md) | CI safe-mode missing QuickJS artifact |
 | 🟢 | High | [004_wasix_safe_mode_https_exit.md](wasmer-deploy/004_wasix_safe_mode_https_exit.md) | WASIX safe-mode HTTPS exits before callbacks |
+| 🟠 | High | [005_pnpm_cli_wasix_futimes.md](wasmer-deploy/005_pnpm_cli_wasix_futimes.md) | pnpm CLI WASIX filesystem fallbacks |

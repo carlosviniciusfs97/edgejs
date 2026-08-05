@@ -91,6 +91,15 @@ struct WasmState {
   explicit WasmState(napi_env env_in) : env(env_in) {}
 
   ~WasmState() {
+    // Environment cleanup destroys slot-owned state before N-API releases the
+    // remaining JavaScript wrappers. Those wrappers may therefore be finalized
+    // after this destructor. Detach their non-owning state pointers first so a
+    // late MemoryFinalize cannot touch this destroyed live-memory registry.
+    for (WasmMemoryObject *memory : live_memories) {
+      if (memory != nullptr)
+        memory->base.state = nullptr;
+    }
+    live_memories.clear();
     DeleteRefIfPresent(env, &externref_values_ref);
     DeleteRefIfPresent(env, &pending_import_exception_ref);
     DeleteRefIfPresent(env, &webassembly_ref);
