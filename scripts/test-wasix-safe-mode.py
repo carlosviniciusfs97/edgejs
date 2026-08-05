@@ -102,6 +102,11 @@ def run_case(wasmer_bin: str, package_dir: Path, timeout: int, case: Case) -> No
 def build_cases(host: str, include_network: bool) -> list[Case]:
     cases = [
         Case(
+            name="process.versions.webcontainer",
+            script="const version = process.versions.webcontainer; if (typeof version !== 'string' || !version.startsWith('wasix')) throw new Error(`unexpected webcontainer version: ${version}`); console.log('WEBCONTAINER OK');",
+            expected_stdout="WEBCONTAINER OK\n",
+        ),
+        Case(
             name="queueMicrotask",
             script="console.log('A'); queueMicrotask(() => console.log('B')); console.log('C');",
             expected_stdout="A\nC\nB\n",

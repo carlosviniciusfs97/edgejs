@@ -260,6 +260,11 @@ add_library(edge_runtime_core OBJECT EXCLUDE_FROM_ALL
   ${EDGE_RUNTIME_CORE_SOURCES}
 )
 edge_apply_runtime_compile_surface(edge_runtime_core)
+if(EDGE_IS_WASIX_TARGET)
+  target_compile_definitions(edge_runtime_core PRIVATE
+    EDGE_WEBCONTAINER_VERSION=\"${EDGE_WEBCONTAINER_VERSION}\"
+  )
+endif()
 if(EDGE_QUICKJS_WEBASSEMBLY_ENABLED)
   target_compile_definitions(edge_runtime_core PRIVATE EDGE_QUICKJS_WEBASSEMBLY=1)
 endif()

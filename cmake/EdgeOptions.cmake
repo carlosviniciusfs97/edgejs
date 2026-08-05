@@ -72,6 +72,31 @@ function(edge_configure_options)
     set(EDGE_IS_WASIX_TARGET ON)
   endif()
 
+  set(_edge_webcontainer_version_default "")
+  if(EDGE_IS_WASIX_TARGET)
+    execute_process(
+      COMMAND "${CMAKE_C_COMPILER}" --version
+      OUTPUT_VARIABLE _edge_wasixcc_version_output
+      ERROR_VARIABLE _edge_wasixcc_version_error
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_STRIP_TRAILING_WHITESPACE
+    )
+    string(CONCAT _edge_wasixcc_version_text
+      "${_edge_wasixcc_version_output}\n${_edge_wasixcc_version_error}")
+    if(_edge_wasixcc_version_text MATCHES "wasixcc[ \t]+v?([0-9]+\\.[0-9]+\\.[0-9]+)")
+      set(_edge_webcontainer_version_default "wasix-${CMAKE_MATCH_1}")
+    else()
+      set(_edge_webcontainer_version_default "wasix")
+    endif()
+  endif()
+  if(NOT "$ENV{EDGE_WEBCONTAINER_VERSION}" STREQUAL "")
+    set(_edge_webcontainer_version_default "$ENV{EDGE_WEBCONTAINER_VERSION}")
+  endif()
+  set(EDGE_WEBCONTAINER_VERSION
+    "${_edge_webcontainer_version_default}"
+    CACHE STRING "Fake process.versions.webcontainer value for WebAssembly builds"
+  )
+
   set(EDGE_DEFAULT_WASMER_PACKAGE "${EDGE_DEFAULT_WASMER_PACKAGE}" PARENT_SCOPE)
   set(EDGE_EXTERNAL_NAPI_V8 "${EDGE_EXTERNAL_NAPI_V8}" PARENT_SCOPE)
   set(EDGE_ALLOW_UNDEFINED_IMPORTS "${EDGE_ALLOW_UNDEFINED_IMPORTS}" PARENT_SCOPE)
@@ -88,4 +113,5 @@ function(edge_configure_options)
   set(EDGE_SHARED_OPENSSL_LIBNAME "${EDGE_SHARED_OPENSSL_LIBNAME}" PARENT_SCOPE)
   set(EDGE_REPO_LOCAL_V8_DIST_ROOT "${EDGE_REPO_LOCAL_V8_DIST_ROOT}" PARENT_SCOPE)
   set(EDGE_IS_WASIX_TARGET "${EDGE_IS_WASIX_TARGET}" PARENT_SCOPE)
+  set(EDGE_WEBCONTAINER_VERSION "${EDGE_WEBCONTAINER_VERSION}" PARENT_SCOPE)
 endfunction()
