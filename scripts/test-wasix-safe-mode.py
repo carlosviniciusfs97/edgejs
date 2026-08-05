@@ -116,6 +116,21 @@ def build_cases(host: str, include_network: bool) -> list[Case]:
             script="new Blob([new Uint8Array([65,66,67])]).arrayBuffer().then((ab) => console.log('BLOB', ab.byteLength));",
             expected_stdout="BLOB 3\n",
         ),
+        # Keep the JS wrapper alive until environment teardown. This covers the
+        # cleanup ordering between QuickJS finalizers and the embedder-owned
+        # WebAssembly state.
+        Case(
+            name="WebAssembly.Memory survives environment teardown",
+            script="globalThis.memory = new WebAssembly.Memory({ initial: 1 }); console.log('MEMORY', memory.buffer.byteLength);",
+            expected_stdout="MEMORY 65536\n",
+        ),
+        # Next.js uses this value to decide whether the worker is approaching
+        # its heap limit. A zero limit makes its memory watchdog exit eagerly.
+        Case(
+            name="v8 heap statistics report the embedder limit",
+            script="const limit = require('node:v8').getHeapStatistics().heap_size_limit; console.log('HEAP', limit > 0);",
+            expected_stdout="HEAP true\n",
+        ),
         # Regression coverage for the signal handler arity bug. SIGINT and
         # SIGTERM are installed by RegisterSignalHandler() as three-argument
         # sa_sigaction handlers; when SA_SIGINFO was missing, wasix-libc
