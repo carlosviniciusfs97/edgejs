@@ -127,7 +127,6 @@ T* Unwrap(napi_env env, napi_callback_info info, napi_value* this_arg = nullptr)
   return out;
 }
 
-napi_value CreateUint8ArrayCopy(napi_env env, const char* data, size_t length);
 napi_value CreateBufferCopy(napi_env env, const char* data, size_t length);
 napi_value GetWrappedObject(napi_env env, napi_ref ref);
 int FlushHeadersToJs(Parser* p);
@@ -315,36 +314,15 @@ napi_value GetWrappedObject(napi_env env, napi_ref ref) {
   return obj;
 }
 
-napi_value CreateUint8ArrayCopy(napi_env env, const char* data, size_t length) {
-  napi_value ab = nullptr;
-  void* out = nullptr;
-  if (napi_create_arraybuffer(env, length, &out, &ab) != napi_ok || ab == nullptr) return nullptr;
-  if (out != nullptr && data != nullptr && length > 0) {
-    std::memcpy(out, data, length);
-  }
-  napi_value view = nullptr;
-  if (napi_create_typedarray(env, napi_uint8_array, length, ab, 0, &view) != napi_ok) return nullptr;
-  return view;
-}
-
 napi_value CreateBufferCopy(napi_env env, const char* data, size_t length) {
-  napi_value view = CreateUint8ArrayCopy(env, data, length);
-  if (view == nullptr) return nullptr;
-  napi_value global = nullptr;
-  napi_value buffer_ctor = nullptr;
-  napi_value from_fn = nullptr;
   napi_value out = nullptr;
-  if (napi_get_global(env, &global) != napi_ok || global == nullptr) return view;
-  if (napi_get_named_property(env, global, "Buffer", &buffer_ctor) != napi_ok || buffer_ctor == nullptr) return view;
-  if (napi_get_named_property(env, buffer_ctor, "from", &from_fn) != napi_ok || from_fn == nullptr) return view;
-  napi_value argv[1] = {view};
-  if (napi_call_function(env, buffer_ctor, from_fn, 1, argv, &out) != napi_ok || out == nullptr) {
-    bool pending = false;
-    if (napi_is_exception_pending(env, &pending) == napi_ok && pending) {
-      napi_value ignored = nullptr;
-      napi_get_and_clear_last_exception(env, &ignored);
-    }
-    return view;
+  if (napi_create_buffer_copy(env,
+                              length,
+                              length > 0 ? data : nullptr,
+                              nullptr,
+                              &out) != napi_ok ||
+      out == nullptr) {
+    return nullptr;
   }
   return out;
 }
