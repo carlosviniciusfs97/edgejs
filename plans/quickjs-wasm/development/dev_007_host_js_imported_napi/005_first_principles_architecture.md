@@ -44,8 +44,13 @@ Files under `lib/` must remain unchanged.
   ArrayBuffer allocation expose missing provider-neutral ownership operations;
   process, DNS, pipe, HTTP/2, and OS checks are platform/libuv work and must be
   evaluated separately rather than mechanically removed.
+- [x] Converted filesystem stats, scalar reads/writes, string writes, and
+  vectored writes to leases. Async requests own lease arrays directly and
+  release them on completion, cancellation, and teardown; no JavaScript value
+  is reconstructed during release. Native and host-JavaScript tests cover sync
+  and async exact ranges plus vectored writes.
 - [ ] Convert every remaining Edge raw-pointer consumer to the lease API,
-  beginning with filesystem, stream, Buffer, and crypto paths; then remove the
+  continuing with stream, Buffer, and crypto paths; then remove the
   compatibility access API.
 - [ ] Reduce scheduling to one provider-owned checkpoint and remove the
   provider-specific scheduling compensations.

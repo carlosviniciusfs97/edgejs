@@ -339,11 +339,7 @@ napi_value CreateTypedStatsArray(napi_env env, size_t length, bool as_bigint, na
   napi_value ab = nullptr;
   void* data = nullptr;
   const size_t byte_length = (as_bigint ? sizeof(int64_t) : sizeof(double)) * length;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   if (napi_create_arraybuffer(env, byte_length, nullptr, &ab) != napi_ok || ab == nullptr) {
-#else
-  if (napi_create_arraybuffer(env, byte_length, &data, &ab) != napi_ok || ab == nullptr || data == nullptr) {
-#endif
     return Undefined(env);
   }
   napi_value out = nullptr;
@@ -351,18 +347,18 @@ napi_value CreateTypedStatsArray(napi_env env, size_t length, bool as_bigint, na
   if (napi_create_typedarray(env, type, length, ab, 0, &out) != napi_ok || out == nullptr) {
     return Undefined(env);
   }
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  if (unofficial_napi_acquire_buffer_access(
+  unofficial_napi_buffer_lease lease = nullptr;
+  if (unofficial_napi_acquire_buffer_lease(
           env,
           out,
           0,
           byte_length,
           unofficial_napi_buffer_access_write,
+          &lease,
           &data) != napi_ok ||
-      data == nullptr) {
+      (byte_length != 0 && data == nullptr)) {
     return Undefined(env);
   }
-#endif
 
   if (as_bigint) {
     auto* values = static_cast<int64_t*>(data);
@@ -394,11 +390,9 @@ napi_value CreateTypedStatsArray(napi_env env, size_t length, bool as_bigint, na
     }
   }
 
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  if (unofficial_napi_release_buffer_access(env, out, data, true) != napi_ok) {
+  if (unofficial_napi_release_buffer_lease(env, lease, true) != napi_ok) {
     return Undefined(env);
   }
-#endif
   return out;
 }
 
@@ -429,11 +423,7 @@ napi_value CreateStatWatcherArray(napi_env env, bool as_bigint, const uv_stat_t*
   napi_value ab = nullptr;
   void* data = nullptr;
   const size_t byte_length = (as_bigint ? sizeof(int64_t) : sizeof(double)) * total_length;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   if (napi_create_arraybuffer(env, byte_length, nullptr, &ab) != napi_ok || ab == nullptr) {
-#else
-  if (napi_create_arraybuffer(env, byte_length, &data, &ab) != napi_ok || ab == nullptr || data == nullptr) {
-#endif
     return Undefined(env);
   }
 
@@ -442,18 +432,18 @@ napi_value CreateStatWatcherArray(napi_env env, bool as_bigint, const uv_stat_t*
   if (napi_create_typedarray(env, type, total_length, ab, 0, &out) != napi_ok || out == nullptr) {
     return Undefined(env);
   }
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  if (unofficial_napi_acquire_buffer_access(
+  unofficial_napi_buffer_lease lease = nullptr;
+  if (unofficial_napi_acquire_buffer_lease(
           env,
           out,
           0,
           byte_length,
           unofficial_napi_buffer_access_write,
+          &lease,
           &data) != napi_ok ||
-      data == nullptr) {
+      (byte_length != 0 && data == nullptr)) {
     return Undefined(env);
   }
-#endif
 
   double curr_values[kFsStatsLength] = {};
   double prev_values[kFsStatsLength] = {};
@@ -474,11 +464,9 @@ napi_value CreateStatWatcherArray(napi_env env, bool as_bigint, const uv_stat_t*
     }
   }
 
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  if (unofficial_napi_release_buffer_access(env, out, data, true) != napi_ok) {
+  if (unofficial_napi_release_buffer_lease(env, lease, true) != napi_ok) {
     return Undefined(env);
   }
-#endif
   return out;
 }
 
@@ -1124,38 +1112,33 @@ struct AsyncFsReq {
   AsyncFsResultKind result_kind = AsyncFsResultKind::kUndefined;
   const char* syscall = nullptr;
   std::string path_storage;
-  napi_ref* hold_refs = nullptr;
-  size_t hold_ref_count = 0;
   uv_buf_t* bufs = nullptr;
   size_t nbufs = 0;
+  unofficial_napi_buffer_lease* buffer_leases = nullptr;
   bool track_unmanaged_fd = false;
   bool uses_uv_fs_req = false;
   int32_t open_flags = 0;
   bool is_open_req = false;
   bool delayed_open_completion = false;
   bool pending_fifo_writer_open = false;
-  bool managed_buffer_access = false;
-  bool managed_buffer_modified = false;
+  bool buffer_leases_modified = false;
   struct DeferredOpenCompletionTask* deferred_open_task = nullptr;
 };
 
-void EndManagedBufferAccess(AsyncFsReq* async_req) {
-  if (async_req == nullptr || !async_req->managed_buffer_access || async_req->env == nullptr) return;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  for (size_t i = 0; i < async_req->hold_ref_count; ++i) {
-    napi_value value = GetRefValue(async_req->env, async_req->hold_refs[i]);
-    if (value != nullptr) {
-      void* data = async_req->bufs != nullptr && i < async_req->nbufs
-                       ? async_req->bufs[i].base
-                       : nullptr;
-      if (data != nullptr) {
-        (void)unofficial_napi_release_buffer_access(
-            async_req->env, value, data, async_req->managed_buffer_modified);
-      }
+void ReleaseBufferLeases(AsyncFsReq* async_req) {
+  if (async_req == nullptr || async_req->env == nullptr ||
+      async_req->buffer_leases == nullptr) {
+    return;
+  }
+  for (size_t i = 0; i < async_req->nbufs; ++i) {
+    if (async_req->buffer_leases[i] != nullptr) {
+      (void)unofficial_napi_release_buffer_lease(
+          async_req->env,
+          async_req->buffer_leases[i],
+          async_req->buffer_leases_modified);
+      async_req->buffer_leases[i] = nullptr;
     }
   }
-#endif
-  async_req->managed_buffer_access = false;
 }
 
 struct DeferredOpenCompletionTask {
@@ -1231,7 +1214,7 @@ napi_value CreateUvExceptionValue(napi_env env, int errorno, const char* syscall
 
 void DestroyAsyncFsReq(AsyncFsReq* async_req) {
   if (async_req == nullptr) return;
-  EndManagedBufferAccess(async_req);
+  ReleaseBufferLeases(async_req);
   napi_env env = async_req->env;
   if (env != nullptr && async_req->active_request_token != nullptr) {
     EdgeUnregisterActiveRequestToken(env, async_req->active_request_token);
@@ -1241,13 +1224,8 @@ void DestroyAsyncFsReq(AsyncFsReq* async_req) {
     ResetRef(env, &async_req->req_ref);
     ResetRef(env, &async_req->oncomplete_ref);
     ResetRef(env, &async_req->extra_ref);
-    if (async_req->hold_refs != nullptr) {
-      for (size_t i = 0; i < async_req->hold_ref_count; ++i) {
-        ResetRef(env, &async_req->hold_refs[i]);
-      }
-    }
   }
-  delete[] async_req->hold_refs;
+  delete[] async_req->buffer_leases;
   delete[] async_req->bufs;
   if (async_req->uses_uv_fs_req) {
     uv_fs_req_cleanup(&async_req->req);
@@ -1564,52 +1542,6 @@ int64_t GetInt64OrDefault(napi_env env, napi_value value, int64_t fallback) {
   return out;
 }
 
-bool ExtractByteSpanForAsyncIo(napi_env env,
-                               napi_value value,
-                               size_t offset,
-                               size_t length,
-                               napi_value* hold_value,
-                               uv_buf_t* out) {
-  if (hold_value == nullptr || out == nullptr) return false;
-
-  napi_value backing = value;
-  void* raw = nullptr;
-  size_t total_len = 0;
-
-  bool is_buffer = false;
-  if (backing != nullptr && napi_is_buffer(env, backing, &is_buffer) == napi_ok && is_buffer) {
-    if (napi_get_buffer_info(env, backing, &raw, &total_len) != napi_ok) return false;
-  } else {
-    bool is_typed_array = false;
-    if (backing != nullptr && napi_is_typedarray(env, backing, &is_typed_array) == napi_ok && is_typed_array) {
-      napi_typedarray_type type = napi_uint8_array;
-      size_t len = 0;
-      napi_value ab = nullptr;
-      size_t byte_offset = 0;
-      if (napi_get_typedarray_info(env, backing, &type, &len, &raw, &ab, &byte_offset) != napi_ok) return false;
-      total_len = len * TypedArrayElementSize(type);
-    } else {
-      bool is_dataview = false;
-      if (backing != nullptr && napi_is_dataview(env, backing, &is_dataview) == napi_ok && is_dataview) {
-        napi_value ab = nullptr;
-        size_t byte_offset = 0;
-        if (napi_get_dataview_info(env, backing, &total_len, &raw, &ab, &byte_offset) != napi_ok) return false;
-      } else {
-        backing = BufferFromValue(env, value, nullptr);
-        if (backing == nullptr || IsUndefined(env, backing)) return false;
-        if (napi_get_buffer_info(env, backing, &raw, &total_len) != napi_ok) return false;
-      }
-    }
-  }
-
-  if (raw == nullptr || offset > total_len) return false;
-  if (length > total_len - offset) length = total_len - offset;
-
-  *hold_value = backing;
-  *out = uv_buf_init(static_cast<char*>(raw) + offset, static_cast<unsigned int>(length));
-  return true;
-}
-
 napi_value MakeAsyncFsResultValue(AsyncFsReq* async_req, int64_t result) {
   if (async_req == nullptr || async_req->env == nullptr) return nullptr;
   napi_env env = async_req->env;
@@ -1645,7 +1577,7 @@ void FinishAsyncFsReq(AsyncFsReq* async_req, int result) {
   }
 
   napi_env env = async_req->env;
-  EndManagedBufferAccess(async_req);
+  ReleaseBufferLeases(async_req);
   if (EdgeWorkerEnvStopRequested(env)) {
     DestroyAsyncFsReq(async_req);
     return;
@@ -3421,39 +3353,27 @@ napi_value FsRead(napi_env env, napi_callback_info info) {
     if (async_req != nullptr) {
       async_req->syscall = "read";
       async_req->result_kind = AsyncFsResultKind::kInt64;
-      async_req->hold_refs = new napi_ref[1]();
-      async_req->hold_ref_count = 1;
       async_req->bufs = new uv_buf_t[1];
       async_req->nbufs = 1;
+      async_req->buffer_leases = new unofficial_napi_buffer_lease[1]();
+      async_req->buffer_leases_modified = true;
 
-      napi_value hold_value = nullptr;
-      bool extracted = false;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
       void* managed_data = nullptr;
-      extracted = unofficial_napi_acquire_buffer_access(
-                      env,
-                      argv[1],
-                      offset,
-                      length,
-                      unofficial_napi_buffer_access_readwrite,
-                      &managed_data) == napi_ok;
+      const bool extracted = unofficial_napi_acquire_buffer_lease(
+                                 env,
+                                 argv[1],
+                                 offset,
+                                 length,
+                                 unofficial_napi_buffer_access_readwrite,
+                                 &async_req->buffer_leases[0],
+                                 &managed_data) == napi_ok;
       if (extracted) {
-        hold_value = argv[1];
         async_req->bufs[0] = uv_buf_init(static_cast<char*>(managed_data), length);
-        async_req->managed_buffer_access = true;
-        async_req->managed_buffer_modified = true;
       }
-#else
-      extracted = ExtractByteSpanForAsyncIo(
-          env, argc >= 2 ? argv[1] : nullptr, offset, length, &hold_value, &async_req->bufs[0]);
-#endif
       const bool extra_ok = req_kind != ReqKind::kCallback ||
                             argv[1] == nullptr ||
                             napi_create_reference(env, argv[1], 1, &async_req->extra_ref) == napi_ok;
-      if (extracted &&
-          extra_ok &&
-          hold_value != nullptr &&
-          napi_create_reference(env, hold_value, 1, &async_req->hold_refs[0]) == napi_ok) {
+      if (extracted && extra_ok) {
         uv_loop_t* loop = EdgeGetEnvLoop(env);
         const int rc = loop != nullptr
                            ? uv_fs_read(loop,
@@ -3468,13 +3388,6 @@ napi_value FsRead(napi_env env, napi_callback_info info) {
         return req_kind == ReqKind::kPromise ? promise : Undefined(env);
       }
 
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-      if (async_req->managed_buffer_access && async_req->bufs[0].base != nullptr) {
-        (void)unofficial_napi_release_buffer_access(
-            env, argv[1], async_req->bufs[0].base, false);
-        async_req->managed_buffer_access = false;
-      }
-#endif
       FinishAsyncFsReq(async_req, UV_EINVAL);
       return req_kind == ReqKind::kPromise ? promise : Undefined(env);
     }
@@ -3486,26 +3399,20 @@ napi_value FsRead(napi_env env, napi_callback_info info) {
     return zero != nullptr ? zero : Undefined(env);
   }
 
-  napi_value hold_value = nullptr;
   uv_buf_t buf = uv_buf_init(nullptr, 0);
-  bool extracted = false;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   void* managed_data = nullptr;
-  extracted = unofficial_napi_acquire_buffer_access(
-                  env,
-                  argv[1],
-                  offset,
-                  length,
-                  unofficial_napi_buffer_access_readwrite,
-                  &managed_data) == napi_ok;
+  unofficial_napi_buffer_lease lease = nullptr;
+  const bool extracted = unofficial_napi_acquire_buffer_lease(
+                             env,
+                             argv[1],
+                             offset,
+                             length,
+                             unofficial_napi_buffer_access_readwrite,
+                             &lease,
+                             &managed_data) == napi_ok;
   if (extracted) {
-    hold_value = argv[1];
     buf = uv_buf_init(static_cast<char*>(managed_data), length);
   }
-#else
-  extracted = ExtractByteSpanForAsyncIo(
-      env, argc >= 2 ? argv[1] : nullptr, offset, length, &hold_value, &buf);
-#endif
   if (!extracted) {
     napi_throw(env, CreateUvExceptionValue(env, UV_EINVAL, "read"));
     return nullptr;
@@ -3514,9 +3421,7 @@ napi_value FsRead(napi_env env, napi_callback_info info) {
   uv_fs_t uv_req{};
   const int result = uv_fs_read(nullptr, &uv_req, fd, &buf, 1, position, nullptr);
   uv_fs_req_cleanup(&uv_req);
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  (void)unofficial_napi_release_buffer_access(env, argv[1], buf.base, result >= 0);
-#endif
+  (void)unofficial_napi_release_buffer_lease(env, lease, result >= 0);
   if (result < 0) {
     napi_throw(env, CreateUvExceptionValue(env, result, "read"));
     return nullptr;
@@ -3784,38 +3689,26 @@ napi_value FsWriteBuffer(napi_env env, napi_callback_info info) {
     if (async_req != nullptr) {
       async_req->syscall = "write";
       async_req->result_kind = AsyncFsResultKind::kInt64;
-      async_req->hold_refs = new napi_ref[1]();
-      async_req->hold_ref_count = 1;
       async_req->bufs = new uv_buf_t[1];
       async_req->nbufs = 1;
+      async_req->buffer_leases = new unofficial_napi_buffer_lease[1]();
 
-      napi_value hold_value = nullptr;
-      bool extracted = false;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
       void* managed_data = nullptr;
-      extracted = unofficial_napi_acquire_buffer_access(
-                      env,
-                      argv[1],
-                      offset,
-                      length,
-                      unofficial_napi_buffer_access_read,
-                      &managed_data) == napi_ok;
+      const bool extracted = unofficial_napi_acquire_buffer_lease(
+                                 env,
+                                 argv[1],
+                                 offset,
+                                 length,
+                                 unofficial_napi_buffer_access_read,
+                                 &async_req->buffer_leases[0],
+                                 &managed_data) == napi_ok;
       if (extracted) {
-        hold_value = argv[1];
         async_req->bufs[0] = uv_buf_init(static_cast<char*>(managed_data), length);
-        async_req->managed_buffer_access = true;
       }
-#else
-      extracted = ExtractByteSpanForAsyncIo(
-          env, argc >= 2 ? argv[1] : nullptr, offset, length, &hold_value, &async_req->bufs[0]);
-#endif
       const bool extra_ok = req_kind != ReqKind::kCallback ||
                             argv[1] == nullptr ||
                             napi_create_reference(env, argv[1], 1, &async_req->extra_ref) == napi_ok;
-      if (extracted &&
-          extra_ok &&
-          hold_value != nullptr &&
-          napi_create_reference(env, hold_value, 1, &async_req->hold_refs[0]) == napi_ok) {
+      if (extracted && extra_ok) {
         uv_loop_t* loop = EdgeGetEnvLoop(env);
         const int rc = loop != nullptr
                            ? uv_fs_write(loop,
@@ -3830,19 +3723,12 @@ napi_value FsWriteBuffer(napi_env env, napi_callback_info info) {
         return req_kind == ReqKind::kPromise ? promise : Undefined(env);
       }
 
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-      if (async_req->managed_buffer_access && async_req->bufs[0].base != nullptr) {
-        (void)unofficial_napi_release_buffer_access(env, argv[1], async_req->bufs[0].base, false);
-        async_req->managed_buffer_access = false;
-      }
-#endif
       FinishAsyncFsReq(async_req, UV_EINVAL);
       return req_kind == ReqKind::kPromise ? promise : Undefined(env);
     }
   }
 
   napi_value out = nullptr;
-  napi_value hold_value = nullptr;
   uv_buf_t buf = uv_buf_init(nullptr, 0);
   size_t offset = 0;
   if (argc >= 3 && argv[2] != nullptr) {
@@ -3864,32 +3750,25 @@ napi_value FsWriteBuffer(napi_env env, napi_callback_info info) {
     napi_create_int64(env, 0, &zero);
     return zero != nullptr ? zero : Undefined(env);
   }
-  bool extracted = false;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   void* managed_data = nullptr;
-  extracted = unofficial_napi_acquire_buffer_access(
-                  env,
-                  argv[1],
-                  offset,
-                  length,
-                  unofficial_napi_buffer_access_read,
-                  &managed_data) == napi_ok;
+  unofficial_napi_buffer_lease lease = nullptr;
+  const bool extracted = unofficial_napi_acquire_buffer_lease(
+                             env,
+                             argv[1],
+                             offset,
+                             length,
+                             unofficial_napi_buffer_access_read,
+                             &lease,
+                             &managed_data) == napi_ok;
   if (extracted) {
-    hold_value = argv[1];
     buf = uv_buf_init(static_cast<char*>(managed_data), length);
   }
-#else
-  extracted = ExtractByteSpanForAsyncIo(
-      env, argc >= 2 ? argv[1] : nullptr, offset, length, &hold_value, &buf);
-#endif
   if (!extracted) {
     napi_throw(env, CreateUvExceptionValue(env, UV_EINVAL, "write"));
     return nullptr;
   }
   const bool write_ok = SyncWriteWithUv(env, validated_fd, &buf, 1, position, ctx, &out);
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  (void)unofficial_napi_release_buffer_access(env, argv[1], buf.base, false);
-#endif
+  (void)unofficial_napi_release_buffer_lease(env, lease, false);
   if (!write_ok) {
     return (ctx != nullptr && !IsUndefined(env, ctx)) ? Undefined(env) : nullptr;
   }
@@ -3927,19 +3806,24 @@ napi_value FsWriteString(napi_env env, napi_callback_info info) {
     if (async_req != nullptr) {
       async_req->syscall = "write";
       async_req->result_kind = AsyncFsResultKind::kInt64;
-      async_req->hold_refs = new napi_ref[1]();
-      async_req->hold_ref_count = 1;
       async_req->bufs = new uv_buf_t[1];
       async_req->nbufs = 1;
+      async_req->buffer_leases = new unofficial_napi_buffer_lease[1]();
 
-      napi_value hold_value = nullptr;
       const bool extra_ok = req_kind != ReqKind::kCallback ||
                             argv[1] == nullptr ||
                             napi_create_reference(env, argv[1], 1, &async_req->extra_ref) == napi_ok;
-      if (ExtractByteSpanForAsyncIo(env, buffer, 0, byte_length, &hold_value, &async_req->bufs[0]) &&
-          extra_ok &&
-          hold_value != nullptr &&
-          napi_create_reference(env, hold_value, 1, &async_req->hold_refs[0]) == napi_ok) {
+      void* data = nullptr;
+      const bool extracted = unofficial_napi_acquire_buffer_lease(
+                                 env,
+                                 buffer,
+                                 0,
+                                 byte_length,
+                                 unofficial_napi_buffer_access_read,
+                                 &async_req->buffer_leases[0],
+                                 &data) == napi_ok;
+      if (extracted && extra_ok) {
+        async_req->bufs[0] = uv_buf_init(static_cast<char*>(data), byte_length);
         uv_loop_t* loop = EdgeGetEnvLoop(env);
         const int rc = loop != nullptr
                            ? uv_fs_write(loop,
@@ -3964,14 +3848,24 @@ napi_value FsWriteString(napi_env env, napi_callback_info info) {
     napi_create_int64(env, 0, &out);
     return out != nullptr ? out : Undefined(env);
   }
-  napi_value hold_value = nullptr;
   uv_buf_t buf = uv_buf_init(nullptr, 0);
-  if (!ExtractByteSpanForAsyncIo(env, buffer, 0, byte_length, &hold_value, &buf)) {
+  void* data = nullptr;
+  unofficial_napi_buffer_lease lease = nullptr;
+  if (unofficial_napi_acquire_buffer_lease(env,
+                                           buffer,
+                                           0,
+                                           byte_length,
+                                           unofficial_napi_buffer_access_read,
+                                           &lease,
+                                           &data) != napi_ok) {
     napi_throw(env, CreateUvExceptionValue(env, UV_EINVAL, "write"));
     return nullptr;
   }
+  buf = uv_buf_init(static_cast<char*>(data), byte_length);
   const int64_t position = GetInt64OrDefault(env, argc >= 3 ? argv[2] : nullptr, -1);
-  if (!SyncWriteWithUv(env, validated_fd, &buf, 1, position, ctx, &out)) {
+  const bool write_ok = SyncWriteWithUv(env, validated_fd, &buf, 1, position, ctx, &out);
+  (void)unofficial_napi_release_buffer_lease(env, lease, false);
+  if (!write_ok) {
     return (ctx != nullptr && !IsUndefined(env, ctx)) ? Undefined(env) : nullptr;
   }
   return out;
@@ -4035,13 +3929,9 @@ napi_value FsWriteBuffers(napi_env env, napi_callback_info info) {
     if (async_req != nullptr) {
       async_req->syscall = "write";
       async_req->result_kind = AsyncFsResultKind::kInt64;
-      async_req->hold_refs = new napi_ref[len]();
-      async_req->hold_ref_count = len;
       async_req->bufs = new uv_buf_t[len];
       async_req->nbufs = len;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-      async_req->managed_buffer_access = true;
-#endif
+      async_req->buffer_leases = new unofficial_napi_buffer_lease[len]();
 
       const bool extra_ok = req_kind != ReqKind::kCallback ||
                             argv[1] == nullptr ||
@@ -4053,36 +3943,21 @@ napi_value FsWriteBuffers(napi_env env, napi_callback_info info) {
           ok = false;
           break;
         }
-        napi_value hold_value = nullptr;
         const size_t byte_length = ByteLengthOfValue(env, chunk);
-        bool extracted = false;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
         void* managed_data = nullptr;
-        extracted = unofficial_napi_acquire_buffer_access(
-                        env,
-                        chunk,
-                        0,
-                        byte_length,
-                        unofficial_napi_buffer_access_read,
-                        &managed_data) == napi_ok;
+        const bool extracted = unofficial_napi_acquire_buffer_lease(
+                                   env,
+                                   chunk,
+                                   0,
+                                   byte_length,
+                                   unofficial_napi_buffer_access_read,
+                                   &async_req->buffer_leases[i],
+                                   &managed_data) == napi_ok;
         if (extracted) {
-          hold_value = chunk;
           async_req->bufs[i] =
               uv_buf_init(static_cast<char*>(managed_data), byte_length);
         }
-#else
-        extracted = ExtractByteSpanForAsyncIo(
-            env, chunk, 0, byte_length, &hold_value, &async_req->bufs[i]);
-#endif
-        if (!extracted || hold_value == nullptr ||
-            napi_create_reference(env, hold_value, 1, &async_req->hold_refs[i]) != napi_ok) {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-          if (extracted && async_req->bufs[i].base != nullptr) {
-            (void)unofficial_napi_release_buffer_access(
-                env, chunk, async_req->bufs[i].base, false);
-            async_req->bufs[i].base = nullptr;
-          }
-#endif
+        if (!extracted) {
           ok = false;
           break;
         }
@@ -4108,42 +3983,31 @@ napi_value FsWriteBuffers(napi_env env, napi_callback_info info) {
     }
   }
 
-  std::vector<napi_value> hold_values(len);
   std::vector<uv_buf_t> bufs(len);
-  std::vector<napi_value> chunks(len);
+  std::vector<unofficial_napi_buffer_lease> leases(len);
   for (uint32_t i = 0; i < len; ++i) {
     napi_value chunk = nullptr;
     if (napi_get_element(env, argv[1], i, &chunk) != napi_ok || chunk == nullptr) {
       napi_throw(env, CreateUvExceptionValue(env, UV_EINVAL, "write"));
       return nullptr;
     }
-    chunks[i] = chunk;
     const size_t chunk_len = ByteLengthOfValue(env, chunk);
-    bool extracted = false;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
     void* managed_data = nullptr;
-    extracted = unofficial_napi_acquire_buffer_access(
-                    env,
-                    chunk,
-                    0,
-                    chunk_len,
-                    unofficial_napi_buffer_access_read,
-                    &managed_data) == napi_ok;
+    const bool extracted = unofficial_napi_acquire_buffer_lease(
+                               env,
+                               chunk,
+                               0,
+                               chunk_len,
+                               unofficial_napi_buffer_access_read,
+                               &leases[i],
+                               &managed_data) == napi_ok;
     if (extracted) {
-      hold_values[i] = chunk;
       bufs[i] = uv_buf_init(static_cast<char*>(managed_data), chunk_len);
     }
-#else
-    extracted = ExtractByteSpanForAsyncIo(
-        env, chunk, 0, chunk_len, &hold_values[i], &bufs[i]);
-#endif
     if (!extracted) {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
       for (uint32_t release = 0; release < i; ++release) {
-        (void)unofficial_napi_release_buffer_access(
-            env, chunks[release], bufs[release].base, false);
+        (void)unofficial_napi_release_buffer_lease(env, leases[release], false);
       }
-#endif
       napi_throw(env, CreateUvExceptionValue(env, UV_EINVAL, "write"));
       return nullptr;
     }
@@ -4152,11 +4016,9 @@ napi_value FsWriteBuffers(napi_env env, napi_callback_info info) {
   napi_value out = nullptr;
   const bool write_ok =
       SyncWriteWithUv(env, validated_fd, bufs.data(), bufs.size(), position, nullptr, &out);
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   for (uint32_t i = 0; i < len; ++i) {
-    (void)unofficial_napi_release_buffer_access(env, chunks[i], bufs[i].base, false);
+    (void)unofficial_napi_release_buffer_lease(env, leases[i], false);
   }
-#endif
   if (!write_ok) {
     return nullptr;
   }
