@@ -169,7 +169,7 @@ napi_value GetActiveOwner(napi_env env, void* data) {
 
 bool HasRef(void* data) {
   auto* wrap = static_cast<ProcessWrap*>(data);
-  return wrap != nullptr &&
+  return wrap != nullptr && wrap->alive &&
          EdgeHandleWrapHasRef(&wrap->handle_wrap, reinterpret_cast<const uv_handle_t*>(&wrap->process));
 }
 
