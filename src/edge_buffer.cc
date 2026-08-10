@@ -332,58 +332,40 @@ class ScopedReadBufferRange {
   ScopedReadBufferRange& operator=(const ScopedReadBufferRange&) = delete;
 
   ~ScopedReadBufferRange() {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-    if (managed_) {
-      (void)unofficial_napi_release_buffer_access(
-          env_, value_, access_data_, false);
+    if (lease_ != nullptr) {
+      (void)unofficial_napi_release_buffer_lease(env_, lease_, false);
     }
-#endif
   }
 
   bool Acquire(napi_env env,
                napi_value value,
                size_t byte_offset,
                size_t byte_length) {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
     void* data = nullptr;
-    if (unofficial_napi_acquire_buffer_access(
+    unofficial_napi_buffer_lease lease = nullptr;
+    if (unofficial_napi_acquire_buffer_lease(
             env,
             value,
             byte_offset,
             byte_length,
             unofficial_napi_buffer_access_read,
+            &lease,
             &data) != napi_ok) {
       return false;
     }
     env_ = env;
-    value_ = value;
-    access_data_ = data;
+    lease_ = lease;
     data_ = data != nullptr ? static_cast<const uint8_t*>(data)
                             : ZeroLengthDataSentinel();
-    managed_ = true;
     return true;
-#else
-    uint8_t* data = nullptr;
-    size_t length = 0;
-    if (!ExtractBytesFromValue(env, value, &data, &length) ||
-        byte_offset > length || byte_length > length - byte_offset) {
-      return false;
-    }
-    data_ = data + byte_offset;
-    return true;
-#endif
   }
 
   const uint8_t* data() const { return data_; }
 
  private:
   const uint8_t* data_ = nullptr;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   napi_env env_ = nullptr;
-  napi_value value_ = nullptr;
-  void* access_data_ = nullptr;
-  bool managed_ = false;
-#endif
+  unofficial_napi_buffer_lease lease_ = nullptr;
 };
 
 bool ExtractArrayBufferParts(napi_env env, napi_value value, uint8_t** data, size_t* len) {

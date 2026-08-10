@@ -301,30 +301,30 @@ bool GetBinaryByteLength(napi_env env, napi_value value, size_t* length) {
 
 std::vector<uint8_t> ValueToBytes(napi_env env, napi_value value) {
   std::vector<uint8_t> out;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   size_t byte_length = 0;
   if (GetBinaryByteLength(env, value, &byte_length)) {
     void* data = nullptr;
-    if (unofficial_napi_acquire_buffer_access(env,
-                                              value,
-                                              0,
-                                              byte_length,
-                                              unofficial_napi_buffer_access_read,
-                                              &data) == napi_ok) {
+    unofficial_napi_buffer_lease lease = nullptr;
+    if (unofficial_napi_acquire_buffer_lease(env,
+                                             value,
+                                             0,
+                                             byte_length,
+                                             unofficial_napi_buffer_access_read,
+                                             &lease,
+                                             &data) == napi_ok) {
       if (byte_length == 0) {
-        (void)unofficial_napi_release_buffer_access(env, value, data, false);
+        (void)unofficial_napi_release_buffer_lease(env, lease, false);
         return out;
       }
       if (data != nullptr) {
         const auto* bytes = static_cast<const uint8_t*>(data);
         out.assign(bytes, bytes + byte_length);
-        (void)unofficial_napi_release_buffer_access(env, value, data, false);
+        (void)unofficial_napi_release_buffer_lease(env, lease, false);
         return out;
       }
-      (void)unofficial_napi_release_buffer_access(env, value, data, false);
+      (void)unofficial_napi_release_buffer_lease(env, lease, false);
     }
   }
-#endif
   const uint8_t* span = nullptr;
   size_t span_len = 0;
   if (GetByteSpan(env, value, &span, &span_len)) {

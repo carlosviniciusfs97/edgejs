@@ -1439,76 +1439,14 @@ napi_value EdgeCreateSharedTypedArray(napi_env env,
   if (env == nullptr || data_out == nullptr) return nullptr;
   *data_out = nullptr;
 
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   napi_value direct = nullptr;
   if (unofficial_napi_create_guest_backed_typedarray(
           env, type, length, data_out, &direct) == napi_ok &&
-      direct != nullptr && *data_out != nullptr) {
+      direct != nullptr && (length == 0 || *data_out != nullptr)) {
     return direct;
   }
   *data_out = nullptr;
-#endif
-
-  size_t element_size = 0;
-  switch (type) {
-    case napi_int8_array:
-    case napi_uint8_array:
-    case napi_uint8_clamped_array:
-      element_size = 1;
-      break;
-    case napi_int16_array:
-    case napi_uint16_array:
-    case napi_float16_array:
-      element_size = 2;
-      break;
-    case napi_int32_array:
-    case napi_uint32_array:
-    case napi_float32_array:
-      element_size = 4;
-      break;
-    case napi_float64_array:
-    case napi_bigint64_array:
-    case napi_biguint64_array:
-      element_size = 8;
-      break;
-    default:
-      return nullptr;
-  }
-  if (length > std::numeric_limits<size_t>::max() / element_size) return nullptr;
-
-  napi_value buffer = nullptr;
-  void* data = nullptr;
-  if (napi_create_buffer(env, length * element_size, &data, &buffer) != napi_ok ||
-      buffer == nullptr || data == nullptr) {
-    return nullptr;
-  }
-
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
-  if (napi_get_typedarray_info(env,
-                               buffer,
-                               nullptr,
-                               nullptr,
-                               nullptr,
-                               &arraybuffer,
-                               &byte_offset) != napi_ok ||
-      arraybuffer == nullptr) {
-    return nullptr;
-  }
-
-  napi_value array = nullptr;
-  if (napi_create_typedarray(env,
-                             type,
-                             length,
-                             arraybuffer,
-                             byte_offset,
-                             &array) != napi_ok ||
-      array == nullptr) {
-    return nullptr;
-  }
-
-  *data_out = data;
-  return array;
+  return nullptr;
 }
 
 napi_value EdgeCreateSharedInt32Array(napi_env env,

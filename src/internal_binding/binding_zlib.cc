@@ -77,6 +77,7 @@ struct CompressionError {
 struct ByteSpan {
   uint8_t* data = nullptr;
   size_t len = 0;
+  unofficial_napi_buffer_lease lease = nullptr;
 };
 
 class CompressionContextBase {
@@ -821,10 +822,10 @@ struct CompressionHandle {
   napi_ref wrapper_ref = nullptr;
   napi_ref process_callback_ref = nullptr;
   napi_ref write_result_ref = nullptr;
-  napi_ref input_ref = nullptr;
-  napi_ref output_ref = nullptr;
   void* input_access_data = nullptr;
   void* output_access_data = nullptr;
+  unofficial_napi_buffer_lease input_access_lease = nullptr;
+  unofficial_napi_buffer_lease output_access_lease = nullptr;
   bool input_access_active = false;
   bool output_access_active = false;
   // processChunkSync() continues immediately with the same input whenever the
@@ -834,6 +835,7 @@ struct CompressionHandle {
   // any mismatch, asynchronous write, error, or close releases it.
   napi_ref sync_input_ref = nullptr;
   void* sync_input_access_data = nullptr;
+  unofficial_napi_buffer_lease sync_input_lease = nullptr;
   uint32_t sync_input_base_offset = 0;
   uint32_t sync_input_total_length = 0;
   uint32_t sync_input_next_offset = 0;
@@ -894,12 +896,6 @@ void DeleteRefIfPresent(napi_env env, napi_ref* ref) {
   *ref = nullptr;
 }
 
-void ClearWriteBufferRefs(CompressionHandle* handle) {
-  if (handle == nullptr) return;
-  DeleteRefIfPresent(handle->env, &handle->input_ref);
-  DeleteRefIfPresent(handle->env, &handle->output_ref);
-}
-
 napi_value GetRefValue(napi_env env, napi_ref ref) {
   if (env == nullptr || ref == nullptr) return nullptr;
   napi_value value = nullptr;
@@ -908,33 +904,20 @@ napi_value GetRefValue(napi_env env, napi_ref ref) {
 }
 
 napi_status ReleaseBufferAccess(napi_env env,
-                                napi_value value,
-                                void* data,
+                                unofficial_napi_buffer_lease lease,
                                 bool modified) {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  return unofficial_napi_release_buffer_access(env, value, data, modified);
-#else
-  (void)env;
-  (void)value;
-  (void)data;
-  (void)modified;
-  return napi_ok;
-#endif
+  if (lease == nullptr) return napi_invalid_arg;
+  return unofficial_napi_release_buffer_lease(env, lease, modified);
 }
 
 void ClearSyncInputSnapshot(CompressionHandle* handle) {
   if (handle == nullptr) return;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  if (handle->sync_input_access_data != nullptr) {
-    napi_value input = GetRefValue(handle->env, handle->sync_input_ref);
-    if (input != nullptr) {
-      (void)ReleaseBufferAccess(
-          handle->env, input, handle->sync_input_access_data, false);
-    }
+  if (handle->sync_input_lease != nullptr) {
+    (void)ReleaseBufferAccess(handle->env, handle->sync_input_lease, false);
   }
-#endif
   DeleteRefIfPresent(handle->env, &handle->sync_input_ref);
   handle->sync_input_access_data = nullptr;
+  handle->sync_input_lease = nullptr;
   handle->sync_input_base_offset = 0;
   handle->sync_input_total_length = 0;
   handle->sync_input_next_offset = 0;
@@ -946,10 +929,10 @@ bool ReuseSyncInputSnapshot(CompressionHandle* handle,
                             uint32_t input_offset,
                             uint32_t input_length,
                             ByteSpan* span) {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   if (handle == nullptr || input == nullptr || span == nullptr ||
       handle->sync_input_ref == nullptr ||
       handle->sync_input_access_data == nullptr ||
+      handle->sync_input_lease == nullptr ||
       input_offset != handle->sync_input_next_offset ||
       input_length != handle->sync_input_remaining) {
     return false;
@@ -968,25 +951,18 @@ bool ReuseSyncInputSnapshot(CompressionHandle* handle,
   }
   span->data = static_cast<uint8_t*>(handle->sync_input_access_data) + relative_offset;
   span->len = input_length;
+  span->lease = handle->sync_input_lease;
   return true;
-#else
-  (void)handle;
-  (void)input;
-  (void)input_offset;
-  (void)input_length;
-  (void)span;
-  return false;
-#endif
 }
 
 bool RetainSyncInputSnapshot(CompressionHandle* handle,
                              napi_value input,
-                             void* access_data,
+                             const ByteSpan& access,
                              uint32_t input_offset,
                              uint32_t input_length,
                              uint32_t remaining) {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  if (handle == nullptr || input == nullptr || access_data == nullptr ||
+  if (handle == nullptr || input == nullptr || access.data == nullptr ||
+      access.lease == nullptr ||
       remaining == 0 || remaining > input_length) {
     return false;
   }
@@ -995,21 +971,13 @@ bool RetainSyncInputSnapshot(CompressionHandle* handle,
     handle->sync_input_ref = nullptr;
     return false;
   }
-  handle->sync_input_access_data = access_data;
+  handle->sync_input_access_data = access.data;
+  handle->sync_input_lease = access.lease;
   handle->sync_input_base_offset = input_offset;
   handle->sync_input_total_length = input_length;
   handle->sync_input_next_offset = input_offset + (input_length - remaining);
   handle->sync_input_remaining = remaining;
   return true;
-#else
-  (void)handle;
-  (void)input;
-  (void)access_data;
-  (void)input_offset;
-  (void)input_length;
-  (void)remaining;
-  return false;
-#endif
 }
 
 void AdvanceSyncInputSnapshot(CompressionHandle* handle,
@@ -1023,20 +991,16 @@ void AdvanceSyncInputSnapshot(CompressionHandle* handle,
 void EndWriteBufferAccess(CompressionHandle* handle, bool output_modified) {
   if (handle == nullptr || handle->env == nullptr) return;
   if (handle->input_access_active) {
-    napi_value input = GetRefValue(handle->env, handle->input_ref);
-    if (input != nullptr) {
-      (void)ReleaseBufferAccess(handle->env, input, handle->input_access_data, false);
-    }
+    (void)ReleaseBufferAccess(handle->env, handle->input_access_lease, false);
     handle->input_access_data = nullptr;
+    handle->input_access_lease = nullptr;
     handle->input_access_active = false;
   }
   if (handle->output_access_active) {
-    napi_value output = GetRefValue(handle->env, handle->output_ref);
-    if (output != nullptr) {
-      (void)ReleaseBufferAccess(
-          handle->env, output, handle->output_access_data, output_modified);
-    }
+    (void)ReleaseBufferAccess(
+        handle->env, handle->output_access_lease, output_modified);
     handle->output_access_data = nullptr;
+    handle->output_access_lease = nullptr;
     handle->output_access_active = false;
   }
 }
@@ -1171,25 +1135,16 @@ bool AcquireBufferAccess(napi_env env,
   if (out == nullptr) return false;
   out->data = nullptr;
   out->len = 0;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
   void* data = nullptr;
-  if (unofficial_napi_acquire_buffer_access(
-          env, value, byte_offset, byte_length, mode, &data) != napi_ok) {
+  unofficial_napi_buffer_lease lease = nullptr;
+  if (unofficial_napi_acquire_buffer_lease(
+          env, value, byte_offset, byte_length, mode, &lease, &data) != napi_ok) {
     return false;
   }
   out->data = data != nullptr ? static_cast<uint8_t*>(data) : &g_empty_buffer;
   out->len = byte_length;
+  out->lease = lease;
   return true;
-#else
-  ByteSpan full;
-  if (!ExtractByteSpan(env, value, &full) ||
-      byte_offset > full.len || byte_length > full.len - byte_offset) {
-    return false;
-  }
-  out->data = full.data + byte_offset;
-  out->len = byte_length;
-  return true;
-#endif
 }
 
 bool ExtractBinarySequence(napi_env env,
@@ -1392,7 +1347,6 @@ void CloseHandle(CompressionHandle* handle) {
   }
   ClearSyncInputSnapshot(handle);
   EndWriteBufferAccess(handle, false);
-  ClearWriteBufferRefs(handle);
   DeleteRefIfPresent(handle->env, &handle->write_result_ref);
   ReportExternalMemory(handle);
 }
@@ -1485,7 +1439,6 @@ void CompleteCompressionWork(napi_env env, napi_status status, void* data) {
 
   if (status == napi_cancelled) {
     EndWriteBufferAccess(handle, false);
-    ClearWriteBufferRefs(handle);
     CloseHandle(handle);
     UnpinHandle(handle);
     return;
@@ -1495,7 +1448,6 @@ void CompleteCompressionWork(napi_env env, napi_status status, void* data) {
     const CompressionError err = handle->context->GetErrorInfo();
     if (err.IsError()) {
       EndWriteBufferAccess(handle, true);
-      ClearWriteBufferRefs(handle);
       EmitError(handle, err);
       UnpinHandle(handle);
       return;
@@ -1504,10 +1456,8 @@ void CompleteCompressionWork(napi_env env, napi_status status, void* data) {
 
   EndWriteBufferAccess(handle, true);
   UpdateWriteResult(handle);
-  // The completed operation no longer uses these raw pointers. Release its
-  // references before invoking JavaScript, because the callback may
-  // synchronously queue the next write and install that operation's refs.
-  ClearWriteBufferRefs(handle);
+  // Release the completed operation's leases before invoking JavaScript,
+  // because the callback may synchronously queue the next write.
   InvokeProcessCallback(handle);
 
   if (handle->pending_close) {
@@ -1580,7 +1530,6 @@ void CompressionFinalize(napi_env env, void* data, void* /*hint*/) {
   QueueDestroyIfNeeded(handle);
   DeleteRefIfPresent(env, &handle->write_result_ref);
   DeleteRefIfPresent(env, &handle->process_callback_ref);
-  ClearWriteBufferRefs(handle);
   DeleteRefIfPresent(env, &handle->wrapper_ref);
   delete handle;
 }
@@ -1937,7 +1886,7 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
     if (reused_sync_input) {
       ClearSyncInputSnapshot(handle);
     } else if (!IsNullOrUndefined(env, argv[1])) {
-      (void)ReleaseBufferAccess(env, argv[1], input.data, false);
+      (void)ReleaseBufferAccess(env, input.lease, false);
     }
     return invalid_write();
   }
@@ -1958,9 +1907,9 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
       if (reused_sync_input) {
         ClearSyncInputSnapshot(handle);
       } else if (!IsNullOrUndefined(env, argv[1])) {
-        (void)ReleaseBufferAccess(env, argv[1], input.data, false);
+        (void)ReleaseBufferAccess(env, input.lease, false);
       }
-      (void)ReleaseBufferAccess(env, argv[4], output.data, true);
+      (void)ReleaseBufferAccess(env, output.lease, true);
       EmitError(handle, err);
       return Undefined(env);
     }
@@ -1980,11 +1929,11 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
     } else if (!IsNullOrUndefined(env, argv[1])) {
       if (!continues_with_same_input ||
           !RetainSyncInputSnapshot(
-              handle, argv[1], input.data, in_off, in_len, remaining_input)) {
-        (void)ReleaseBufferAccess(env, argv[1], input.data, false);
+              handle, argv[1], input, in_off, in_len, remaining_input)) {
+        (void)ReleaseBufferAccess(env, input.lease, false);
       }
     }
-    (void)ReleaseBufferAccess(env, argv[4], output.data, true);
+    (void)ReleaseBufferAccess(env, output.lease, true);
     UpdateWriteResult(handle);
     handle->write_in_progress = false;
     if (handle->pending_close) CloseHandle(handle);
@@ -1993,32 +1942,15 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
 
   if (!IsNullOrUndefined(env, argv[1])) {
     handle->input_access_data = input.data;
+    handle->input_access_lease = input.lease;
     handle->input_access_active = true;
   }
   handle->output_access_data = output.data;
+  handle->output_access_lease = output.lease;
   handle->output_access_active = true;
-
-  ClearWriteBufferRefs(handle);
-  if ((!IsNullOrUndefined(env, argv[1]) &&
-       napi_create_reference(env, argv[1], 1, &handle->input_ref) != napi_ok) ||
-      napi_create_reference(env, argv[4], 1, &handle->output_ref) != napi_ok) {
-    if (handle->input_access_active) {
-      (void)ReleaseBufferAccess(env, argv[1], handle->input_access_data, false);
-    }
-    (void)ReleaseBufferAccess(env, argv[4], handle->output_access_data, false);
-    handle->input_access_data = nullptr;
-    handle->output_access_data = nullptr;
-    handle->input_access_active = false;
-    handle->output_access_active = false;
-    ClearWriteBufferRefs(handle);
-    handle->write_in_progress = false;
-    napi_throw_error(env, nullptr, "Failed to retain zlib buffers");
-    return nullptr;
-  }
 
   if (!StartAsyncWork(handle)) {
     EndWriteBufferAccess(handle, false);
-    ClearWriteBufferRefs(handle);
     handle->write_in_progress = false;
     napi_throw_error(env, nullptr, "Failed to queue zlib work");
     return nullptr;

@@ -1106,56 +1106,40 @@ bool GetBufferByteLength(napi_env env, napi_value value, size_t* length) {
 
 class ScopedReadBufferAccess {
  public:
-  ScopedReadBufferAccess(napi_env env, napi_value value) : env_(env), value_(value) {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-    if (!GetBufferByteLength(env_, value_, &length_)) return;
+  ScopedReadBufferAccess(napi_env env, napi_value value) : env_(env) {
+    if (!GetBufferByteLength(env_, value, &length_)) return;
     void* raw = nullptr;
-    if (unofficial_napi_acquire_buffer_access(env_,
-                                              value_,
-                                              0,
-                                              length_,
-                                              unofficial_napi_buffer_access_read,
-                                              &raw) != napi_ok) {
+    if (unofficial_napi_acquire_buffer_lease(env_,
+                                             value,
+                                             0,
+                                             length_,
+                                             unofficial_napi_buffer_access_read,
+                                             &lease_,
+                                             &raw) != napi_ok) {
       length_ = 0;
       return;
     }
-    acquired_data_ = raw;
     data_ = raw != nullptr ? static_cast<uint8_t*>(raw) : &empty_;
-    acquired_ = true;
-#else
-    valid_ = GetBufferBytes(env_, value_, &data_, &length_);
-#endif
   }
 
   ~ScopedReadBufferAccess() {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-    if (acquired_) {
-      (void)unofficial_napi_release_buffer_access(env_, value_, acquired_data_, false);
+    if (lease_ != nullptr) {
+      (void)unofficial_napi_release_buffer_lease(env_, lease_, false);
     }
-#endif
   }
 
   ScopedReadBufferAccess(const ScopedReadBufferAccess&) = delete;
   ScopedReadBufferAccess& operator=(const ScopedReadBufferAccess&) = delete;
 
-  bool valid() const {
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-    return acquired_;
-#else
-    return valid_;
-#endif
-  }
+  bool valid() const { return lease_ != nullptr; }
   uint8_t* data() const { return data_; }
   size_t size() const { return length_; }
 
  private:
   napi_env env_ = nullptr;
-  napi_value value_ = nullptr;
   uint8_t* data_ = nullptr;
   size_t length_ = 0;
-  bool acquired_ = false;
-  bool valid_ = false;
-  void* acquired_data_ = nullptr;
+  unofficial_napi_buffer_lease lease_ = nullptr;
   uint8_t empty_ = 0;
 };
 
