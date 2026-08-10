@@ -49,6 +49,10 @@ Files under `lib/` must remain unchanged.
   release them on completion, cancellation, and teardown; no JavaScript value
   is reconstructed during release. Native and host-JavaScript tests cover sync
   and async exact ranges plus vectored writes.
+- [x] Removed the transitional `acquire_buffer_access` API after the final Edge
+  caller migrated. Environment teardown now discards outstanding leases and
+  returns copied guest allocations through the same environment ownership
+  boundary.
 - [ ] Convert every remaining Edge raw-pointer consumer to the lease API,
   continuing with stream, Buffer, and crypto paths; then remove the
   compatibility access API.
