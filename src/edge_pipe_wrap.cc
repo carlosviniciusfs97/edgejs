@@ -306,7 +306,15 @@ napi_value PipeCtor(napi_env env, napi_callback_info info) {
   wrap->socket_type = socket_type;
   wrap->ipc = socket_type == kPipeIPC;
   uv_loop_t* loop = EdgeGetEnvLoop(env);
-  if (loop == nullptr || uv_pipe_init(loop, &wrap->handle, wrap->ipc ? 1 : 0) != 0) {
+  int libuv_ipc = wrap->ipc ? 1 : 0;
+#if defined(__wasi__)
+  // WASIX currently provides byte-stream pipes but not recvmsg()/SCM_RIGHTS.
+  // libuv's IPC mode switches reads from read() to recvmsg(), which prevents
+  // even ordinary child-process messages from being delivered. Keep Node's
+  // IPC-channel behavior at the JS layer while using a plain WASIX pipe.
+  libuv_ipc = 0;
+#endif
+  if (loop == nullptr || uv_pipe_init(loop, &wrap->handle, libuv_ipc) != 0) {
     delete wrap;
     return EdgeStreamBaseUndefined(env);
   }

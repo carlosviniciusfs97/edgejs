@@ -194,8 +194,7 @@ bool ReadByteSpan(napi_env env, napi_value value, const char** data, size_t* len
 
 bool CreateBufferCopy(napi_env env, const char* data, size_t length, napi_value* out) {
   if (out == nullptr) return false;
-  void* copied = nullptr;
-  return napi_create_buffer_copy(env, length, data, &copied, out) == napi_ok && *out != nullptr;
+  return napi_create_buffer_copy(env, length, data, nullptr, out) == napi_ok && *out != nullptr;
 }
 
 bool CreateStringFromUtf16(napi_env env, const UChar* data, size_t length, napi_value* out) {

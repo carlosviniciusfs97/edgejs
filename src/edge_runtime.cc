@@ -71,6 +71,7 @@
 #include "edge_timers_host.h"
 #include "edge_spawn_sync.h"
 #include "internal_binding/helpers.h"
+#include "internal_binding/binding_initializers.h"
 
 #if defined(EDGE_NAPI_QUICKJS) && defined(EDGE_QUICKJS_WEBASSEMBLY)
 #include "webassembly/edge_wasm.h"
@@ -1639,7 +1640,16 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     if (async_status >= 0) {
       return async_status;
     }
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    if (unofficial_napi_yield_to_host_event_loop(env, true) != napi_ok) {
+      if (error_out != nullptr) {
+        *error_out = "Failed to yield while waiting for the top-level Promise";
+      }
+      return 1;
+    }
+#else
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
   }
 
   int32_t state = 0;
@@ -1863,12 +1873,25 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
         return 1;
       }
     }
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    // The host-JavaScript provider must return to JSPI regularly. A blocking
+    // libuv poll would prevent browser Promise, timer, and worker tasks from
+    // reaching the guest.
+    const bool use_polling_loop = true;
+#else
     const bool use_polling_loop = loop_timeout_ms > 0;
+#endif
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    uv_metrics_t metrics_before{};
+    (void)uv_metrics_info(loop, &metrics_before);
+#endif
     if (use_polling_loop) {
       uv_run(loop, UV_RUN_NOWAIT);
+#if !defined(__wasi__) || defined(EDGE_EMBEDDED_NAPI_PROVIDER)
       if (uv_loop_alive(loop) != 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
+#endif
     } else {
       uv_run(loop, UV_RUN_DEFAULT);
     }
@@ -1881,11 +1904,38 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     // Match Node's embedder loop shape: libuv callbacks and callback scopes
     // own nextTick draining; the loop turn itself only drains platform tasks.
     (void)EdgeRuntimePlatformDrainTasks(env);
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    uv_metrics_t metrics_after{};
+    (void)uv_metrics_info(loop, &metrics_after);
+    const bool has_runnable_work =
+        metrics_after.events != metrics_before.events || uv_backend_timeout(loop) == 0;
+    if (unofficial_napi_yield_to_host_event_loop(env, has_runnable_work) != napi_ok) {
+      if (error_out != nullptr) {
+        *error_out = "Failed to yield to the host event loop";
+      }
+      return 1;
+    }
+    // Host Promise continuations can reenter imported N-API while the guest is
+    // suspended. The provider drains those deferred native callbacks as part
+    // of the yield, and those callbacks may enqueue process.nextTick work (for
+    // example fs callback completion). Give that work the same checkpoint a
+    // normal native callback scope receives before deciding the loop is idle.
+    if (EdgeRunCallbackScopeCheckpoint(env) != napi_ok) {
+      if (error_out != nullptr) {
+        *error_out = "Failed to run the host callback checkpoint";
+      }
+      return 1;
+    }
+#endif
     // Some cross-thread V8 async wakeups, notably Atomics.waitAsync() used by
     // worker messaging, can resolve Promises without a JS callback entering the
     // isolate on that turn. Run a plain microtask checkpoint here so those
     // promises settle without waiting for an unrelated timer or I/O callback.
     napi_status microtask_status = napi_ok;
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    // The host yield above already drains Promise microtasks and the callback
+    // checkpoint. Avoid a second provider scheduling primitive on this turn.
+#else
     {
       edge::HandleScope scope(env);
       if (!scope.is_open()) {
@@ -1894,6 +1944,7 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
         microtask_status = unofficial_napi_process_microtasks(env);
       }
     }
+#endif
     if (microtask_status != napi_ok) {
       if (error_out != nullptr) {
         *error_out = "Failed to process microtasks";
@@ -1913,7 +1964,8 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       break;
     }
 
-    bool more = uv_loop_alive(loop) != 0;
+    bool more = uv_loop_alive(loop) != 0 ||
+                internal_binding::ModuleWrapHasPendingDynamicImports(env);
     if (more) {
       idle_drain_turns = 0;
       continue;
@@ -1928,7 +1980,8 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       if (async_status >= 0) {
         return async_status;
       }
-      if (uv_loop_alive(loop) != 0) {
+      if (uv_loop_alive(loop) != 0 ||
+          internal_binding::ModuleWrapHasPendingDynamicImports(env)) {
         idle_drain_turns = 0;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1945,7 +1998,8 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       return async_status;
     }
 
-    more = uv_loop_alive(loop) != 0;
+    more = uv_loop_alive(loop) != 0 ||
+           internal_binding::ModuleWrapHasPendingDynamicImports(env);
     if (!more) {
       break;
     }

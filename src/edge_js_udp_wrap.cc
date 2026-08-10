@@ -173,8 +173,7 @@ napi_value BuildChunksArray(napi_env env, uv_buf_t* bufs, size_t nbufs) {
   if (napi_create_array_with_length(env, nbufs, &out) != napi_ok || out == nullptr) return nullptr;
   for (size_t i = 0; i < nbufs; ++i) {
     napi_value buffer = nullptr;
-    void* copy = nullptr;
-    if (napi_create_buffer_copy(env, bufs[i].len, bufs[i].base, &copy, &buffer) != napi_ok || buffer == nullptr) {
+    if (napi_create_buffer_copy(env, bufs[i].len, bufs[i].base, nullptr, &buffer) != napi_ok || buffer == nullptr) {
       return nullptr;
     }
     napi_set_element(env, out, static_cast<uint32_t>(i), buffer);

@@ -22,6 +22,7 @@
 #include "uv.h"
 
 #include "edge_environment.h"
+#include "edge_util.h"
 #include "internal_binding/helpers.h"
 #include "../edge_async_wrap.h"
 #include "../edge_handle_scope.h"
@@ -860,17 +861,9 @@ bool CreateTypedArray(napi_env env,
   *out = nullptr;
 
   void* raw = nullptr;
-  napi_value arraybuffer = nullptr;
-  const size_t byte_length = length * sizeof(T);
-  if (napi_create_arraybuffer(env, byte_length, &raw, &arraybuffer) != napi_ok ||
-      arraybuffer == nullptr ||
-      raw == nullptr) {
-    return false;
-  }
-  std::memset(raw, 0, byte_length);
-  if (napi_create_typedarray(env, type, length, arraybuffer, 0, out) != napi_ok || *out == nullptr) {
-    return false;
-  }
+  *out = EdgeCreateSharedTypedArray(env, type, length, &raw);
+  if (*out == nullptr || raw == nullptr) return false;
+  std::memset(raw, 0, length * sizeof(T));
   *data_out = static_cast<T*>(raw);
   return true;
 }
@@ -1417,8 +1410,7 @@ void CompletePendingPing(napi_env env, PendingPing* pending, bool ack, const uin
   napi_value resource = GetRefValue(env, pending->resource_ref);
   napi_value buffer = nullptr;
   if (ack && payload != nullptr) {
-    void* copy = nullptr;
-    napi_create_buffer_copy(env, 8, payload, &copy, &buffer);
+    napi_create_buffer_copy(env, 8, payload, nullptr, &buffer);
   } else {
     buffer = Undefined(env);
   }
@@ -1679,8 +1671,7 @@ int WriteBufferToParent(Http2SessionWrap* session,
   napi_value parent = GetRefValue(session->env, session->parent_handle_ref);
   if (parent == nullptr) return 0;
   napi_value buffer = nullptr;
-  void* copy = nullptr;
-  if (napi_create_buffer_copy(session->env, len, data, &copy, &buffer) != napi_ok || buffer == nullptr) {
+  if (napi_create_buffer_copy(session->env, len, data, nullptr, &buffer) != napi_ok || buffer == nullptr) {
     return UV_ENOMEM;
   }
   if (session->parent_stream_base != nullptr) {
@@ -1717,8 +1708,7 @@ int WriteChunksToParent(Http2SessionWrap* session, napi_value req_obj, bool* asy
   uint32_t index = 0;
   for (const std::vector<uint8_t>& chunk : session->pending_parent_write_chunks) {
     napi_value buffer = nullptr;
-    void* copy = nullptr;
-    if (napi_create_buffer_copy(session->env, chunk.size(), chunk.data(), &copy, &buffer) != napi_ok ||
+    if (napi_create_buffer_copy(session->env, chunk.size(), chunk.data(), nullptr, &buffer) != napi_ok ||
         buffer == nullptr ||
         napi_set_element(session->env, chunks, index++, buffer) != napi_ok) {
       return UV_ENOMEM;
@@ -2824,11 +2814,10 @@ int OnFrameRecv(nghttp2_session*, const nghttp2_frame* frame, void* user_data) {
           break;
         }
         napi_value buffer = nullptr;
-        void* copy = nullptr;
         napi_create_buffer_copy(session->env,
                                 sizeof(frame->ping.opaque_data),
                                 frame->ping.opaque_data,
-                                &copy,
+                                nullptr,
                                 &buffer);
         napi_value argv[1] = {buffer};
         (void)CallCallbackRef(session->env, state->callback_refs[kCallbackPing], session->async_id, session_obj, 1, argv);
@@ -2837,11 +2826,10 @@ int OnFrameRecv(nghttp2_session*, const nghttp2_frame* frame, void* user_data) {
     }
     case NGHTTP2_GOAWAY: {
       napi_value buffer = nullptr;
-      void* copy = nullptr;
       napi_create_buffer_copy(session->env,
                               frame->goaway.opaque_data_len,
                               frame->goaway.opaque_data,
-                              &copy,
+                              nullptr,
                               &buffer);
       napi_value argv[3] = {nullptr, nullptr, buffer};
       napi_create_uint32(session->env, frame->goaway.error_code, &argv[0]);
@@ -4052,28 +4040,15 @@ napi_value SessionCtor(napi_env env, napi_callback_info info) {
   EdgeAsyncWrapEmitInitString(env, wrap->async_id, "HTTP2SESSION", EdgeAsyncWrapExecutionAsyncId(env), self);
 
   void* fields_data = nullptr;
-  napi_value fields_ab = nullptr;
-  if (napi_create_arraybuffer(env, kSessionUint8FieldCount, &fields_data, &fields_ab) != napi_ok ||
-      fields_ab == nullptr ||
-      fields_data == nullptr) {
-    return nullptr;
-  }
+  napi_value fields_ta = EdgeCreateSharedTypedArray(
+      env, napi_uint8_array, kSessionUint8FieldCount, &fields_data);
+  if (fields_ta == nullptr || fields_data == nullptr) return nullptr;
   std::memset(fields_data, 0, kSessionUint8FieldCount);
   auto* fields = static_cast<SessionJSFields*>(fields_data);
   fields->max_invalid_frames = 1000;
   fields->max_rejected_streams = 100;
   wrap->fields = fields;
 
-  napi_value fields_ta = nullptr;
-  if (napi_create_typedarray(env,
-                             napi_uint8_array,
-                             kSessionUint8FieldCount,
-                             fields_ab,
-                             0,
-                             &fields_ta) != napi_ok ||
-      fields_ta == nullptr) {
-    return nullptr;
-  }
   (void)napi_create_reference(env, fields_ta, 1, &wrap->fields_ref);
   (void)napi_set_named_property(env, self, "ondone", Undefined(env));
   (void)napi_set_named_property(env, self, "ongracefulclosecomplete", Undefined(env));
@@ -4150,8 +4125,7 @@ napi_value PackSettingsCallback(napi_env env, napi_callback_info /*info*/) {
   }
 
   napi_value out = nullptr;
-  void* copy = nullptr;
-  if (napi_create_buffer_copy(env, payload.size(), payload.data(), &copy, &out) != napi_ok || out == nullptr) {
+  if (napi_create_buffer_copy(env, payload.size(), payload.data(), nullptr, &out) != napi_ok || out == nullptr) {
     return Undefined(env);
   }
   return out;

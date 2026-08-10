@@ -43,6 +43,7 @@
 #include "crypto/edge_crypto_binding.h"
 #include "internal_binding/helpers.h"
 #include "edge_environment.h"
+#include "unofficial_napi.h"
 #include "crypto/edge_secure_context_bridge.h"
 #include "edge_async_wrap.h"
 #include "edge_handle_scope.h"
@@ -250,8 +251,80 @@ bool GetByteSpan(napi_env env, napi_value value, const uint8_t** data, size_t* l
   return false;
 }
 
+bool GetBinaryByteLength(napi_env env, napi_value value, size_t* length) {
+  if (value == nullptr || length == nullptr) return false;
+  *length = 0;
+
+  bool matches = false;
+  if (napi_is_buffer(env, value, &matches) == napi_ok && matches) {
+    return napi_get_buffer_info(env, value, nullptr, length) == napi_ok;
+  }
+  if (napi_is_typedarray(env, value, &matches) == napi_ok && matches) {
+    napi_typedarray_type type = napi_uint8_array;
+    size_t elements = 0;
+    if (napi_get_typedarray_info(
+            env, value, &type, &elements, nullptr, nullptr, nullptr) != napi_ok) {
+      return false;
+    }
+    size_t element_size = 1;
+    switch (type) {
+      case napi_int16_array:
+      case napi_uint16_array:
+      case napi_float16_array:
+        element_size = 2;
+        break;
+      case napi_int32_array:
+      case napi_uint32_array:
+      case napi_float32_array:
+        element_size = 4;
+        break;
+      case napi_float64_array:
+      case napi_bigint64_array:
+      case napi_biguint64_array:
+        element_size = 8;
+        break;
+      default:
+        break;
+    }
+    if (elements > std::numeric_limits<size_t>::max() / element_size) return false;
+    *length = elements * element_size;
+    return true;
+  }
+  if (napi_is_dataview(env, value, &matches) == napi_ok && matches) {
+    return napi_get_dataview_info(env, value, length, nullptr, nullptr, nullptr) == napi_ok;
+  }
+  if (napi_is_arraybuffer(env, value, &matches) == napi_ok && matches) {
+    return napi_get_arraybuffer_info(env, value, nullptr, length) == napi_ok;
+  }
+  return false;
+}
+
 std::vector<uint8_t> ValueToBytes(napi_env env, napi_value value) {
   std::vector<uint8_t> out;
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+  size_t byte_length = 0;
+  if (GetBinaryByteLength(env, value, &byte_length)) {
+    void* data = nullptr;
+    if (unofficial_napi_acquire_buffer_access(env,
+                                              value,
+                                              0,
+                                              byte_length,
+                                              unofficial_napi_buffer_access_read,
+                                              &data) == napi_ok) {
+      if (byte_length == 0) {
+        (void)unofficial_napi_release_buffer_access(env, value, data, false);
+        return out;
+      }
+      if (data != nullptr) {
+        const auto* bytes = static_cast<const uint8_t*>(data);
+        out.assign(bytes, bytes + byte_length);
+        (void)unofficial_napi_release_buffer_access(env, value, data, false);
+        return out;
+      }
+      (void)unofficial_napi_release_buffer_access(env, value, data, false);
+    }
+  }
+#endif
   const uint8_t* span = nullptr;
   size_t span_len = 0;
   if (GetByteSpan(env, value, &span, &span_len)) {
@@ -323,8 +396,7 @@ std::vector<uint8_t> ValueToBytesWithEncoding(napi_env env, napi_value value, na
 
 napi_value BytesToBuffer(napi_env env, const std::vector<uint8_t>& data) {
   napi_value out = nullptr;
-  void* copied = nullptr;
-  if (napi_create_buffer_copy(env, data.size(), data.empty() ? nullptr : data.data(), &copied, &out) != napi_ok ||
+  if (napi_create_buffer_copy(env, data.size(), data.empty() ? nullptr : data.data(), nullptr, &out) != napi_ok ||
       out == nullptr) {
     return Undefined(env);
   }

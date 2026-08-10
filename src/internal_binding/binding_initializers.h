@@ -24,6 +24,7 @@ napi_value InitInternalOnlyV8(napi_env env);
 napi_value InitMessaging(napi_env env);
 napi_value InitMksnapshot(napi_env env);
 napi_value InitModuleWrap(napi_env env);
+bool ModuleWrapHasPendingDynamicImports(napi_env env);
 napi_value InitPerformance(napi_env env);
 napi_value InitPermission(napi_env env);
 napi_value InitSea(napi_env env);

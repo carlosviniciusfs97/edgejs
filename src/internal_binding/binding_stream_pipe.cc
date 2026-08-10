@@ -246,8 +246,7 @@ bool MakeBufferFromOwnedBytes(napi_env env, char* data, size_t len, napi_value* 
     return true;
   }
 
-  void* copy = nullptr;
-  if (napi_create_buffer_copy(env, len, data, &copy, out) == napi_ok && *out != nullptr) {
+  if (napi_create_buffer_copy(env, len, data, nullptr, out) == napi_ok && *out != nullptr) {
     free(data);
     return true;
   }

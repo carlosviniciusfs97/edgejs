@@ -4414,17 +4414,11 @@ static napi_value TraceEventsGetCategoryBuffer(napi_env env, TraceEventsBindingS
     }
   }
 
-  napi_value ab = nullptr;
   void* data = nullptr;
-  if (napi_create_arraybuffer(env, sizeof(uint8_t), &data, &ab) != napi_ok || ab == nullptr || data == nullptr) {
-    return nullptr;
-  }
+  napi_value ta = EdgeCreateSharedTypedArray(
+      env, napi_uint8_array, 1, &data);
+  if (ta == nullptr || data == nullptr) return nullptr;
   static_cast<uint8_t*>(data)[0] = TraceEventsIsEnabled(st, category) ? 1 : 0;
-
-  napi_value ta = nullptr;
-  if (napi_create_typedarray(env, napi_uint8_array, 1, ab, 0, &ta) != napi_ok || ta == nullptr) {
-    return nullptr;
-  }
 
   TraceEventsBindingState::CategoryBufferState buffer_state;
   buffer_state.data = static_cast<uint8_t*>(data);

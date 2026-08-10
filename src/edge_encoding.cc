@@ -529,19 +529,14 @@ napi_value EdgeInstallEncodingBinding(napi_env env) {
 
   napi_value arraybuffer = nullptr;
   napi_value encode_into_results = nullptr;
-  void* raw_results = nullptr;
-  if (napi_create_arraybuffer(env, sizeof(uint32_t) * 2, &raw_results, &arraybuffer) != napi_ok ||
-      arraybuffer == nullptr || raw_results == nullptr ||
+  if (napi_create_arraybuffer(env, sizeof(uint32_t) * 2, nullptr, &arraybuffer) != napi_ok ||
+      arraybuffer == nullptr ||
       napi_create_typedarray(env, napi_uint32_array, 2, arraybuffer, 0, &encode_into_results) != napi_ok ||
       encode_into_results == nullptr ||
       napi_set_named_property(env, binding, "encodeIntoResults", encode_into_results) != napi_ok ||
       napi_create_reference(env, encode_into_results, 1, &state->encode_into_results_ref) != napi_ok ||
       state->encode_into_results_ref == nullptr) {
     ok = false;
-  } else {
-    auto* results = static_cast<uint32_t*>(raw_results);
-    results[0] = 0;
-    results[1] = 0;
   }
 
   if (ok) {

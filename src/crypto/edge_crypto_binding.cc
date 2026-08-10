@@ -2,6 +2,7 @@
 #include "crypto/edge_secure_context_bridge.h"
 #include "edge_environment.h"
 #include "edge_option_helpers.h"
+#include "unofficial_napi.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1054,8 +1055,7 @@ X509_CRL* ParseX509Crl(const uint8_t* data, size_t len);
 
 napi_value CreateBufferCopy(napi_env env, const uint8_t* data, size_t len) {
   napi_value out = nullptr;
-  void* copied = nullptr;
-  if (napi_create_buffer_copy(env, len, len > 0 ? data : nullptr, &copied, &out) != napi_ok || out == nullptr) {
+  if (napi_create_buffer_copy(env, len, len > 0 ? data : nullptr, nullptr, &out) != napi_ok || out == nullptr) {
     return nullptr;
   }
   return out;
@@ -1075,14 +1075,97 @@ napi_value CreateX509DerBuffer(napi_env env, X509* cert) {
   return CreateBufferCopy(env, out.data(), out.size());
 }
 
+bool GetBufferByteLength(napi_env env, napi_value value, size_t* length) {
+  if (env == nullptr || value == nullptr || length == nullptr) return false;
+  *length = 0;
+
+  bool matches = false;
+  if (napi_is_buffer(env, value, &matches) == napi_ok && matches) {
+    return napi_get_buffer_info(env, value, nullptr, length) == napi_ok;
+  }
+  if (napi_is_arraybuffer(env, value, &matches) == napi_ok && matches) {
+    return napi_get_arraybuffer_info(env, value, nullptr, length) == napi_ok;
+  }
+  if (napi_is_typedarray(env, value, &matches) == napi_ok && matches) {
+    napi_typedarray_type type = napi_uint8_array;
+    size_t elements = 0;
+    if (napi_get_typedarray_info(
+            env, value, &type, &elements, nullptr, nullptr, nullptr) != napi_ok) {
+      return false;
+    }
+    const size_t element_size = TypedArrayBytesPerElement(type);
+    if (elements > std::numeric_limits<size_t>::max() / element_size) return false;
+    *length = elements * element_size;
+    return true;
+  }
+  if (napi_is_dataview(env, value, &matches) == napi_ok && matches) {
+    return napi_get_dataview_info(env, value, length, nullptr, nullptr, nullptr) == napi_ok;
+  }
+  return false;
+}
+
+class ScopedReadBufferAccess {
+ public:
+  ScopedReadBufferAccess(napi_env env, napi_value value) : env_(env), value_(value) {
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    if (!GetBufferByteLength(env_, value_, &length_)) return;
+    void* raw = nullptr;
+    if (unofficial_napi_acquire_buffer_access(env_,
+                                              value_,
+                                              0,
+                                              length_,
+                                              unofficial_napi_buffer_access_read,
+                                              &raw) != napi_ok) {
+      length_ = 0;
+      return;
+    }
+    acquired_data_ = raw;
+    data_ = raw != nullptr ? static_cast<uint8_t*>(raw) : &empty_;
+    acquired_ = true;
+#else
+    valid_ = GetBufferBytes(env_, value_, &data_, &length_);
+#endif
+  }
+
+  ~ScopedReadBufferAccess() {
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    if (acquired_) {
+      (void)unofficial_napi_release_buffer_access(env_, value_, acquired_data_, false);
+    }
+#endif
+  }
+
+  ScopedReadBufferAccess(const ScopedReadBufferAccess&) = delete;
+  ScopedReadBufferAccess& operator=(const ScopedReadBufferAccess&) = delete;
+
+  bool valid() const {
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    return acquired_;
+#else
+    return valid_;
+#endif
+  }
+  uint8_t* data() const { return data_; }
+  size_t size() const { return length_; }
+
+ private:
+  napi_env env_ = nullptr;
+  napi_value value_ = nullptr;
+  uint8_t* data_ = nullptr;
+  size_t length_ = 0;
+  bool acquired_ = false;
+  bool valid_ = false;
+  void* acquired_data_ = nullptr;
+  uint8_t empty_ = 0;
+};
+
 napi_value CryptoHashOneShot(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2] = {nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 2) return nullptr;
   const std::string algo = ValueToUtf8(env, argv[0]);
-  uint8_t* in = nullptr;
-  size_t in_len = 0;
-  if (!GetBufferBytes(env, argv[1], &in, &in_len)) {
+  ScopedReadBufferAccess input(env, argv[1]);
+  if (!input.valid()) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "hash data must be a Buffer");
     return nullptr;
   }
@@ -1091,7 +1174,7 @@ napi_value CryptoHashOneShot(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_CRYPTO_HASH_UNKNOWN", "Unknown hash");
     return nullptr;
   }
-  auto out = ncrypto::hashDigest({in, in_len}, md.get());
+  auto out = ncrypto::hashDigest({input.data(), input.size()}, md.get());
   if (!out) {
     const std::string canonical = CanonicalizeDigestName(algo);
     size_t default_xof_len = 0;
@@ -1101,7 +1184,7 @@ napi_value CryptoHashOneShot(napi_env env, napi_callback_info info) {
       default_xof_len = 32;
     }
     if (default_xof_len > 0) {
-      out = ncrypto::xofHashDigest({in, in_len}, md.get(), default_xof_len);
+      out = ncrypto::xofHashDigest({input.data(), input.size()}, md.get(), default_xof_len);
     }
   }
   if (!out) {
@@ -1116,9 +1199,8 @@ napi_value CryptoHashOneShotXof(napi_env env, napi_callback_info info) {
   napi_value argv[3] = {nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 3) return nullptr;
   const std::string algo = ValueToUtf8(env, argv[0]);
-  uint8_t* in = nullptr;
-  size_t in_len = 0;
-  if (!GetBufferBytes(env, argv[1], &in, &in_len)) {
+  ScopedReadBufferAccess input(env, argv[1]);
+  if (!input.valid()) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "hash data must be a Buffer");
     return nullptr;
   }
@@ -1142,7 +1224,7 @@ napi_value CryptoHashOneShotXof(napi_env env, napi_callback_info info) {
       ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", message.c_str());
       return nullptr;
     }
-    auto out = ncrypto::hashDigest({in, in_len}, md.get());
+    auto out = ncrypto::hashDigest({input.data(), input.size()}, md.get());
     if (!out) {
       ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "Hash operation failed");
       return nullptr;
@@ -1153,7 +1235,8 @@ napi_value CryptoHashOneShotXof(napi_env env, napi_callback_info info) {
     return CreateBufferCopy(env, nullptr, 0);
   }
 
-  auto out = ncrypto::xofHashDigest({in, in_len}, md.get(), static_cast<size_t>(out_len_i32));
+  auto out = ncrypto::xofHashDigest(
+      {input.data(), input.size()}, md.get(), static_cast<size_t>(out_len_i32));
   if (!out) {
     ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "Hash operation failed");
     return nullptr;
@@ -1166,11 +1249,9 @@ napi_value CryptoHmacOneShot(napi_env env, napi_callback_info info) {
   napi_value argv[3] = {nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 3) return nullptr;
   const std::string algo = ValueToUtf8(env, argv[0]);
-  uint8_t* key = nullptr;
-  size_t key_len = 0;
-  uint8_t* in = nullptr;
-  size_t in_len = 0;
-  if (!GetBufferBytes(env, argv[1], &key, &key_len) || !GetBufferBytes(env, argv[2], &in, &in_len)) {
+  ScopedReadBufferAccess key(env, argv[1]);
+  ScopedReadBufferAccess input(env, argv[2]);
+  if (!key.valid() || !input.valid()) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "hmac key/data must be Buffers");
     return nullptr;
   }
@@ -1181,7 +1262,8 @@ napi_value CryptoHmacOneShot(napi_env env, napi_callback_info info) {
     return nullptr;
   }
   auto hmac = ncrypto::HMACCtxPointer::New();
-  if (!hmac || !hmac.init({key, key_len}, md) || !hmac.update({in, in_len})) {
+  if (!hmac || !hmac.init({key.data(), key.size()}, md) ||
+      !hmac.update({input.data(), input.size()})) {
     ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "HMAC operation failed");
     return nullptr;
   }

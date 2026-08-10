@@ -78,6 +78,8 @@ struct MessagePort {
   int64_t async_id = 0;
   bool closing_has_ref = false;
   bool receiving_messages = false;
+  bool keep_alive_until_first_message = false;
+  bool unref_after_first_message = false;
 };
 
 using MessagePortWrap = MessagePort;
@@ -3515,6 +3517,11 @@ void ProcessQueuedMessages(MessagePortWrap* wrap, bool force, size_t processing_
       }
       if (message_error == nullptr) {
         DeleteTransferredPortRefs(wrap->handle_wrap.env, &next.transferred_ports);
+        wrap->keep_alive_until_first_message = false;
+        if (wrap->unref_after_first_message) {
+          wrap->unref_after_first_message = false;
+          uv_unref(reinterpret_cast<uv_handle_t*>(&wrap->async));
+        }
         EmitMessageToPort(wrap->handle_wrap.env,
                           self,
                           payload != nullptr ? payload : Undefined(wrap->handle_wrap.env),
@@ -4010,6 +4017,7 @@ napi_value MessagePortRefCallback(napi_env env, napi_callback_info info) {
   MessagePortWrap* wrap = UnwrapMessagePortThisOrThrow(env, this_arg);
   if (wrap == nullptr) return nullptr;
   if (wrap != nullptr && wrap->handle_wrap.state == kEdgeHandleInitialized) {
+    wrap->unref_after_first_message = false;
     uv_ref(reinterpret_cast<uv_handle_t*>(&wrap->async));
   }
   return Undefined(env);
@@ -4023,7 +4031,11 @@ napi_value MessagePortUnrefCallback(napi_env env, napi_callback_info info) {
   MessagePortWrap* wrap = UnwrapMessagePortThisOrThrow(env, this_arg);
   if (wrap == nullptr) return nullptr;
   if (wrap != nullptr && wrap->handle_wrap.state == kEdgeHandleInitialized) {
-    uv_unref(reinterpret_cast<uv_handle_t*>(&wrap->async));
+    if (wrap->keep_alive_until_first_message) {
+      wrap->unref_after_first_message = true;
+    } else {
+      uv_unref(reinterpret_cast<uv_handle_t*>(&wrap->async));
+    }
   }
   return Undefined(env);
 }
@@ -4913,6 +4925,13 @@ napi_value EdgeCreateMessagePortForData(napi_env env, const EdgeMessagePortDataP
     TriggerPortAsync(wrap);
   }
   return port;
+}
+
+void EdgeKeepMessagePortAliveUntilFirstMessage(napi_env env, napi_value value) {
+  MessagePortWrap* wrap = UnwrapMessagePort(env, value);
+  if (wrap == nullptr || wrap->handle_wrap.state != kEdgeHandleInitialized) return;
+  wrap->keep_alive_until_first_message = true;
+  uv_ref(reinterpret_cast<uv_handle_t*>(&wrap->async));
 }
 
 void EdgeCloseMessagePortForValue(napi_env env, napi_value value) {

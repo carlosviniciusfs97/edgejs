@@ -149,9 +149,8 @@ napi_value BuildWriteArray(napi_env env, const std::vector<std::vector<uint8_t>>
   if (napi_create_array_with_length(env, chunks.size(), &array) != napi_ok || array == nullptr) return nullptr;
   for (size_t i = 0; i < chunks.size(); ++i) {
     napi_value buffer = nullptr;
-    void* out = nullptr;
     const auto& chunk = chunks[i];
-    if (napi_create_buffer_copy(env, chunk.size(), chunk.data(), &out, &buffer) != napi_ok || buffer == nullptr) {
+    if (napi_create_buffer_copy(env, chunk.size(), chunk.data(), nullptr, &buffer) != napi_ok || buffer == nullptr) {
       return nullptr;
     }
     napi_set_element(env, array, static_cast<uint32_t>(i), buffer);

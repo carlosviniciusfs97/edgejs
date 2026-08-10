@@ -33,6 +33,7 @@ duplicating issue details.
 | ▶️ | Medium | [011_quickjs_wasix_atomics_patch.md](node-compat/napi/011_quickjs_wasix_atomics_patch.md) | QuickJS WASIX atomics guard patch |
 | 🟠 | Medium | [013_v8_shaped_callsite_methods.md](node-compat/napi/013_v8_shaped_callsite_methods.md) | V8-shaped CallSite methods |
 | 🟠 | Medium | [014_lifetime_tracing.md](node-compat/napi/014_lifetime_tracing.md) | QuickJS N-API lifetime tracing |
+| 🟢 | High | [020_imported_napi_browser_pnpm_terminal_loss.md](node-compat/napi/020_imported_napi_browser_pnpm_terminal_loss.md) | Browser pnpm terminal loss |
 | 🟠 | Medium | [003_minimal_intl_fallback.md](node-compat/edgejs/003_minimal_intl_fallback.md) | Minimal `Intl.DateTimeFormat` fallback |
 | 🟠 | Medium | [004_native_inspector_stub.md](node-compat/edgejs/004_native_inspector_stub.md) | Native unavailable `inspector` stub |
 | 🟠 | High | [010_stream_wrapper_unwrap_fallback.md](node-compat/edgejs/010_stream_wrapper_unwrap_fallback.md) | Stream wrapper unwrap fallback |

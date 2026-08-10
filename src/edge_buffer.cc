@@ -15,7 +15,9 @@
 #include "edge_environment.h"
 #include "edge_encoding_ids.h"
 #include "edge_runtime.h"
+#include "edge_util.h"
 #include "simdutf.h"
+#include "unofficial_napi.h"
 
 namespace {
 using edge::encoding_ids::kEncAscii;
@@ -95,18 +97,11 @@ napi_value GetZeroFillToggleValue(napi_env env) {
   }
 
   void* data = nullptr;
-  napi_value ab = nullptr;
-  if (napi_create_arraybuffer(env, sizeof(uint32_t), &data, &ab) != napi_ok || ab == nullptr || data == nullptr) {
-    return nullptr;
-  }
+  napi_value ta = EdgeCreateSharedTypedArray(
+      env, napi_uint32_array, 1, &data);
+  if (ta == nullptr || data == nullptr) return nullptr;
   state.zero_fill_toggle_data = static_cast<uint32_t*>(data);
   state.zero_fill_toggle_data[0] = DefaultZeroFillBuffersEnabled() ? 1U : 0U;
-
-  napi_value ta = nullptr;
-  if (napi_create_typedarray(env, napi_uint32_array, 1, ab, 0, &ta) != napi_ok || ta == nullptr) {
-    state.zero_fill_toggle_data = nullptr;
-    return nullptr;
-  }
   if (napi_create_reference(env, ta, 1, &state.zero_fill_toggle_ref) != napi_ok) {
     state.zero_fill_toggle_ref = nullptr;
     state.zero_fill_toggle_data = nullptr;
@@ -278,6 +273,118 @@ bool ExtractBytesFromValue(napi_env env, napi_value value, uint8_t** data, size_
 
   return false;
 }
+
+size_t TypedArrayElementSize(napi_typedarray_type type) {
+  switch (type) {
+    case napi_int16_array:
+    case napi_uint16_array:
+    case napi_float16_array:
+      return 2;
+    case napi_int32_array:
+    case napi_uint32_array:
+    case napi_float32_array:
+      return 4;
+    case napi_float64_array:
+    case napi_bigint64_array:
+    case napi_biguint64_array:
+      return 8;
+    default:
+      return 1;
+  }
+}
+
+bool ByteLengthOfBinaryValue(napi_env env, napi_value value, size_t* length_out) {
+  if (env == nullptr || value == nullptr || length_out == nullptr) return false;
+  *length_out = 0;
+
+  bool is_buffer = false;
+  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
+    return napi_get_buffer_info(env, value, nullptr, length_out) == napi_ok;
+  }
+
+  bool is_typedarray = false;
+  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
+    napi_typedarray_type type = napi_uint8_array;
+    size_t element_length = 0;
+    if (napi_get_typedarray_info(
+            env, value, &type, &element_length, nullptr, nullptr, nullptr) != napi_ok) {
+      return false;
+    }
+    *length_out = element_length * TypedArrayElementSize(type);
+    return true;
+  }
+
+  bool is_dataview = false;
+  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
+    return napi_get_dataview_info(env, value, length_out, nullptr, nullptr, nullptr) == napi_ok;
+  }
+
+  bool is_arraybuffer = false;
+  return napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok &&
+         is_arraybuffer &&
+         napi_get_arraybuffer_info(env, value, nullptr, length_out) == napi_ok;
+}
+
+class ScopedReadBufferRange {
+ public:
+  ScopedReadBufferRange() = default;
+  ScopedReadBufferRange(const ScopedReadBufferRange&) = delete;
+  ScopedReadBufferRange& operator=(const ScopedReadBufferRange&) = delete;
+
+  ~ScopedReadBufferRange() {
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    if (managed_) {
+      (void)unofficial_napi_release_buffer_access(
+          env_, value_, access_data_, false);
+    }
+#endif
+  }
+
+  bool Acquire(napi_env env,
+               napi_value value,
+               size_t byte_offset,
+               size_t byte_length) {
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+    void* data = nullptr;
+    if (unofficial_napi_acquire_buffer_access(
+            env,
+            value,
+            byte_offset,
+            byte_length,
+            unofficial_napi_buffer_access_read,
+            &data) != napi_ok) {
+      return false;
+    }
+    env_ = env;
+    value_ = value;
+    access_data_ = data;
+    data_ = data != nullptr ? static_cast<const uint8_t*>(data)
+                            : ZeroLengthDataSentinel();
+    managed_ = true;
+    return true;
+#else
+    uint8_t* data = nullptr;
+    size_t length = 0;
+    if (!ExtractBytesFromValue(env, value, &data, &length) ||
+        byte_offset > length || byte_length > length - byte_offset) {
+      return false;
+    }
+    data_ = data + byte_offset;
+    return true;
+#endif
+  }
+
+  const uint8_t* data() const { return data_; }
+
+ private:
+  const uint8_t* data_ = nullptr;
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+  napi_env env_ = nullptr;
+  napi_value value_ = nullptr;
+  void* access_data_ = nullptr;
+  bool managed_ = false;
+#endif
+};
 
 bool ExtractArrayBufferParts(napi_env env, napi_value value, uint8_t** data, size_t* len) {
   if (value == nullptr || data == nullptr || len == nullptr) return false;
@@ -996,16 +1103,14 @@ napi_value SliceByEncoding(napi_env env, napi_callback_info info, int32_t enc) {
   size_t argc = 3;
   napi_value argv[3] = {nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 3) return nullptr;
-  uint8_t* data = nullptr;
   size_t len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &data, &len)) return MakeStringUtf8(env, "");
+  if (!ByteLengthOfBinaryValue(env, argv[0], &len)) return MakeStringUtf8(env, "");
   int32_t start = 0;
   int32_t end = static_cast<int32_t>(len);
   GetInt32(env, argv[1], &start);
   GetInt32(env, argv[2], &end);
   start = std::max<int32_t>(0, std::min<int32_t>(start, static_cast<int32_t>(len)));
   end = std::max<int32_t>(start, std::min<int32_t>(end, static_cast<int32_t>(len)));
-  const uint8_t* p = data + start;
   const size_t n = static_cast<size_t>(end - start);
 
   if ((enc == kEncUtf8 || enc == kEncAscii || enc == kEncLatin1) && n > kEdgeStringMaxLength) {
@@ -1022,6 +1127,12 @@ napi_value SliceByEncoding(napi_env env, napi_callback_info info, int32_t enc) {
     napi_throw_error(env, "ERR_STRING_TOO_LONG", message.c_str());
     return nullptr;
   }
+
+  ScopedReadBufferRange range;
+  if (!range.Acquire(env, argv[0], static_cast<size_t>(start), n)) {
+    return MakeStringUtf8(env, "");
+  }
+  const uint8_t* p = range.data();
 
   if (enc == kEncHex) return MakeStringUtf8(env, HexSlice(p, n));
   if (enc == kEncBase64 || enc == kEncBase64Url) {
@@ -1134,6 +1245,25 @@ napi_value BindingCreateUnsafeArrayBuffer(napi_env env, napi_callback_info info)
   }
 
   const size_t size = static_cast<size_t>(std::trunc(size_double));
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+  // The imported host-JavaScript provider cannot expose a sliced wasm-memory
+  // allocation as an ArrayBuffer: WebAssembly.Memory only exposes its entire
+  // backing buffer. Creating an "external" ArrayBuffer here therefore creates
+  // two backing stores which must remain mirrored for the lifetime of every
+  // Buffer.allocUnsafe() result.
+  //
+  // This binding never retains or reads the allocation pointer; ownership is
+  // transferred immediately to JavaScript. Create the ArrayBuffer in its real
+  // owner instead, and let native consumers request a scoped guest range when
+  // they actually need one. Passing a null data result also avoids manufacturing
+  // a standard N-API raw pointer whose lifetime we cannot represent zero-copy.
+  napi_value ab = nullptr;
+  if (napi_create_arraybuffer(env, size, nullptr, &ab) != napi_ok || ab == nullptr) {
+    napi_throw_error(env, "ERR_MEMORY_ALLOCATION_FAILED", "Array buffer allocation failed");
+    return nullptr;
+  }
+  return ab;
+#else
   if (size == 0) {
     napi_value ab = nullptr;
     void* data = nullptr;
@@ -1157,6 +1287,7 @@ napi_value BindingCreateUnsafeArrayBuffer(napi_env env, napi_callback_info info)
     return nullptr;
   }
   return ab;
+#endif
 }
 
 napi_value BindingSetBufferPrototype(napi_env env, napi_callback_info info) {

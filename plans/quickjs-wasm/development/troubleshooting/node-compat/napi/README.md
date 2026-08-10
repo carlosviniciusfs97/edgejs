@@ -24,3 +24,4 @@ severity, and links.
 | ▶️ | Medium | [011_quickjs_wasix_atomics_patch.md](011_quickjs_wasix_atomics_patch.md) | QuickJS WASIX atomics guard patch |
 | 🟠 | Medium | [013_v8_shaped_callsite_methods.md](013_v8_shaped_callsite_methods.md) | V8-shaped CallSite methods |
 | 🟠 | Medium | [014_lifetime_tracing.md](014_lifetime_tracing.md) | QuickJS N-API lifetime tracing |
+| 🟢 | High | [020_imported_napi_browser_pnpm_terminal_loss.md](020_imported_napi_browser_pnpm_terminal_loss.md) | Browser pnpm terminal loss |

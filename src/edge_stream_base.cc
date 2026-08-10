@@ -608,6 +608,35 @@ bool DefaultOnRead(EdgeStreamListener* listener, ssize_t nread, const uv_buf_t* 
   }
 
   napi_value ab = nullptr;
+#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
+  // The host-JavaScript provider cannot adopt a malloc allocation from the
+  // guest Wasm heap. Create one host-owned byte snapshot, then pass its exact
+  // ArrayBuffer view to Node's stream callback. No native pointer to the host
+  // value is requested, so the N-API backend has no mirror to synchronize or
+  // later write back after JavaScript has observed the chunk.
+  napi_value buffer = nullptr;
+  size_t byte_offset = 0;
+  if (napi_create_buffer_copy(base->env,
+                              static_cast<size_t>(nread),
+                              data,
+                              nullptr,
+                              &buffer) == napi_ok &&
+      buffer != nullptr &&
+      napi_get_typedarray_info(base->env,
+                               buffer,
+                               nullptr,
+                               nullptr,
+                               nullptr,
+                               &ab,
+                               &byte_offset) == napi_ok &&
+      ab != nullptr) {
+    if (data != nullptr) free(const_cast<char*>(data));
+    (void)CallJsOnRead(base, nread, ab, byte_offset, nullptr);
+    return true;
+  }
+  if (data != nullptr) free(const_cast<char*>(data));
+  return true;
+#else
   if (static_cast<size_t>(nread) == length) {
     if (napi_create_external_arraybuffer(base->env,
                                          const_cast<char*>(data),
@@ -631,6 +660,7 @@ bool DefaultOnRead(EdgeStreamListener* listener, ssize_t nread, const uv_buf_t* 
     if (nread > 0 && data != nullptr) memcpy(out, data, static_cast<size_t>(nread));
     if (data != nullptr) free(const_cast<char*>(data));
   }
+#endif
 
   (void)CallJsOnRead(base, nread, ab, 0, nullptr);
   return true;
