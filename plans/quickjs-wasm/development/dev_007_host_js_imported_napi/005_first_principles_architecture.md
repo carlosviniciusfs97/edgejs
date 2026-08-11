@@ -127,8 +127,29 @@ Files under `lib/` must remain unchanged.
   1,671 tests passed and five HTTP/2/TLS tests failed under parallel load; all
   five passed immediately when rerun alone. Treat these as harness contention,
   not product defects, unless a serial run reproduces one.
-- [ ] Move the remaining WASIX/libuv lifecycle issues to Wasmer and run the
-  complete browser/wasmer-sh/pnpm/Next.js acceptance matrix.
+- [x] Corrected the guest architecture identity at its source: a wasm32 Edge
+  build now reports `process.arch === "wasm32"` and `os.arch() === "wasm32"`
+  instead of the impossible value `"unknown"`. This is platform description,
+  not a WASI-specific execution path.
+- [x] Traced repeated-install downloads to pnpm 10 itself. The exact 10.34.5
+  bundle downloaded a skipped Windows optional package on the second install
+  under native macOS and grew a fresh store by about 100 MB. pnpm 10 already
+  provides `optimisticRepeatInstall` as its supported fast no-op path, so the
+  Edge package enables that option rather than changing Edge, N-API, Wasmer,
+  or pnpm internals. A fresh browser reproducer completed its first install in
+  788 ms and its unchanged second install in 288 ms with no incompatible
+  download.
+- [x] Completed the browser/wasmer-sh/pnpm/Next.js acceptance matrix against a
+  fresh Vite worker graph: `edge --version` and `node --version` both report
+  `v24.13.2-pre`; timers return to the prompt; the Next fixture installs in
+  15.4 seconds, repeats in 315 ms, and leaves later `ls` output intact; and
+  `pnpm run dev` reaches ready in 680 ms, serves `/` with HTTP 200, and renders
+  the in-browser preview.
+- [ ] Implement the advertised `node:sqlite` builtin as a separate Node
+  compatibility feature. A pnpm 11 experiment correctly exposed that Edge's
+  catalog currently admits the builtin while its public loader receives no
+  exports. Do not fake the module or tie that gap to the host-JavaScript N-API
+  provider.
 - [ ] Diagnose the native indirect-`eval()` dynamic-import rejection mismatch
   as a separate module-callback compatibility issue. Provider promise tracking
   and extra checkpoints are confirmed to run, so this is not event-loop

@@ -1,7 +1,7 @@
 [package]
 entrypoint = "edge"
 name = "syrusakbary/edgejs"
-version = "0.1.11"
+version = "0.1.12"
 description = "Edge.js with host-provided N-API and no embedded JavaScript engine"
 
 # [fs]
@@ -52,6 +52,7 @@ env = [
   "HOME=/tmp",
   "npm_config_network_concurrency=4",
   "npm_config_node_linker=hoisted",
+  "npm_config_optimistic_repeat_install=true",
   "npm_config_package_import_method=copy",
   "npm_config_store_dir=/tmp/.pnpm-store",
   "npm_config_update_notifier=false",
@@ -69,6 +70,7 @@ env = [
   "HOME=/tmp",
   "npm_config_network_concurrency=4",
   "npm_config_node_linker=hoisted",
+  "npm_config_optimistic_repeat_install=true",
   "npm_config_package_import_method=copy",
   "npm_config_store_dir=/tmp/.pnpm-store",
   "npm_config_update_notifier=false",

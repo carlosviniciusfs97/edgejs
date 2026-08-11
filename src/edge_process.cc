@@ -485,6 +485,8 @@ const char* DetectArch() {
   return "arm";
 #elif defined(__i386__) || defined(_M_IX86)
   return "ia32";
+#elif defined(__wasm32__)
+  return "wasm32";
 #else
   return "unknown";
 #endif
