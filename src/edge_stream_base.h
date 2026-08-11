@@ -9,6 +9,7 @@
 
 #include "node_api.h"
 #include "edge_stream_listener.h"
+#include "unofficial_napi.h"
 
 struct EdgeStreamBase;
 
@@ -32,6 +33,7 @@ struct EdgeStreamBase {
   napi_ref wrapper_ref = nullptr;
   napi_ref onread_ref = nullptr;
   napi_ref user_read_buffer_ref = nullptr;
+  unofficial_napi_buffer_lease user_read_buffer_lease = nullptr;
   EdgeStreamListenerState listener_state{};
   EdgeStreamListener default_listener{};
   EdgeStreamListener user_buffer_listener{};

@@ -53,11 +53,23 @@ Files under `lib/` must remain unchanged.
   caller migrated. Environment teardown now discards outstanding leases and
   returns copied guest allocations through the same environment ownership
   boundary.
+- [x] Reduced Edge scheduling to one provider-owned event-loop checkpoint.
+  V8, QuickJS, native Wasmer imports, and the host-JavaScript JSPI provider now
+  implement the same operation; Edge no longer selects microtask versus host
+  yielding behavior by target.
+- [x] Moved unsafe ArrayBuffer allocation policy behind N-API. Edge no longer
+  chooses between an external native allocation and a host-engine allocation.
+- [x] Made stream ingress provider-neutral. Default reads transfer ownership
+  with standard N-API on every provider, while user-supplied read buffers keep
+  one explicit read/write lease for the complete libuv retention interval and
+  publish bytes before JavaScript reentry.
+- [x] Replaced SDK shutdown's one-timer-turn cleanup guess with an explicit
+  scheduler-close acknowledgment sent only after all worker handles are
+  dropped. The full host-JavaScript suite now releases consecutive clients.
 - [ ] Convert every remaining Edge raw-pointer consumer to the lease API,
-  continuing with stream, Buffer, and crypto paths; then remove the
-  compatibility access API.
-- [ ] Reduce scheduling to one provider-owned checkpoint and remove the
-  provider-specific scheduling compensations.
+  continuing with synchronous Buffer/encoding and crypto paths. Classify
+  guest-backed control blocks separately: their pointers are intentionally
+  shared and must not be converted to copied leases.
 - [ ] Move the remaining WASIX/libuv lifecycle issues to Wasmer and run the
   complete native/browser/wasmer-sh/pnpm/Next.js acceptance matrix.
 

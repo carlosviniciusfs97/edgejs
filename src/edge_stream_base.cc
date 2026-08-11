@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -336,10 +337,6 @@ void DeleteRefIfPresent(napi_env env, napi_ref* ref) {
   *ref = nullptr;
 }
 
-void FreeExternalArrayBuffer(napi_env /*env*/, void* data, void* /*hint*/) {
-  free(data);
-}
-
 void SetStreamState(napi_env env, int index, int32_t value) {
   int32_t* state = EdgeGetStreamBaseState(env);
   if (state == nullptr) return;
@@ -450,54 +447,82 @@ napi_value GetNamedPropertyValue(napi_env env, napi_value obj, const char* key) 
 bool UpdateUserReadBuffer(EdgeStreamBase* base, napi_value value) {
   if (base == nullptr || base->env == nullptr || value == nullptr) return false;
 
+  size_t byte_length = 0;
   bool is_buffer = false;
   if (napi_is_buffer(base->env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* data = nullptr;
-    size_t len = 0;
-    if (napi_get_buffer_info(base->env, value, &data, &len) != napi_ok ||
-        data == nullptr ||
-        len == 0) {
+    if (napi_get_buffer_info(base->env, value, nullptr, &byte_length) != napi_ok ||
+        byte_length == 0) {
       return false;
     }
-    DeleteRefIfPresent(base->env, &base->user_read_buffer_ref);
-    if (napi_create_reference(base->env, value, 1, &base->user_read_buffer_ref) != napi_ok ||
-        base->user_read_buffer_ref == nullptr) {
+  } else {
+    bool is_typedarray = false;
+    if (napi_is_typedarray(base->env, value, &is_typedarray) != napi_ok ||
+        !is_typedarray) {
       return false;
     }
-    base->user_buffer_base = static_cast<char*>(data);
-    base->user_buffer_len = len;
-    return true;
-  }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(base->env, value, &is_typedarray) == napi_ok && is_typedarray) {
     napi_typedarray_type ta_type = napi_uint8_array;
     size_t length = 0;
-    void* data = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
     if (napi_get_typedarray_info(base->env,
                                  value,
                                  &ta_type,
                                  &length,
-                                 &data,
-                                 &arraybuffer,
-                                 &byte_offset) != napi_ok ||
-        data == nullptr ||
+                                 nullptr,
+                                 nullptr,
+                                 nullptr) != napi_ok ||
         length == 0) {
       return false;
     }
-    DeleteRefIfPresent(base->env, &base->user_read_buffer_ref);
-    if (napi_create_reference(base->env, value, 1, &base->user_read_buffer_ref) != napi_ok ||
-        base->user_read_buffer_ref == nullptr) {
+    const size_t element_size = EdgeTypedArrayElementSize(ta_type);
+    if (length > std::numeric_limits<size_t>::max() / element_size) {
       return false;
     }
-    base->user_buffer_base = static_cast<char*>(data);
-    base->user_buffer_len = length * EdgeTypedArrayElementSize(ta_type);
-    return true;
+    byte_length = length * element_size;
   }
 
-  return false;
+  unofficial_napi_buffer_lease lease = nullptr;
+  void* data = nullptr;
+  if (unofficial_napi_acquire_buffer_lease(
+          base->env,
+          value,
+          0,
+          byte_length,
+          unofficial_napi_buffer_access_readwrite,
+          &lease,
+          &data) != napi_ok ||
+      lease == nullptr ||
+      data == nullptr) {
+    return false;
+  }
+
+  napi_ref value_ref = nullptr;
+  if (napi_create_reference(base->env, value, 1, &value_ref) != napi_ok ||
+      value_ref == nullptr) {
+    (void)unofficial_napi_release_buffer_lease(base->env, lease, false);
+    return false;
+  }
+
+  if (base->user_read_buffer_lease != nullptr) {
+    (void)unofficial_napi_release_buffer_lease(
+        base->env, base->user_read_buffer_lease, false);
+  }
+  DeleteRefIfPresent(base->env, &base->user_read_buffer_ref);
+  base->user_read_buffer_ref = value_ref;
+  base->user_read_buffer_lease = lease;
+  base->user_buffer_base = static_cast<char*>(data);
+  base->user_buffer_len = byte_length;
+  return true;
+}
+
+void ReleaseUserReadBufferLease(EdgeStreamBase* base, bool modified) {
+  if (base == nullptr || base->env == nullptr ||
+      base->user_read_buffer_lease == nullptr) {
+    return;
+  }
+  (void)unofficial_napi_release_buffer_lease(
+      base->env, base->user_read_buffer_lease, modified);
+  base->user_read_buffer_lease = nullptr;
+  base->user_buffer_base = nullptr;
+  base->user_buffer_len = 0;
 }
 
 bool CallJsOnRead(EdgeStreamBase* base,
@@ -607,13 +632,10 @@ bool DefaultOnRead(EdgeStreamListener* listener, ssize_t nread, const uv_buf_t* 
     return true;
   }
 
+  // Stream data becomes JavaScript-owned at this boundary. A Buffer copy
+  // expresses that ownership transfer with standard N-API for every provider;
+  // the native read allocation can then be released before re-entering JS.
   napi_value ab = nullptr;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  // The host-JavaScript provider cannot adopt a malloc allocation from the
-  // guest Wasm heap. Create one host-owned byte snapshot, then pass its exact
-  // ArrayBuffer view to Node's stream callback. No native pointer to the host
-  // value is requested, so the N-API backend has no mirror to synchronize or
-  // later write back after JavaScript has observed the chunk.
   napi_value buffer = nullptr;
   size_t byte_offset = 0;
   if (napi_create_buffer_copy(base->env,
@@ -636,34 +658,6 @@ bool DefaultOnRead(EdgeStreamListener* listener, ssize_t nread, const uv_buf_t* 
   }
   if (data != nullptr) free(const_cast<char*>(data));
   return true;
-#else
-  if (static_cast<size_t>(nread) == length) {
-    if (napi_create_external_arraybuffer(base->env,
-                                         const_cast<char*>(data),
-                                         static_cast<size_t>(nread),
-                                         FreeExternalArrayBuffer,
-                                         nullptr,
-                                         &ab) != napi_ok ||
-        ab == nullptr) {
-      ab = nullptr;
-    }
-  }
-
-  if (ab == nullptr) {
-    void* out = nullptr;
-    if (napi_create_arraybuffer(base->env, static_cast<size_t>(nread), &out, &ab) != napi_ok ||
-        out == nullptr ||
-        ab == nullptr) {
-      if (data != nullptr) free(const_cast<char*>(data));
-      return true;
-    }
-    if (nread > 0 && data != nullptr) memcpy(out, data, static_cast<size_t>(nread));
-    if (data != nullptr) free(const_cast<char*>(data));
-  }
-#endif
-
-  (void)CallJsOnRead(base, nread, ab, 0, nullptr);
-  return true;
 }
 
 bool UserBufferOnAlloc(EdgeStreamListener* listener, size_t /*suggested_size*/, uv_buf_t* out) {
@@ -682,19 +676,29 @@ bool UserBufferOnRead(EdgeStreamListener* listener, ssize_t nread, const uv_buf_
   if (base == nullptr) return false;
 
   if (nread < 0 && (buf == nullptr || buf->base == nullptr)) {
+    ReleaseUserReadBufferLease(base, false);
     (void)CallJsOnRead(base, nread, nullptr, 0, nullptr);
     return true;
   }
 
+  ReleaseUserReadBufferLease(base, nread > 0);
   napi_value next_buffer = nullptr;
   (void)CallJsOnRead(base, nread, nullptr, 0, &next_buffer);
-  if (next_buffer != nullptr) {
+  napi_value buffer_to_retain = next_buffer;
+  if (buffer_to_retain != nullptr) {
     napi_valuetype type = napi_undefined;
-    if (napi_typeof(base->env, next_buffer, &type) == napi_ok &&
-        type != napi_undefined &&
-        type != napi_null) {
-      (void)UpdateUserReadBuffer(base, next_buffer);
+    if (napi_typeof(base->env, buffer_to_retain, &type) != napi_ok ||
+        type == napi_undefined ||
+        type == napi_null) {
+      buffer_to_retain = nullptr;
     }
+  }
+  if (buffer_to_retain == nullptr && base->user_read_buffer_ref != nullptr) {
+    (void)napi_get_reference_value(
+        base->env, base->user_read_buffer_ref, &buffer_to_retain);
+  }
+  if (buffer_to_retain != nullptr) {
+    (void)UpdateUserReadBuffer(base, buffer_to_retain);
   }
   return true;
 }
@@ -732,6 +736,7 @@ bool DefaultOnAfterShutdown(EdgeStreamListener* listener,
 
 void DeleteOnReadRefs(EdgeStreamBase* base) {
   if (base == nullptr || base->env == nullptr) return;
+  ReleaseUserReadBufferLease(base, false);
   DeleteRefIfPresent(base->env, &base->onread_ref);
   DeleteRefIfPresent(base->env, &base->user_read_buffer_ref);
   base->user_buffer_base = nullptr;

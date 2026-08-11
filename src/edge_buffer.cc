@@ -118,10 +118,6 @@ bool ShouldZeroFillBuffers(napi_env env) {
   return state.zero_fill_toggle_data != nullptr ? (state.zero_fill_toggle_data[0] != 0) : DefaultZeroFillBuffersEnabled();
 }
 
-void ExternalArrayBufferFinalize(napi_env /*env*/, void* data, void* /*hint*/) {
-  free(data);
-}
-
 int32_t ParseEncodingArg(napi_env env, napi_value value, int32_t fallback) {
   if (value == nullptr) return fallback;
   napi_valuetype type = napi_undefined;
@@ -1227,49 +1223,14 @@ napi_value BindingCreateUnsafeArrayBuffer(napi_env env, napi_callback_info info)
   }
 
   const size_t size = static_cast<size_t>(std::trunc(size_double));
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  // The imported host-JavaScript provider cannot expose a sliced wasm-memory
-  // allocation as an ArrayBuffer: WebAssembly.Memory only exposes its entire
-  // backing buffer. Creating an "external" ArrayBuffer here therefore creates
-  // two backing stores which must remain mirrored for the lifetime of every
-  // Buffer.allocUnsafe() result.
-  //
-  // This binding never retains or reads the allocation pointer; ownership is
-  // transferred immediately to JavaScript. Create the ArrayBuffer in its real
-  // owner instead, and let native consumers request a scoped guest range when
-  // they actually need one. Passing a null data result also avoids manufacturing
-  // a standard N-API raw pointer whose lifetime we cannot represent zero-copy.
   napi_value ab = nullptr;
-  if (napi_create_arraybuffer(env, size, nullptr, &ab) != napi_ok || ab == nullptr) {
-    napi_throw_error(env, "ERR_MEMORY_ALLOCATION_FAILED", "Array buffer allocation failed");
-    return nullptr;
-  }
-  return ab;
-#else
-  if (size == 0) {
-    napi_value ab = nullptr;
-    void* data = nullptr;
-    if (napi_create_arraybuffer(env, 0, &data, &ab) != napi_ok || ab == nullptr) {
-      napi_throw_error(env, "ERR_MEMORY_ALLOCATION_FAILED", "Array buffer allocation failed");
-      return nullptr;
-    }
-    return ab;
-  }
-
-  void* data = ShouldZeroFillBuffers(env) ? std::calloc(size, 1) : std::malloc(size);
-  if (data == nullptr) {
-    napi_throw_error(env, "ERR_MEMORY_ALLOCATION_FAILED", "Array buffer allocation failed");
-    return nullptr;
-  }
-  napi_value ab = nullptr;
-  if (napi_create_external_arraybuffer(env, data, size, ExternalArrayBufferFinalize, nullptr, &ab) != napi_ok ||
+  if (unofficial_napi_create_uninitialized_arraybuffer(
+          env, size, ShouldZeroFillBuffers(env), &ab) != napi_ok ||
       ab == nullptr) {
-    std::free(data);
     napi_throw_error(env, "ERR_MEMORY_ALLOCATION_FAILED", "Array buffer allocation failed");
     return nullptr;
   }
   return ab;
-#endif
 }
 
 napi_value BindingSetBufferPrototype(napi_env env, napi_callback_info info) {
