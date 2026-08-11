@@ -69,6 +69,11 @@ Files under `lib/` must remain unchanged.
   with standard N-API on every provider, while user-supplied read buffers keep
   one explicit read/write lease for the complete libuv retention interval and
   publish bytes before JavaScript reentry.
+- [x] Added a common scoped lease for synchronous Edge byte consumers and
+  migrated TextEncoder/TextDecoder access to it. Writable encoding output is
+  published before updating JavaScript-visible result state. V8, QuickJS, and
+  host-JavaScript leases accept exact SharedArrayBuffer ranges through the same
+  contract; provider tests cover read/write access and copy-back.
 - [x] Replaced SDK shutdown's one-timer-turn cleanup guess with an explicit
   scheduler-close acknowledgment sent only after all worker handles are
   dropped. The full host-JavaScript suite now releases consecutive clients.

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "ada.h"
+#include "edge_buffer_lease.h"
 #include "simdutf.h"
 
 namespace {
@@ -16,105 +17,10 @@ struct EncodingBindingState {
   napi_ref encode_into_results_ref = nullptr;
 };
 
-const char* ZeroLengthByteSentinel() {
-  static const char sentinel = 0;
-  return &sentinel;
-}
-
 napi_value GetUndefined(napi_env env) {
   napi_value out = nullptr;
   napi_get_undefined(env, &out);
   return out;
-}
-
-bool ExtractBytesFromValue(napi_env env, napi_value value, const char** data, size_t* len) {
-  if (value == nullptr || data == nullptr || len == nullptr) return false;
-
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* ptr = nullptr;
-    if (napi_get_buffer_info(env, value, &ptr, len) != napi_ok) return false;
-    if (ptr == nullptr && *len != 0) return false;
-    *data = ptr != nullptr ? static_cast<const char*>(ptr) : ZeroLengthByteSentinel();
-    return true;
-  }
-
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* ptr = nullptr;
-    if (napi_get_arraybuffer_info(env, value, &ptr, len) != napi_ok) return false;
-    if (ptr == nullptr && *len != 0) return false;
-    *data = ptr != nullptr ? static_cast<const char*>(ptr) : ZeroLengthByteSentinel();
-    return true;
-  }
-
-  {
-    void* ptr = nullptr;
-    size_t byte_len = 0;
-    if (napi_get_arraybuffer_info(env, value, &ptr, &byte_len) == napi_ok) {
-      if (ptr == nullptr && byte_len != 0) return false;
-      *data = ptr != nullptr ? static_cast<const char*>(ptr) : ZeroLengthByteSentinel();
-      *len = byte_len;
-      return true;
-    }
-  }
-
-  bool is_typed = false;
-  if (napi_is_typedarray(env, value, &is_typed) == napi_ok && is_typed) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t element_len = 0;
-    void* ptr = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(
-            env, value, &type, &element_len, &ptr, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-
-    size_t bytes_per_element = 1;
-    switch (type) {
-      case napi_int16_array:
-      case napi_uint16_array:
-      case napi_float16_array:
-        bytes_per_element = 2;
-        break;
-      case napi_int32_array:
-      case napi_uint32_array:
-      case napi_float32_array:
-        bytes_per_element = 4;
-        break;
-      case napi_float64_array:
-      case napi_bigint64_array:
-      case napi_biguint64_array:
-        bytes_per_element = 8;
-        break;
-      default:
-        bytes_per_element = 1;
-        break;
-    }
-
-    *len = element_len * bytes_per_element;
-    if (ptr == nullptr && *len != 0) return false;
-    *data = ptr != nullptr ? static_cast<const char*>(ptr) : ZeroLengthByteSentinel();
-    return true;
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    void* ptr = nullptr;
-    size_t byte_length = 0;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, &byte_length, &ptr, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-    if (ptr == nullptr && byte_length != 0) return false;
-    *data = ptr != nullptr ? static_cast<const char*>(ptr) : ZeroLengthByteSentinel();
-    *len = byte_length;
-    return true;
-  }
-
-  return false;
 }
 
 napi_value MakeUint8Array(napi_env env, const char* data, size_t len) {
@@ -389,21 +295,19 @@ napi_value BindingEncodeInto(napi_env env, napi_callback_info info) {
 
   napi_typedarray_type type = napi_uint8_array;
   size_t element_len = 0;
-  void* ptr = nullptr;
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
-  if (napi_get_typedarray_info(env, argv[1], &type, &element_len, &ptr, &arraybuffer, &byte_offset) != napi_ok) {
+  if (napi_get_typedarray_info(env, argv[1], &type, &element_len, nullptr, nullptr, nullptr) != napi_ok) {
     return GetUndefined(env);
   }
   if (type != napi_uint8_array) {
     ThrowTypeErrorWithCode(env, "The \"dest\" argument must be an instance of Uint8Array.", "ERR_INVALID_ARG_TYPE");
     return GetUndefined(env);
   }
-  if (ptr == nullptr && element_len != 0) {
+  EdgeBufferLease destination;
+  if (!destination.Acquire(env, argv[1], unofficial_napi_buffer_access_readwrite)) {
     return GetUndefined(env);
   }
 
-  auto* dest = static_cast<char*>(ptr);
+  auto* dest = reinterpret_cast<char*>(destination.data());
   const size_t dest_len = element_len;
   uint32_t read = 0;
   uint32_t written = 0;
@@ -435,6 +339,7 @@ napi_value BindingEncodeInto(napi_env env, napi_callback_info info) {
     i += consumed;
   }
 
+  if (!destination.Release(written != 0)) return GetUndefined(env);
   UpdateEncodeIntoResults(env, state, read, written);
   return GetUndefined(env);
 }
@@ -446,9 +351,8 @@ napi_value BindingDecodeUTF8(napi_env env, napi_callback_info info) {
     return GetUndefined(env);
   }
 
-  const char* data = nullptr;
-  size_t len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &data, &len)) {
+  EdgeBufferLease input;
+  if (!input.Acquire(env, argv[0], unofficial_napi_buffer_access_read)) {
     ThrowTypeErrorWithCode(
         env,
         "The \"list\" argument must be an instance of SharedArrayBuffer, ArrayBuffer or ArrayBufferView.",
@@ -462,7 +366,14 @@ napi_value BindingDecodeUTF8(napi_env env, napi_callback_info info) {
   if (argc > 2) napi_get_value_bool(env, argv[2], &fatal);
 
   napi_value out = nullptr;
-  if (!DecodeUTF8ToString(env, data, len, ignore_bom, fatal, &out)) return GetUndefined(env);
+  if (!DecodeUTF8ToString(env,
+                          reinterpret_cast<const char*>(input.data()),
+                          input.size(),
+                          ignore_bom,
+                          fatal,
+                          &out)) {
+    return GetUndefined(env);
+  }
   return out;
 }
 
