@@ -88,6 +88,12 @@ Files under `lib/` must remain unchanged.
   bytes, and exact-range in-place random fill. The host-JavaScript integration
   test uses host-owned subviews and verifies that writable copy-back cannot
   modify bytes outside the requested range.
+- [x] Reduced `spawnSync` stdin parsing to one read lease and an owned native
+  copy instead of reconstructing raw pointers for each BufferSource shape.
+  Native Edge verifies an exact DataView subrange. Browser execution currently
+  stops later at the WASIX process layer with `spawnSync /bin/node EINVAL`, so
+  that runtime capability remains a Wasmer acceptance-matrix item rather than
+  an Edge memory workaround.
 - [ ] Convert every remaining Edge raw-pointer consumer to the lease API,
   continuing with retained crypto/TLS state and the remaining BufferSource
   consumers in process, spawn, HTTP, module loading, messaging, ICU, UDP, and

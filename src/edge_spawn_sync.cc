@@ -14,6 +14,8 @@
 
 #include <uv.h>
 
+#include "edge_buffer_lease.h"
+
 namespace {
 
 enum class StdioMode {
@@ -222,87 +224,6 @@ bool ReadInputBytes(napi_env env, napi_value input_val, std::vector<uint8_t>* ou
   if (out == nullptr || input_val == nullptr) return false;
   out->clear();
 
-  bool is_buffer = false;
-  if (napi_is_buffer(env, input_val, &is_buffer) == napi_ok && is_buffer) {
-    void* ptr = nullptr;
-    size_t len = 0;
-    if (napi_get_buffer_info(env, input_val, &ptr, &len) == napi_ok && ptr != nullptr && len > 0) {
-      const uint8_t* bytes = static_cast<const uint8_t*>(ptr);
-      out->assign(bytes, bytes + len);
-    }
-    return true;
-  }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, input_val, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type ta_type;
-    size_t element_len = 0;
-    void* raw = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env, input_val, &ta_type, &element_len, &raw, &ab, &byte_offset) != napi_ok ||
-        raw == nullptr) {
-      return false;
-    }
-    size_t bytes = element_len;
-    switch (ta_type) {
-      case napi_uint16_array:
-      case napi_int16_array:
-      case napi_float16_array:
-        bytes *= 2;
-        break;
-      case napi_uint32_array:
-      case napi_int32_array:
-      case napi_float32_array:
-        bytes *= 4;
-        break;
-      case napi_float64_array:
-      case napi_bigint64_array:
-      case napi_biguint64_array:
-        bytes *= 8;
-        break;
-      default:
-        break;
-    }
-    const uint8_t* data = static_cast<const uint8_t*>(raw);
-    out->assign(data, data + bytes);
-    return true;
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, input_val, &is_dataview) == napi_ok && is_dataview) {
-    size_t byte_len = 0;
-    void* raw = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, input_val, &byte_len, &raw, &ab, &byte_offset) != napi_ok ||
-        ab == nullptr) {
-      return false;
-    }
-    (void)raw;
-    void* ab_raw = nullptr;
-    size_t ab_len = 0;
-    if (napi_get_arraybuffer_info(env, ab, &ab_raw, &ab_len) != napi_ok || ab_raw == nullptr) {
-      return false;
-    }
-    if (byte_offset > ab_len || byte_len > (ab_len - byte_offset)) {
-      return false;
-    }
-    const uint8_t* data = static_cast<const uint8_t*>(ab_raw) + byte_offset;
-    out->assign(data, data + byte_len);
-    return true;
-  }
-
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, input_val, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* raw = nullptr;
-    size_t byte_len = 0;
-    if (napi_get_arraybuffer_info(env, input_val, &raw, &byte_len) != napi_ok || raw == nullptr) return false;
-    const uint8_t* data = static_cast<const uint8_t*>(raw);
-    out->assign(data, data + byte_len);
-    return true;
-  }
-
   napi_valuetype value_type = napi_undefined;
   if (napi_typeof(env, input_val, &value_type) == napi_ok && value_type == napi_string) {
     std::string text = ValueToUtf8(env, input_val);
@@ -310,7 +231,10 @@ bool ReadInputBytes(napi_env env, napi_value input_val, std::vector<uint8_t>* ou
     return true;
   }
 
-  return false;
+  EdgeBufferLease input;
+  if (!input.Acquire(env, input_val, unofficial_napi_buffer_access_read)) return false;
+  out->assign(input.data(), input.data() + input.size());
+  return true;
 }
 
 bool ExtractFdFromWrapObject(napi_env env, napi_value value, int32_t* fd) {
