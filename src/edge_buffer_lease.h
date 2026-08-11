@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include "node_api.h"
 #include "unofficial_napi.h"
@@ -43,7 +44,10 @@ inline bool EdgeGetBinaryByteLength(napi_env env, napi_value value,
                                  nullptr, nullptr) != napi_ok) {
       return false;
     }
-    *length_out = element_length * EdgeTypedArrayElementSize(type);
+    const size_t element_size = EdgeTypedArrayElementSize(type);
+    if (element_length > std::numeric_limits<size_t>::max() / element_size)
+      return false;
+    *length_out = element_length * element_size;
     return true;
   }
   if (napi_is_dataview(env, value, &matches) == napi_ok && matches) {

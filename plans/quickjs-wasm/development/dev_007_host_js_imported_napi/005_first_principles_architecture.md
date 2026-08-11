@@ -83,10 +83,17 @@ Files under `lib/` must remain unchanged.
   blocks. Targeted WASIX cancellation now retains only the semantic
   `(pid, tid)` to browser-worker ownership map; normal shutdown never simulates
   guest thread-exit bookkeeping.
+- [x] Migrated synchronous one-shot crypto byte access to the common lease
+  contract: hash/HMAC, PBKDF2, scrypt, the non-AEAD cipher transform, random
+  bytes, and exact-range in-place random fill. The host-JavaScript integration
+  test uses host-owned subviews and verifies that writable copy-back cannot
+  modify bytes outside the requested range.
 - [ ] Convert every remaining Edge raw-pointer consumer to the lease API,
-  continuing with synchronous Buffer/encoding and crypto paths. Classify
-  guest-backed control blocks separately: their pointers are intentionally
-  shared and must not be converted to copied leases.
+  continuing with retained crypto/TLS state and the remaining BufferSource
+  consumers in process, spawn, HTTP, module loading, messaging, ICU, UDP, and
+  WebAssembly bindings. Classify guest-backed control blocks separately: their
+  pointers are intentionally shared and must not be converted to copied
+  leases.
 - [ ] Move the remaining WASIX/libuv lifecycle issues to Wasmer and run the
   complete native/browser/wasmer-sh/pnpm/Next.js acceptance matrix.
 

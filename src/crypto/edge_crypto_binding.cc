@@ -1,5 +1,6 @@
 #include "crypto/edge_crypto_binding.h"
 #include "crypto/edge_secure_context_bridge.h"
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_option_helpers.h"
 #include "unofficial_napi.h"
@@ -1075,81 +1076,13 @@ napi_value CreateX509DerBuffer(napi_env env, X509* cert) {
   return CreateBufferCopy(env, out.data(), out.size());
 }
 
-bool GetBufferByteLength(napi_env env, napi_value value, size_t* length) {
-  if (env == nullptr || value == nullptr || length == nullptr) return false;
-  *length = 0;
-
-  bool matches = false;
-  if (napi_is_buffer(env, value, &matches) == napi_ok && matches) {
-    return napi_get_buffer_info(env, value, nullptr, length) == napi_ok;
-  }
-  if (napi_is_arraybuffer(env, value, &matches) == napi_ok && matches) {
-    return napi_get_arraybuffer_info(env, value, nullptr, length) == napi_ok;
-  }
-  if (napi_is_typedarray(env, value, &matches) == napi_ok && matches) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t elements = 0;
-    if (napi_get_typedarray_info(
-            env, value, &type, &elements, nullptr, nullptr, nullptr) != napi_ok) {
-      return false;
-    }
-    const size_t element_size = TypedArrayBytesPerElement(type);
-    if (elements > std::numeric_limits<size_t>::max() / element_size) return false;
-    *length = elements * element_size;
-    return true;
-  }
-  if (napi_is_dataview(env, value, &matches) == napi_ok && matches) {
-    return napi_get_dataview_info(env, value, length, nullptr, nullptr, nullptr) == napi_ok;
-  }
-  return false;
-}
-
-class ScopedReadBufferAccess {
- public:
-  ScopedReadBufferAccess(napi_env env, napi_value value) : env_(env) {
-    if (!GetBufferByteLength(env_, value, &length_)) return;
-    void* raw = nullptr;
-    if (unofficial_napi_acquire_buffer_lease(env_,
-                                             value,
-                                             0,
-                                             length_,
-                                             unofficial_napi_buffer_access_read,
-                                             &lease_,
-                                             &raw) != napi_ok) {
-      length_ = 0;
-      return;
-    }
-    data_ = raw != nullptr ? static_cast<uint8_t*>(raw) : &empty_;
-  }
-
-  ~ScopedReadBufferAccess() {
-    if (lease_ != nullptr) {
-      (void)unofficial_napi_release_buffer_lease(env_, lease_, false);
-    }
-  }
-
-  ScopedReadBufferAccess(const ScopedReadBufferAccess&) = delete;
-  ScopedReadBufferAccess& operator=(const ScopedReadBufferAccess&) = delete;
-
-  bool valid() const { return lease_ != nullptr; }
-  uint8_t* data() const { return data_; }
-  size_t size() const { return length_; }
-
- private:
-  napi_env env_ = nullptr;
-  uint8_t* data_ = nullptr;
-  size_t length_ = 0;
-  unofficial_napi_buffer_lease lease_ = nullptr;
-  uint8_t empty_ = 0;
-};
-
 napi_value CryptoHashOneShot(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2] = {nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 2) return nullptr;
   const std::string algo = ValueToUtf8(env, argv[0]);
-  ScopedReadBufferAccess input(env, argv[1]);
-  if (!input.valid()) {
+  EdgeBufferLease input;
+  if (!input.Acquire(env, argv[1], unofficial_napi_buffer_access_read)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "hash data must be a Buffer");
     return nullptr;
   }
@@ -1183,8 +1116,8 @@ napi_value CryptoHashOneShotXof(napi_env env, napi_callback_info info) {
   napi_value argv[3] = {nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 3) return nullptr;
   const std::string algo = ValueToUtf8(env, argv[0]);
-  ScopedReadBufferAccess input(env, argv[1]);
-  if (!input.valid()) {
+  EdgeBufferLease input;
+  if (!input.Acquire(env, argv[1], unofficial_napi_buffer_access_read)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "hash data must be a Buffer");
     return nullptr;
   }
@@ -1233,9 +1166,10 @@ napi_value CryptoHmacOneShot(napi_env env, napi_callback_info info) {
   napi_value argv[3] = {nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 3) return nullptr;
   const std::string algo = ValueToUtf8(env, argv[0]);
-  ScopedReadBufferAccess key(env, argv[1]);
-  ScopedReadBufferAccess input(env, argv[2]);
-  if (!key.valid() || !input.valid()) {
+  EdgeBufferLease key;
+  EdgeBufferLease input;
+  if (!key.Acquire(env, argv[1], unofficial_napi_buffer_access_read) ||
+      !input.Acquire(env, argv[2], unofficial_napi_buffer_access_read)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "hmac key/data must be Buffers");
     return nullptr;
   }
@@ -1263,9 +1197,8 @@ napi_value CryptoRandomFillSync(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3] = {nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* data = nullptr;
   size_t len = 0;
-  if (!GetAnyBufferSourceBytesImpl(env, argv[0], &data, &len)) {
+  if (!EdgeGetBinaryByteLength(env, argv[0], &len)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "buffer must be an ArrayBuffer or ArrayBufferView");
     return nullptr;
   }
@@ -1273,11 +1206,23 @@ napi_value CryptoRandomFillSync(napi_env env, napi_callback_info info) {
   int32_t size = static_cast<int32_t>(len);
   if (argc >= 2 && argv[1] != nullptr) napi_get_value_int32(env, argv[1], &offset);
   if (argc >= 3 && argv[2] != nullptr) napi_get_value_int32(env, argv[2], &size);
-  if (offset < 0 || size < 0 || static_cast<size_t>(offset + size) > len) {
+  if (offset < 0 || size < 0 || static_cast<size_t>(offset) > len ||
+      static_cast<size_t>(size) > len - static_cast<size_t>(offset)) {
     ThrowError(env, "ERR_OUT_OF_RANGE", "offset/size out of range");
     return nullptr;
   }
-  if (!ncrypto::CSPRNG(data + offset, static_cast<size_t>(size))) {
+  EdgeBufferLease output;
+  if (!output.Acquire(env,
+                      argv[0],
+                      static_cast<size_t>(offset),
+                      static_cast<size_t>(size),
+                      unofficial_napi_buffer_access_readwrite)) {
+    ThrowError(env, "ERR_INVALID_ARG_TYPE", "buffer must be an ArrayBuffer or ArrayBufferView");
+    return nullptr;
+  }
+  const bool filled = ncrypto::CSPRNG(output.data(), output.size());
+  if (!output.Release(true)) return nullptr;
+  if (!filled) {
     ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "CSPRNG failed");
     return nullptr;
   }
@@ -1295,12 +1240,14 @@ napi_value CryptoRandomBytes(napi_env env, napi_callback_info info) {
   }
   napi_value out = nullptr;
   napi_value ab = nullptr;
-  void* out_data_raw = nullptr;
-  if (napi_create_arraybuffer(env, static_cast<size_t>(n), &out_data_raw, &ab) != napi_ok || ab == nullptr) {
+  if (napi_create_arraybuffer(env, static_cast<size_t>(n), nullptr, &ab) != napi_ok || ab == nullptr) {
     return nullptr;
   }
-  auto* out_data = reinterpret_cast<uint8_t*>(out_data_raw);
-  if (n > 0 && !ncrypto::CSPRNG(out_data, static_cast<size_t>(n))) {
+  EdgeBufferLease bytes;
+  if (!bytes.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return nullptr;
+  const bool filled = n == 0 || ncrypto::CSPRNG(bytes.data(), bytes.size());
+  if (!bytes.Release(true)) return nullptr;
+  if (!filled) {
     ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "CSPRNG failed");
     return nullptr;
   }
@@ -1312,11 +1259,10 @@ napi_value CryptoPbkdf2Sync(napi_env env, napi_callback_info info) {
   size_t argc = 5;
   napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
-  uint8_t* pass = nullptr;
-  size_t pass_len = 0;
-  uint8_t* salt = nullptr;
-  size_t salt_len = 0;
-  if (!GetBufferBytes(env, argv[0], &pass, &pass_len) || !GetBufferBytes(env, argv[1], &salt, &salt_len)) {
+  EdgeBufferLease pass;
+  EdgeBufferLease salt;
+  if (!pass.Acquire(env, argv[0], unofficial_napi_buffer_access_read) ||
+      !salt.Acquire(env, argv[1], unofficial_napi_buffer_access_read)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "password/salt must be Buffers");
     return nullptr;
   }
@@ -1335,7 +1281,9 @@ napi_value CryptoPbkdf2Sync(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_INVALID_ARG_VALUE", "Invalid pbkdf2 arguments");
     return nullptr;
   }
-  auto out = ncrypto::pbkdf2(md, {reinterpret_cast<char*>(pass), pass_len}, {salt, salt_len},
+  auto out = ncrypto::pbkdf2(md,
+                             {reinterpret_cast<char*>(pass.data()), pass.size()},
+                             {salt.data(), salt.size()},
                              static_cast<uint32_t>(iter), static_cast<size_t>(keylen));
   if (!out) {
     ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "PBKDF2 failed");
@@ -1348,11 +1296,10 @@ napi_value CryptoScryptSync(napi_env env, napi_callback_info info) {
   size_t argc = 7;
   napi_value argv[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 3) return nullptr;
-  uint8_t* pass = nullptr;
-  size_t pass_len = 0;
-  uint8_t* salt = nullptr;
-  size_t salt_len = 0;
-  if (!GetBufferBytes(env, argv[0], &pass, &pass_len) || !GetBufferBytes(env, argv[1], &salt, &salt_len)) {
+  EdgeBufferLease pass;
+  EdgeBufferLease salt;
+  if (!pass.Acquire(env, argv[0], unofficial_napi_buffer_access_read) ||
+      !salt.Acquire(env, argv[1], unofficial_napi_buffer_access_read)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "password/salt must be Buffers");
     return nullptr;
   }
@@ -1386,14 +1333,15 @@ napi_value CryptoScryptSync(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_CRYPTO_INVALID_SCRYPT_PARAMS", "Invalid scrypt params: memory limit exceeded");
     return nullptr;
   }
-  auto out = ncrypto::scrypt({reinterpret_cast<char*>(pass), pass_len}, {salt, salt_len},
+  auto out = ncrypto::scrypt({reinterpret_cast<char*>(pass.data()), pass.size()},
+                             {salt.data(), salt.size()},
                              N, r, p, maxmem, static_cast<size_t>(keylen));
   if (!out) {
     // Keep behavior aligned with previous bridge for platforms/OpenSSL builds
     // where ncrypto::scrypt can reject params that EVP_PBE_scrypt accepts.
     std::vector<uint8_t> fallback(static_cast<size_t>(keylen));
-    if (EVP_PBE_scrypt(reinterpret_cast<const char*>(pass), pass_len,
-                       salt, salt_len, N, r, p, maxmem, fallback.data(), fallback.size()) != 1) {
+    if (EVP_PBE_scrypt(reinterpret_cast<const char*>(pass.data()), pass.size(),
+                       salt.data(), salt.size(), N, r, p, maxmem, fallback.data(), fallback.size()) != 1) {
       ThrowLastOpenSslError(env, "ERR_CRYPTO_INVALID_SCRYPT_PARAMS", "Invalid scrypt params: memory limit exceeded");
       return nullptr;
     }
@@ -1446,9 +1394,10 @@ napi_value CryptoCipherTransform(napi_env env, napi_callback_info info) {
   napi_value argv[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 6) return nullptr;
   const std::string algo = ValueToUtf8(env, argv[0]);
-  uint8_t *key = nullptr, *iv = nullptr, *input = nullptr;
-  size_t key_len = 0, iv_len = 0, in_len = 0;
-  if (!GetBufferBytes(env, argv[1], &key, &key_len)) {
+  EdgeBufferLease key;
+  EdgeBufferLease iv;
+  EdgeBufferLease input;
+  if (!key.Acquire(env, argv[1], unofficial_napi_buffer_access_read)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "key must be a Buffer");
     return nullptr;
   }
@@ -1457,11 +1406,11 @@ napi_value CryptoCipherTransform(napi_env env, napi_callback_info info) {
   napi_valuetype iv_type = napi_undefined;
   if (napi_typeof(env, argv[2], &iv_type) == napi_ok && iv_type == napi_null) {
     iv_is_null = true;
-  } else if (!GetBufferBytes(env, argv[2], &iv, &iv_len)) {
+  } else if (!iv.Acquire(env, argv[2], unofficial_napi_buffer_access_read)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "iv must be a Buffer or null");
     return nullptr;
   }
-  if (!GetBufferBytes(env, argv[3], &input, &in_len)) {
+  if (!input.Acquire(env, argv[3], unofficial_napi_buffer_access_read)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "input must be a Buffer");
     return nullptr;
   }
@@ -1475,17 +1424,17 @@ napi_value CryptoCipherTransform(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_CRYPTO_UNKNOWN_CIPHER", "Unknown cipher");
     return nullptr;
   }
-  if (cipher.getKeyLength() > 0 && key_len != static_cast<size_t>(cipher.getKeyLength())) {
+  if (cipher.getKeyLength() > 0 && key.size() != static_cast<size_t>(cipher.getKeyLength())) {
     ThrowError(env, "ERR_CRYPTO_INVALID_KEYLEN", "Invalid key length");
     return nullptr;
   }
-  if (!iv_is_null && cipher.getIvLength() >= 0 && iv_len != static_cast<size_t>(cipher.getIvLength())) {
+  if (!iv_is_null && cipher.getIvLength() >= 0 && iv.size() != static_cast<size_t>(cipher.getIvLength())) {
     ThrowError(env, "ERR_CRYPTO_INVALID_IV", "Invalid IV length");
     return nullptr;
   }
 
   auto ctx = ncrypto::CipherCtxPointer::New();
-  if (!ctx || !ctx.init(cipher, !decrypt, key, iv_is_null ? nullptr : iv)) {
+  if (!ctx || !ctx.init(cipher, !decrypt, key.data(), iv_is_null ? nullptr : iv.data())) {
     ThrowLastOpenSslError(env, "ERR_CRYPTO_OPERATION_FAILED", "cipher initialization failed");
     return nullptr;
   }
@@ -1494,10 +1443,10 @@ napi_value CryptoCipherTransform(napi_env env, napi_callback_info info) {
     return nullptr;
   }
 
-  std::vector<uint8_t> out(in_len + std::max(32, ctx.getBlockSize() + 16));
+  std::vector<uint8_t> out(input.size() + std::max(32, ctx.getBlockSize() + 16));
   int out1 = 0;
   int out2 = 0;
-  if (!ctx.update({input, in_len}, out.data(), &out1, false) ||
+  if (!ctx.update({input.data(), input.size()}, out.data(), &out1, false) ||
       !ctx.update({nullptr, 0}, out.data() + out1, &out2, true)) {
     ThrowLastOpenSslError(env, "ERR_CRYPTO_OPERATION_FAILED", "cipher operation failed");
     return nullptr;
