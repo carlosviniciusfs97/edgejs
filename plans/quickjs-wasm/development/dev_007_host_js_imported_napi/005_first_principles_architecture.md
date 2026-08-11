@@ -75,8 +75,14 @@ Files under `lib/` must remain unchanged.
   host-JavaScript leases accept exact SharedArrayBuffer ranges through the same
   contract; provider tests cover read/write access and copy-back.
 - [x] Replaced SDK shutdown's one-timer-turn cleanup guess with an explicit
-  scheduler-close acknowledgment sent only after all worker handles are
-  dropped. The full host-JavaScript suite now releases consecutive clients.
+  scheduler drain. Acknowledged shutdown waits until every active WASIX task
+  reaches its worker-idle boundary before worker handles are dropped; ordinary
+  drop remains immediate abandonment. Repeated full host-JavaScript suites now
+  release consecutive clients without racing guest cleanup.
+- [x] Removed the SDK's decoding and mutation of libc-private pthread control
+  blocks. Targeted WASIX cancellation now retains only the semantic
+  `(pid, tid)` to browser-worker ownership map; normal shutdown never simulates
+  guest thread-exit bookkeeping.
 - [ ] Convert every remaining Edge raw-pointer consumer to the lease API,
   continuing with synchronous Buffer/encoding and crypto paths. Classify
   guest-backed control blocks separately: their pointers are intentionally
