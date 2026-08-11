@@ -21,7 +21,6 @@ napi_value CryptoGetSystemCACertificates(napi_env env, napi_callback_info info);
 napi_value CryptoGetUserRootCertificates(napi_env env, napi_callback_info info);
 napi_value CryptoResetRootCertStore(napi_env env, napi_callback_info info);
 napi_value CryptoStartLoadingCertificatesOffThread(napi_env env, napi_callback_info info);
-bool GetAnyBufferSourceBytes(napi_env env, napi_value value, uint8_t** data, size_t* len);
 EVP_PKEY* ParsePrivateKeyWithPassphrase(const uint8_t* data,
                                         size_t len,
                                         const uint8_t* passphrase,

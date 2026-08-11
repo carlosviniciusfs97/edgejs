@@ -98,12 +98,12 @@ Files under `lib/` must remain unchanged.
   leases. The lease ends immediately after ICU consumes the bytes, before the
   JavaScript result is created; native and host-JavaScript tests cover exact
   UTF-8 subviews and UTF-16LE transcoding.
-- [ ] Convert every remaining Edge raw-pointer consumer to the lease API,
-  continuing with retained crypto/TLS state and the remaining BufferSource
-  consumers in process, spawn, HTTP, module loading, messaging, ICU, UDP, and
-  WebAssembly bindings. Classify guest-backed control blocks separately: their
-  pointers are intentionally shared and must not be converted to copied
-  leases.
+- [x] Converted every remaining Edge raw-pointer byte consumer to the lease
+  API, including retained stream/libuv writes, crypto/TLS, process and V8
+  output buffers, spawn, HTTP, module loading, messaging, ICU, UDP, and
+  WebAssembly bindings. Guest-backed control blocks are classified separately
+  below because their pointers are intentionally shared and must not be
+  converted to copied leases.
 - [ ] Move the remaining WASIX/libuv lifecycle issues to Wasmer and run the
   complete native/browser/wasmer-sh/pnpm/Next.js acceptance matrix.
 
@@ -279,12 +279,25 @@ provider capability or an operating-system capability.
 | engine string limits | V8 and QuickJS have different engine limits | Query a provider capability or enforce the Node-compatible public limit; do not infer the engine from the compile target. |
 | environment embedder hooks | Embedded providers currently expose lifecycle hooks unavailable through imported N-API | Make lifecycle registration part of the provider contract, then call it unconditionally. Environment cleanup must release outstanding leases and callbacks. |
 
-The next implementation slice is the remaining raw-pointer audit. Each caller
-must be classified as a synchronous non-reentrant access, an asynchronous or
-reentrant retained access which needs a lease, or an intentionally shared
-guest-backed control block. Conversion is driven by that lifetime, not by the
-compile target. Engine string limits and lifecycle hooks then move behind
-provider capabilities before the complete browser/wasmer-sh acceptance run.
+The raw-pointer audit is complete. Every BufferSource byte consumer now either
+owns a scoped lease or transfers a lease into the asynchronous request that
+retains the pointer. Raw `napi_get_*_info` calls outside the exceptions below
+request metadata only.
+
+The remaining direct pointers all originate from
+`unofficial_napi_create_guest_backed_typedarray`; they are intentionally aliased
+control blocks rather than copied BufferSource access:
+
+| Control block | Native/JavaScript users | Why it remains shared |
+| --- | --- | --- |
+| Buffer flags and module-loader flags | buffer/module bindings and bootstrap JavaScript | JavaScript and native code observe the same small state word across calls. |
+| Stream state, task queue, and timer state | stream callbacks, next-tick scheduling, immediates, and timers | Both sides update scheduling state without an acquire/release boundary. |
+| Async-hook fields, async IDs, and ID stack | `binding_async_wrap.cc` and `edge_async_wrap.cc` | Async context transitions read and write the same state throughout nested callbacks. |
+| HTTP/2 session and stream fields | native nghttp2 callbacks and JavaScript HTTP/2 state | Callback-driven state is synchronously shared in both directions. |
+
+Conversion was driven by lifetime rather than the compile target. Engine
+string limits and lifecycle hooks can now move behind provider capabilities
+before the complete browser/wasmer-sh acceptance run.
 
 ## Acceptance gates
 

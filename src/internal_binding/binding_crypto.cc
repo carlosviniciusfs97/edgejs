@@ -39,6 +39,7 @@
 #include <openssl/x509.h>
 
 #include "ncrypto.h"
+#include "edge_buffer_lease.h"
 #include "edge_crypto.h"
 #include "crypto/edge_crypto_binding.h"
 #include "internal_binding/helpers.h"
@@ -186,71 +187,6 @@ void EmitProcessDeprecationWarning(napi_env env, const char* message, const char
   }
 }
 
-bool GetByteSpan(napi_env env, napi_value value, const uint8_t** data, size_t* length) {
-  if (value == nullptr || data == nullptr || length == nullptr) return false;
-  *data = nullptr;
-  *length = 0;
-
-  uint8_t* mutable_data = nullptr;
-  size_t mutable_length = 0;
-  if (edge::crypto::GetAnyBufferSourceBytes(env, value, &mutable_data, &mutable_length)) {
-    *data = mutable_data;
-    *length = mutable_length;
-    return true;
-  }
-
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* raw = nullptr;
-    if (napi_get_buffer_info(env, value, &raw, length) != napi_ok || raw == nullptr) return false;
-    *data = static_cast<const uint8_t*>(raw);
-    return true;
-  }
-
-  bool is_typed_array = false;
-  if (napi_is_typedarray(env, value, &is_typed_array) == napi_ok && is_typed_array) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t len = 0;
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t offset = 0;
-    if (napi_get_typedarray_info(env, value, &type, &len, &raw, &arraybuffer, &offset) != napi_ok || raw == nullptr) {
-      return false;
-    }
-    size_t bytes_per_element = 1;
-    switch (type) {
-      case napi_int8_array:
-      case napi_uint8_array:
-      case napi_uint8_clamped_array:
-        bytes_per_element = 1;
-        break;
-      case napi_int16_array:
-      case napi_uint16_array:
-      case napi_float16_array:
-        bytes_per_element = 2;
-        break;
-      case napi_int32_array:
-      case napi_uint32_array:
-      case napi_float32_array:
-        bytes_per_element = 4;
-        break;
-      case napi_float64_array:
-      case napi_bigint64_array:
-      case napi_biguint64_array:
-        bytes_per_element = 8;
-        break;
-      default:
-        bytes_per_element = 1;
-        break;
-    }
-    *data = static_cast<const uint8_t*>(raw);
-    *length = len * bytes_per_element;
-    return true;
-  }
-
-  return false;
-}
-
 bool GetBinaryByteLength(napi_env env, napi_value value, size_t* length) {
   if (value == nullptr || length == nullptr) return false;
   *length = 0;
@@ -325,13 +261,6 @@ std::vector<uint8_t> ValueToBytes(napi_env env, napi_value value) {
       (void)unofficial_napi_release_buffer_lease(env, lease, false);
     }
   }
-  const uint8_t* span = nullptr;
-  size_t span_len = 0;
-  if (GetByteSpan(env, value, &span, &span_len)) {
-    out.assign(span, span + span_len);
-    return out;
-  }
-
   if (value != nullptr) {
     napi_value export_fn = nullptr;
     napi_valuetype t = napi_undefined;
@@ -536,28 +465,29 @@ bool GetNamedStringValue(napi_env env, napi_value value, const char* key, std::s
 
 napi_value CopyAsArrayBuffer(napi_env env, napi_value value) {
   if (value == nullptr || IsUndefined(env, value)) return value;
-  const uint8_t* data = nullptr;
   size_t len = 0;
-  if (!GetByteSpan(env, value, &data, &len)) return value;
+  if (!GetBinaryByteLength(env, value, &len)) return value;
+  const std::vector<uint8_t> bytes = ValueToBytes(env, value);
   napi_value out = nullptr;
-  void* raw = nullptr;
-  if (napi_create_arraybuffer(env, len, &raw, &out) != napi_ok || out == nullptr || raw == nullptr) {
+  if (napi_create_arraybuffer(env, bytes.size(), nullptr, &out) != napi_ok || out == nullptr) {
     return value;
   }
-  if (len > 0) std::memcpy(raw, data, len);
+  EdgeBufferLease destination;
+  if (!destination.Acquire(env, out, unofficial_napi_buffer_access_readwrite)) return value;
+  if (!bytes.empty()) std::memcpy(destination.data(), bytes.data(), bytes.size());
+  if (!destination.Release(true)) return value;
   return out;
 }
 
 napi_value CreateArrayBufferCopy(napi_env env, const uint8_t* data, size_t len) {
   napi_value out = nullptr;
-  void* raw = nullptr;
-  if (napi_create_arraybuffer(env, len, &raw, &out) != napi_ok || out == nullptr) {
+  if (napi_create_arraybuffer(env, len, nullptr, &out) != napi_ok || out == nullptr) {
     return Undefined(env);
   }
-  if (len > 0) {
-    if (raw == nullptr) return Undefined(env);
-    std::memcpy(raw, data, len);
-  }
+  EdgeBufferLease destination;
+  if (!destination.Acquire(env, out, unofficial_napi_buffer_access_readwrite)) return Undefined(env);
+  if (len > 0) std::memcpy(destination.data(), data, len);
+  if (!destination.Release(true)) return Undefined(env);
   return out;
 }
 
@@ -2284,13 +2214,13 @@ napi_value EcdhConvertKey(napi_env env, napi_callback_info info) {
   napi_value argv[3] = {nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 3) return nullptr;
 
-  const uint8_t* key_bytes = nullptr;
   size_t key_len = 0;
-  if (!GetByteSpan(env, argv[0], &key_bytes, &key_len)) {
+  if (!GetBinaryByteLength(env, argv[0], &key_len)) {
     napi_throw_type_error(env, "ERR_INVALID_ARG_TYPE", "key must be an ArrayBuffer or BufferView");
     return nullptr;
   }
-  if (key_len == 0) {
+  const std::vector<uint8_t> key_bytes = ValueToBytes(env, argv[0]);
+  if (key_bytes.empty()) {
     napi_value empty = nullptr;
     napi_create_string_utf8(env, "", 0, &empty);
     return empty;
@@ -2316,7 +2246,7 @@ napi_value EcdhConvertKey(napi_env env, napi_callback_info info) {
   EC_POINT* point = group != nullptr ? EC_POINT_new(group) : nullptr;
   if (group == nullptr ||
       point == nullptr ||
-      EC_POINT_oct2point(group, point, key_bytes, key_len, nullptr) != 1) {
+      EC_POINT_oct2point(group, point, key_bytes.data(), key_bytes.size(), nullptr) != 1) {
     if (point != nullptr) EC_POINT_free(point);
     if (group != nullptr) EC_GROUP_free(group);
     ERR_clear_error();
@@ -3226,16 +3156,16 @@ napi_value CertVerifySpkac(napi_env env, napi_callback_info info) {
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1 || argv[0] == nullptr) {
     return nullptr;
   }
-  const uint8_t* data = nullptr;
   size_t len = 0;
-  if (!GetByteSpan(env, argv[0], &data, &len)) return nullptr;
-  if (len == 0) return EmptyString(env);
-  if (len > static_cast<size_t>(std::numeric_limits<int>::max())) {
+  if (!GetBinaryByteLength(env, argv[0], &len)) return nullptr;
+  const std::vector<uint8_t> data = ValueToBytes(env, argv[0]);
+  if (data.empty()) return EmptyString(env);
+  if (data.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
     napi_throw(env, CreateErrorWithCode(env, "ERR_OUT_OF_RANGE", "spkac is too large"));
     return nullptr;
   }
 
-  NETSCAPE_SPKI* spki = DecodeSpkac(data, len);
+  NETSCAPE_SPKI* spki = DecodeSpkac(data.data(), data.size());
   bool verified = false;
   if (spki != nullptr) {
     EVP_PKEY* pkey = NETSCAPE_SPKI_get_pubkey(spki);
@@ -3257,16 +3187,16 @@ napi_value CertExportPublicKey(napi_env env, napi_callback_info info) {
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1 || argv[0] == nullptr) {
     return nullptr;
   }
-  const uint8_t* data = nullptr;
   size_t len = 0;
-  if (!GetByteSpan(env, argv[0], &data, &len)) return nullptr;
-  if (len == 0) return EmptyString(env);
-  if (len > static_cast<size_t>(std::numeric_limits<int>::max())) {
+  if (!GetBinaryByteLength(env, argv[0], &len)) return nullptr;
+  const std::vector<uint8_t> data = ValueToBytes(env, argv[0]);
+  if (data.empty()) return EmptyString(env);
+  if (data.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
     napi_throw(env, CreateErrorWithCode(env, "ERR_OUT_OF_RANGE", "spkac is too large"));
     return nullptr;
   }
 
-  NETSCAPE_SPKI* spki = DecodeSpkac(data, len);
+  NETSCAPE_SPKI* spki = DecodeSpkac(data.data(), data.size());
   if (spki == nullptr) return EmptyString(env);
 
   napi_value out = EmptyString(env);
@@ -3294,16 +3224,16 @@ napi_value CertExportChallenge(napi_env env, napi_callback_info info) {
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1 || argv[0] == nullptr) {
     return nullptr;
   }
-  const uint8_t* data = nullptr;
   size_t len = 0;
-  if (!GetByteSpan(env, argv[0], &data, &len)) return nullptr;
-  if (len == 0) return EmptyString(env);
-  if (len > static_cast<size_t>(std::numeric_limits<int>::max())) {
+  if (!GetBinaryByteLength(env, argv[0], &len)) return nullptr;
+  const std::vector<uint8_t> data = ValueToBytes(env, argv[0]);
+  if (data.empty()) return EmptyString(env);
+  if (data.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
     napi_throw(env, CreateErrorWithCode(env, "ERR_OUT_OF_RANGE", "spkac is too large"));
     return nullptr;
   }
 
-  NETSCAPE_SPKI* spki = DecodeSpkac(data, len);
+  NETSCAPE_SPKI* spki = DecodeSpkac(data.data(), data.size());
   if (spki == nullptr || spki->spkac == nullptr || spki->spkac->challenge == nullptr) {
     if (spki != nullptr) NETSCAPE_SPKI_free(spki);
     return EmptyString(env);
@@ -4975,13 +4905,13 @@ napi_value CheckPrimeJobCtor(napi_env env, napi_callback_info info) {
   if (this_arg == nullptr) return nullptr;
 
   if (argc >= 2 && argv[1] != nullptr && !IsNullOrUndefinedValue(env, argv[1])) {
-    const uint8_t* candidate = nullptr;
     size_t candidate_len = 0;
-    if (!GetByteSpan(env, argv[1], &candidate, &candidate_len)) {
+    if (!GetBinaryByteLength(env, argv[1], &candidate_len)) {
       napi_throw_type_error(env, "ERR_INVALID_ARG_TYPE", "candidate must be an ArrayBuffer or BufferView");
       return nullptr;
     }
-    ncrypto::BignumPointer bn(candidate, candidate_len);
+    const std::vector<uint8_t> candidate = ValueToBytes(env, argv[1]);
+    ncrypto::BignumPointer bn(candidate.data(), candidate.size());
     if (!bn) {
       const unsigned long err = ConsumePreferredOpenSslError();
       napi_throw(env, CreateOpenSslError(env, MapOpenSslErrorCode(err), err, "BignumPointer"));
@@ -6890,14 +6820,14 @@ napi_value CheckPrimeJobRun(napi_env env, napi_callback_info info) {
   }
 
   const napi_value candidate_v = GetRefValue(env, wrap->args[0]);
-  const uint8_t* candidate_bytes = nullptr;
   size_t candidate_len = 0;
-  if (!GetByteSpan(env, candidate_v, &candidate_bytes, &candidate_len)) {
+  if (!GetBinaryByteLength(env, candidate_v, &candidate_len)) {
     napi_value result = BuildJobErrorResult(env, "ERR_CRYPTO_OPERATION_FAILED", "Invalid check prime arguments");
     return FinalizeJobRunResult(env, this_arg, wrap, result);
   }
 
-  ncrypto::BignumPointer candidate(candidate_bytes, candidate_len);
+  const std::vector<uint8_t> candidate_bytes = ValueToBytes(env, candidate_v);
+  ncrypto::BignumPointer candidate(candidate_bytes.data(), candidate_bytes.size());
   if (!candidate) {
     napi_value result = BuildJobOpenSslErrorResult(env, "ERR_CRYPTO_OPERATION_FAILED", "BignumPointer");
     return FinalizeJobRunResult(env, this_arg, wrap, result);
@@ -7001,12 +6931,20 @@ napi_value DeriveBitsJobRun(napi_env env,
   }
 
   napi_value value = nullptr;
-  void* raw = nullptr;
-  if (napi_create_arraybuffer(env, secret.size(), &raw, &value) != napi_ok || value == nullptr) {
+  if (napi_create_arraybuffer(env, secret.size(), nullptr, &value) != napi_ok || value == nullptr) {
     napi_value result = BuildJobErrorResult(env, "ERR_CRYPTO_OPERATION_FAILED", failure_message);
     return FinalizeJobRunResult(env, this_arg, wrap, result);
   }
-  if (raw != nullptr && !secret.empty()) std::memcpy(raw, secret.data(), secret.size());
+  EdgeBufferLease output;
+  if (!output.Acquire(env, value, unofficial_napi_buffer_access_readwrite)) {
+    napi_value result = BuildJobErrorResult(env, "ERR_CRYPTO_OPERATION_FAILED", failure_message);
+    return FinalizeJobRunResult(env, this_arg, wrap, result);
+  }
+  if (!secret.empty()) std::memcpy(output.data(), secret.data(), secret.size());
+  if (!output.Release(true)) {
+    napi_value result = BuildJobErrorResult(env, "ERR_CRYPTO_OPERATION_FAILED", failure_message);
+    return FinalizeJobRunResult(env, this_arg, wrap, result);
+  }
   return FinalizeJobRunResult(env, this_arg, wrap, BuildJobResult(env, nullptr, value));
 }
 
@@ -8285,11 +8223,13 @@ napi_value CryptoSecureBuffer(napi_env env, napi_callback_info info) {
   if (argc >= 1 && argv[0] != nullptr) napi_get_value_int64(env, argv[0], &size);
   if (size < 0) size = 0;
   napi_value ab = nullptr;
-  void* data = nullptr;
-  if (napi_create_arraybuffer(env, static_cast<size_t>(size), &data, &ab) != napi_ok || ab == nullptr) {
+  if (napi_create_arraybuffer(env, static_cast<size_t>(size), nullptr, &ab) != napi_ok || ab == nullptr) {
     return Undefined(env);
   }
-  if (data != nullptr) std::memset(data, 0, static_cast<size_t>(size));
+  EdgeBufferLease output;
+  if (!output.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return Undefined(env);
+  if (size > 0) std::memset(output.data(), 0, static_cast<size_t>(size));
+  if (!output.Release(true)) return Undefined(env);
   napi_value out = nullptr;
   napi_create_typedarray(env, napi_uint8_array, static_cast<size_t>(size), ab, 0, &out);
   return out != nullptr ? out : Undefined(env);

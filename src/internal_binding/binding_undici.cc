@@ -4,6 +4,7 @@
 #include <cstring>
 #include <string>
 
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "internal_binding/helpers.h"
 #include "llhttp.h"
@@ -94,27 +95,21 @@ NativeLlhttpParser* GetNativeParser(napi_env env, napi_value value) {
   return handle->parser;
 }
 
-bool ReadBufferLike(napi_env env, napi_value value, const char** data, size_t* length) {
-  if (env == nullptr || value == nullptr || data == nullptr || length == nullptr) return false;
-  void* raw = nullptr;
-  size_t len = 0;
-  if (napi_get_buffer_info(env, value, &raw, &len) == napi_ok) {
-    *data = static_cast<const char*>(raw);
-    *length = len;
-    return true;
+bool AcquireBufferLike(napi_env env, napi_value value, EdgeBufferLease* lease) {
+  if (env == nullptr || value == nullptr || lease == nullptr) return false;
+  bool is_buffer = false;
+  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
+    return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
+  bool is_typedarray = false;
   napi_typedarray_type type = napi_uint8_array;
-  size_t element_length = 0;
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
-  if (napi_get_typedarray_info(env, value, &type, &element_length, &raw, &arraybuffer, &byte_offset) != napi_ok ||
+  if (napi_is_typedarray(env, value, &is_typedarray) != napi_ok || !is_typedarray ||
+      napi_get_typedarray_info(env, value, &type, nullptr, nullptr, nullptr, nullptr) != napi_ok ||
       (type != napi_uint8_array && type != napi_uint8_clamped_array)) {
     return false;
   }
-  *data = static_cast<const char*>(raw);
-  *length = element_length;
-  return true;
+  return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
 }
 
 napi_value MakeBufferCopy(napi_env env, const char* data, size_t length) {
@@ -297,12 +292,13 @@ napi_value LlhttpExecuteCallback(napi_env env, napi_callback_info info) {
   NativeLlhttpParser* parser = GetNativeParser(env, argv[0]);
   if (parser == nullptr) return nullptr;
 
-  const char* data = nullptr;
-  size_t length = 0;
-  if (!ReadBufferLike(env, argv[1], &data, &length)) {
+  EdgeBufferLease chunk;
+  if (!AcquireBufferLike(env, argv[1], &chunk)) {
     napi_throw_type_error(env, nullptr, "llhttp_execute chunk must be a Buffer or Uint8Array");
     return nullptr;
   }
+  const char* data = reinterpret_cast<const char*>(chunk.data());
+  const size_t length = chunk.size();
 
   parser->pending_exception = false;
   parser->current_data = data;
@@ -317,6 +313,7 @@ napi_value LlhttpExecuteCallback(napi_env env, napi_callback_info info) {
 
   parser->current_data = nullptr;
   parser->current_length = 0;
+  if (!chunk.Release(false)) return nullptr;
 
   if (parser->pending_exception) {
     return nullptr;

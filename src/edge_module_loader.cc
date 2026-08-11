@@ -1,5 +1,6 @@
 #include "edge_module_loader.h"
 #include "edge_buffer.h"
+#include "edge_buffer_lease.h"
 #include "edge_builtin_bytecode.h"
 #include "edge_bytecode_cache.h"
 #include "edge_cares_wrap.h"
@@ -1042,7 +1043,7 @@ static NativeBuiltinExecutionKind GetNativeBuiltinExecutionKind(const std::strin
   return NativeBuiltinExecutionKind::kUnsupported;
 }
 
-static bool GetTypedArrayBytes(napi_env env, napi_value value, const uint8_t** data_out, size_t* len_out);
+static bool AcquireArrayBufferView(napi_env env, napi_value value, EdgeBufferLease* lease);
 
 // Builtins consolidated bytecode cache: returns a bytecode handle for the
 // builtin either deserialized from the per-binary cache file or compiled
@@ -1103,10 +1104,9 @@ static void* AcquireBuiltinBytecode(napi_env env,
   }
   napi_value buffer = nullptr;
   if (unofficial_napi_bytecode_serialize(env, handle, &buffer) == napi_ok && buffer != nullptr) {
-    const uint8_t* bytes = nullptr;
-    size_t length = 0;
-    if (GetTypedArrayBytes(env, buffer, &bytes, &length) && length > 0) {
-      edge_builtin_bytecode::Record(kind, id, source, bytes, length);
+    EdgeBufferLease bytes;
+    if (AcquireArrayBufferView(env, buffer, &bytes) && bytes.size() > 0) {
+      edge_builtin_bytecode::Record(kind, id, source, bytes.data(), bytes.size());
     }
   }
   return handle;
@@ -3177,18 +3177,13 @@ static napi_value CreateContextifyCjsLoaderResult(napi_env env,
 
 // Extracts the bytes of any ArrayBufferView (typed array or DataView) —
 // Node's vm cachedData accepts every view flavor over the same buffer.
-static bool GetTypedArrayBytes(napi_env env, napi_value value, const uint8_t** data_out, size_t* len_out) {
-  *data_out = nullptr;
-  *len_out = 0;
-  if (value == nullptr) return false;
+static bool AcquireArrayBufferView(napi_env env, napi_value value, EdgeBufferLease* lease) {
+  if (value == nullptr || lease == nullptr) return false;
 
   bool is_typedarray = false;
   if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
     napi_typedarray_type type = napi_uint8_array;
-    size_t length = 0;
-    void* data = nullptr;
-    if (napi_get_typedarray_info(env, value, &type, &length, &data, nullptr, nullptr) != napi_ok ||
-        data == nullptr) {
+    if (napi_get_typedarray_info(env, value, &type, nullptr, nullptr, nullptr, nullptr) != napi_ok) {
       return false;
     }
     size_t element_size = 1;
@@ -3216,22 +3211,13 @@ static bool GetTypedArrayBytes(napi_env env, napi_value value, const uint8_t** d
       default:
         return false;
     }
-    *data_out = static_cast<const uint8_t*>(data);
-    *len_out = length * element_size;
-    return true;
+    (void)element_size;
+    return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
   bool is_dataview = false;
   if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    size_t byte_length = 0;
-    void* data = nullptr;
-    if (napi_get_dataview_info(env, value, &byte_length, &data, nullptr, nullptr) != napi_ok ||
-        data == nullptr) {
-      return false;
-    }
-    *data_out = static_cast<const uint8_t*>(data);
-    *len_out = byte_length;
-    return true;
+    return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
   return false;
 }
@@ -3352,15 +3338,14 @@ static napi_value ContextifyScriptConstructorCallback(napi_env env, napi_callbac
   bool cached_data_rejected = false;
   void* script_bytecode = nullptr;
   if (has_cached_data_arg) {
-    const uint8_t* bytes = nullptr;
-    size_t length = 0;
+    EdgeBufferLease bytes;
     // The provider validates source/shape/integrity itself (V8 CachedData /
     // QuickJS QJSB header) and reports a mismatch via rejected_out.
-    if (GetTypedArrayBytes(env, argv[4], &bytes, &length) && length > 0) {
+    if (AcquireArrayBufferView(env, argv[4], &bytes) && bytes.size() > 0) {
       bool rejected = false;
       if (unofficial_napi_bytecode_deserialize(env,
-                                               bytes,
-                                               length,
+                                               bytes.data(),
+                                               bytes.size(),
                                                code,
                                                filename,
                                                unofficial_napi_bytecode_shape_script,
@@ -3401,15 +3386,14 @@ static napi_value ContextifyScriptConstructorCallback(napi_env env, napi_callbac
   }
   if (produce_cached_data) {
     napi_value cache_buffer = nullptr;
-    const uint8_t* produced_bytes = nullptr;
-    size_t produced_len = 0;
+    EdgeBufferLease produced_bytes;
     // Only report cachedDataProduced when the engine actually emitted bytes
     // (an empty buffer round-trips as "rejected", so reporting it as produced
     // would be misleading).
     bool produced_ok =
         unofficial_napi_bytecode_serialize(env, script_bytecode, &cache_buffer) == napi_ok &&
         cache_buffer != nullptr &&
-        GetTypedArrayBytes(env, cache_buffer, &produced_bytes, &produced_len) && produced_len > 0;
+        AcquireArrayBufferView(env, cache_buffer, &produced_bytes) && produced_bytes.size() > 0;
     if (produced_ok) {
       cache_buffer = EnsureNodeBuffer(env, cache_buffer);
       produced_ok = cache_buffer != nullptr;
@@ -3797,15 +3781,14 @@ static napi_value ContextifyCompileFunctionCallback(napi_env env, napi_callback_
   void* fn_bytecode = nullptr;
   bool cached_data_rejected = false;
   if (has_cached_data) {
-    const uint8_t* bytes = nullptr;
-    size_t length = 0;
+    EdgeBufferLease bytes;
     // The provider validates source/shape/params/integrity itself (V8
     // CachedData / QuickJS QJSB header) and reports a mismatch via rejected_out.
-    if (GetTypedArrayBytes(env, cached_data, &bytes, &length) && length > 0) {
+    if (AcquireArrayBufferView(env, cached_data, &bytes) && bytes.size() > 0) {
       bool rejected = false;
       if (unofficial_napi_bytecode_deserialize(env,
-                                               bytes,
-                                               length,
+                                               bytes.data(),
+                                               bytes.size(),
                                                code,
                                                filename,
                                                unofficial_napi_bytecode_shape_cjs_function,
@@ -3867,12 +3850,11 @@ static napi_value ContextifyCompileFunctionCallback(napi_env env, napi_callback_
   }
   if (produce_cached_data && fn_bytecode != nullptr) {
     napi_value cache_buffer = nullptr;
-    const uint8_t* produced_bytes = nullptr;
-    size_t produced_len = 0;
+    EdgeBufferLease produced_bytes;
     bool produced_ok =
         unofficial_napi_bytecode_serialize(env, fn_bytecode, &cache_buffer) == napi_ok &&
         cache_buffer != nullptr &&
-        GetTypedArrayBytes(env, cache_buffer, &produced_bytes, &produced_len) && produced_len > 0;
+        AcquireArrayBufferView(env, cache_buffer, &produced_bytes) && produced_bytes.size() > 0;
     if (produced_ok) {
       cache_buffer = EnsureNodeBuffer(env, cache_buffer);
       produced_ok = cache_buffer != nullptr;
@@ -3990,14 +3972,13 @@ static napi_value ContextifyCompileFunctionForCJSLoaderCallback(napi_env env, na
         napi_value cache_buffer = nullptr;
         if (unofficial_napi_bytecode_serialize(env, cjs_bytecode, &cache_buffer) == napi_ok &&
             cache_buffer != nullptr) {
-          const uint8_t* bytes = nullptr;
-          size_t length = 0;
-          if (GetTypedArrayBytes(env, cache_buffer, &bytes, &length) && length > 0) {
+          EdgeBufferLease bytes;
+          if (AcquireArrayBufferView(env, cache_buffer, &bytes) && bytes.size() > 0) {
             edge_bytecode_cache::WriteSidecar(sidecar_source_path,
                                               sidecar_source_utf8,
                                               edge_bytecode_cache::kFlagCjsFunctionV1,
-                                              bytes,
-                                              length);
+                                              bytes.data(),
+                                              bytes.size());
           }
         }
       }

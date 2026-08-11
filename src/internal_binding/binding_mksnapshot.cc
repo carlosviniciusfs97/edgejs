@@ -1,6 +1,7 @@
 #include "internal_binding/binding_initializers.h"
 
 #include "edge_environment.h"
+#include "edge_buffer_lease.h"
 #include "internal_binding/helpers.h"
 
 namespace internal_binding {
@@ -68,11 +69,13 @@ napi_value InitMksnapshot(napi_env env) {
   define_noop("setDeserializeCallback");
   define_noop("setDeserializeMainFunction");
 
-  void* data = nullptr;
   napi_value ab = nullptr;
   napi_value is_building_snapshot_buffer = nullptr;
-  if (napi_create_arraybuffer(env, 1, &data, &ab) == napi_ok && data != nullptr && ab != nullptr) {
-    static_cast<uint8_t*>(data)[0] = 0;
+  if (napi_create_arraybuffer(env, 1, nullptr, &ab) == napi_ok && ab != nullptr) {
+    EdgeBufferLease flag;
+    if (!flag.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return undefined;
+    flag.data()[0] = 0;
+    if (!flag.Release(true)) return undefined;
     if (napi_create_typedarray(env, napi_uint8_array, 1, ab, 0, &is_building_snapshot_buffer) == napi_ok &&
         is_building_snapshot_buffer != nullptr) {
       napi_set_named_property(env, out, "isBuildingSnapshotBuffer", is_building_snapshot_buffer);

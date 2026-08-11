@@ -24,6 +24,7 @@
 #include "unofficial_napi.h"
 #include "edge_active_resource.h"
 #include "edge_async_wrap.h"
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_environment_runtime.h"
 #include "edge_env_loop.h"
@@ -547,19 +548,16 @@ std::array<double, 4> ReadResourceLimits(napi_env env, napi_value value) {
   bool is_typed_array = false;
   napi_typedarray_type typed_array_type = napi_int8_array;
   size_t length = 0;
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
   if (value == nullptr ||
       napi_is_typedarray(env, value, &is_typed_array) != napi_ok ||
       !is_typed_array ||
-      napi_get_typedarray_info(env, value, &typed_array_type, &length, nullptr, &arraybuffer, &byte_offset) != napi_ok ||
+      napi_get_typedarray_info(env, value, &typed_array_type, &length, nullptr, nullptr, nullptr) != napi_ok ||
       typed_array_type != napi_float64_array) {
     return limits;
   }
-  void* data = nullptr;
-  size_t byte_length = 0;
-  if (napi_get_arraybuffer_info(env, arraybuffer, &data, &byte_length) != napi_ok || data == nullptr) return limits;
-  const double* values = reinterpret_cast<const double*>(static_cast<uint8_t*>(data) + byte_offset);
+  EdgeBufferLease data;
+  if (!data.Acquire(env, value, unofficial_napi_buffer_access_read)) return limits;
+  const double* values = reinterpret_cast<const double*>(data.data());
   const size_t count = length < limits.size() ? length : limits.size();
   for (size_t i = 0; i < count; ++i) limits[i] = values[i];
   return limits;
@@ -567,13 +565,14 @@ std::array<double, 4> ReadResourceLimits(napi_env env, napi_value value) {
 
 napi_value BuildResourceLimitsArray(napi_env env, const std::array<double, 4>& limits) {
   napi_value ab = nullptr;
-  void* data = nullptr;
-  if (napi_create_arraybuffer(env, sizeof(double) * limits.size(), &data, &ab) != napi_ok || ab == nullptr ||
-      data == nullptr) {
+  if (napi_create_arraybuffer(env, sizeof(double) * limits.size(), nullptr, &ab) != napi_ok || ab == nullptr) {
     return Undefined(env);
   }
-  double* values = static_cast<double*>(data);
+  EdgeBufferLease data;
+  if (!data.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return Undefined(env);
+  double* values = reinterpret_cast<double*>(data.data());
   for (size_t i = 0; i < limits.size(); ++i) values[i] = limits[i];
+  if (!data.Release(true)) return Undefined(env);
   napi_value typed = nullptr;
   if (napi_create_typedarray(env, napi_float64_array, limits.size(), ab, 0, &typed) != napi_ok || typed == nullptr) {
     return Undefined(env);
@@ -699,14 +698,16 @@ napi_value HeapSnapshotHandleReadStart(napi_env env, napi_callback_info info) {
     state[kEdgeReadBytesOrError] = nread;
     state[kEdgeArrayBufferOffset] = 0;
     napi_value arraybuffer = nullptr;
-    void* data = nullptr;
     size_t length = payload != nullptr ? payload->size() : 0;
-    if (napi_create_arraybuffer(env, length, &data, &arraybuffer) != napi_ok || arraybuffer == nullptr) {
+    if (napi_create_arraybuffer(env, length, nullptr, &arraybuffer) != napi_ok || arraybuffer == nullptr) {
       return;
     }
-    if (payload != nullptr && data != nullptr && !payload->empty()) {
-      std::memcpy(data, payload->data(), payload->size());
+    EdgeBufferLease data;
+    if (!data.Acquire(env, arraybuffer, unofficial_napi_buffer_access_readwrite)) return;
+    if (payload != nullptr && !payload->empty()) {
+      std::memcpy(data.data(), payload->data(), payload->size());
     }
+    if (!data.Release(true)) return;
     napi_value argv[1] = {arraybuffer};
     napi_value ignored = nullptr;
     (void)napi_call_function(env, self, onread, 1, argv, &ignored);
@@ -1693,16 +1694,16 @@ napi_value WorkerImplTakeHeapSnapshot(napi_env env, napi_callback_info info) {
     bool is_typed_array = false;
     napi_typedarray_type type = napi_uint8_array;
     size_t length = 0;
-    void* data = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
     if (napi_is_typedarray(env, argv[0], &is_typed_array) == napi_ok &&
         is_typed_array &&
-        napi_get_typedarray_info(env, argv[0], &type, &length, &data, &arraybuffer, &byte_offset) == napi_ok &&
+        napi_get_typedarray_info(env, argv[0], &type, &length, nullptr, nullptr, nullptr) == napi_ok &&
         type == napi_uint8_array &&
-        data != nullptr &&
         length >= 2) {
-      const uint8_t* values = static_cast<const uint8_t*>(data);
+      EdgeBufferLease data;
+      if (!data.Acquire(env, argv[0], unofficial_napi_buffer_access_read)) {
+        return QueueWorkerTakerTask(env, wrap, std::move(task));
+      }
+      const uint8_t* values = data.data();
       task->heap_snapshot_options.expose_internals = values[0] != 0;
       task->heap_snapshot_options.expose_numeric_values = values[1] != 0;
     }

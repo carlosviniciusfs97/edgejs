@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "internal_binding/helpers.h"
 
@@ -93,35 +94,6 @@ bool ValueToUtf8(napi_env env, napi_value value, std::string* out) {
   return true;
 }
 
-size_t TypedArrayElementSize(napi_typedarray_type type) {
-  switch (type) {
-    case napi_int8_array:
-    case napi_uint8_array:
-    case napi_uint8_clamped_array:
-      return 1;
-    case napi_int16_array:
-    case napi_uint16_array:
-      return 2;
-    case napi_int32_array:
-    case napi_uint32_array:
-    case napi_float32_array:
-      return 4;
-    case napi_float64_array:
-    case napi_bigint64_array:
-    case napi_biguint64_array:
-      return 8;
-    default:
-      return 1;
-  }
-}
-
-bool AppendRawBytes(const uint8_t* data, size_t length, std::vector<uint8_t>* out) {
-  if (out == nullptr) return false;
-  if (data == nullptr || length == 0) return true;
-  out->insert(out->end(), data, data + length);
-  return true;
-}
-
 bool AppendBytesFromValue(napi_env env, napi_value value, std::vector<uint8_t>* out) {
   if (value == nullptr || out == nullptr) return false;
 
@@ -131,58 +103,23 @@ bool AppendBytesFromValue(napi_env env, napi_value value, std::vector<uint8_t>* 
     return AppendBytesFromValue(env, blob_data, out);
   }
 
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* data = nullptr;
-    size_t length = 0;
-    if (napi_get_arraybuffer_info(env, value, &data, &length) != napi_ok) return false;
-    return AppendRawBytes(static_cast<const uint8_t*>(data), length, out);
-  }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t length = 0;
-    void* data = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t offset = 0;
-    if (napi_get_typedarray_info(
-            env, value, &type, &length, &data, &arraybuffer, &offset) != napi_ok) {
-      return false;
-    }
-    (void)arraybuffer;
-    (void)offset;
-    const size_t byte_length = length * TypedArrayElementSize(type);
-    return AppendRawBytes(static_cast<const uint8_t*>(data), byte_length, out);
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    size_t byte_length = 0;
-    void* data = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(
-            env, value, &byte_length, &data, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-    (void)arraybuffer;
-    (void)byte_offset;
-    return AppendRawBytes(static_cast<const uint8_t*>(data), byte_length, out);
-  }
-
-  return false;
+  EdgeBufferLease bytes;
+  if (!bytes.Acquire(env, value, unofficial_napi_buffer_access_read)) return false;
+  if (bytes.size() != 0) out->insert(out->end(), bytes.data(), bytes.data() + bytes.size());
+  return bytes.Release(false);
 }
 
 napi_value CreateArrayBufferFromBytes(napi_env env, const uint8_t* bytes, size_t length) {
-  void* data = nullptr;
   napi_value out = nullptr;
-  if (napi_create_arraybuffer(env, length, &data, &out) != napi_ok || out == nullptr) {
+  if (napi_create_arraybuffer(env, length, nullptr, &out) != napi_ok || out == nullptr) {
     return Undefined(env);
   }
-  if (length > 0 && data != nullptr && bytes != nullptr) {
-    std::memcpy(data, bytes, length);
+  EdgeBufferLease destination;
+  if (!destination.Acquire(env, out, unofficial_napi_buffer_access_readwrite)) {
+    return Undefined(env);
   }
+  if (length > 0 && bytes != nullptr) std::memcpy(destination.data(), bytes, length);
+  if (!destination.Release(true)) return Undefined(env);
   return out;
 }
 
@@ -290,9 +227,8 @@ napi_value BlobHandleSliceCallback(napi_env env, napi_callback_info info) {
   napi_value arraybuffer = nullptr;
   if (!GetBlobHandleArrayBuffer(env, this_arg, &arraybuffer)) return Undefined(env);
 
-  void* data = nullptr;
   size_t byte_length = 0;
-  if (napi_get_arraybuffer_info(env, arraybuffer, &data, &byte_length) != napi_ok) {
+  if (napi_get_arraybuffer_info(env, arraybuffer, nullptr, &byte_length) != napi_ok) {
     return Undefined(env);
   }
 
@@ -311,9 +247,14 @@ napi_value BlobHandleSliceCallback(napi_env env, napi_callback_info info) {
   if (end > length_u32) end = length_u32;
   if (end < start) end = start;
 
-  const uint8_t* bytes = static_cast<const uint8_t*>(data);
   const size_t span = static_cast<size_t>(end - start);
-  napi_value sliced = CreateArrayBufferFromBytes(env, bytes + start, span);
+  EdgeBufferLease source;
+  if (!source.Acquire(env, arraybuffer, start, span, unofficial_napi_buffer_access_read)) {
+    return Undefined(env);
+  }
+  std::vector<uint8_t> copied(source.data(), source.data() + span);
+  if (!source.Release(false)) return Undefined(env);
+  napi_value sliced = CreateArrayBufferFromBytes(env, copied);
   if (sliced == nullptr || IsUndefined(env, sliced)) return Undefined(env);
   return CreateBlobHandle(env, sliced);
 }

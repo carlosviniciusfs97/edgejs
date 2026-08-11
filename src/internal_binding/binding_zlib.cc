@@ -20,6 +20,7 @@
 #include "brotli/encode.h"
 #include "internal_binding/helpers.h"
 #include "edge_async_wrap.h"
+#include "edge_buffer_lease.h"
 #include "unofficial_napi.h"
 #include "zlib.h"
 #include "zstd.h"
@@ -1038,61 +1039,21 @@ bool ExtractByteSpan(napi_env env, napi_value value, ByteSpan* out) {
   out->len = 0;
   if (env == nullptr || value == nullptr) return false;
 
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* raw = nullptr;
-    size_t len = 0;
-    if (napi_get_buffer_info(env, value, &raw, &len) == napi_ok) {
-      out->data = (raw != nullptr) ? static_cast<uint8_t*>(raw) : &g_empty_buffer;
-      out->len = len;
-      return true;
-    }
+  size_t byte_length = 0;
+  if (!EdgeGetBinaryByteLength(env, value, &byte_length)) return false;
+  void* data = nullptr;
+  if (unofficial_napi_acquire_buffer_lease(env,
+                                           value,
+                                           0,
+                                           byte_length,
+                                           unofficial_napi_buffer_access_read,
+                                           &out->lease,
+                                           &data) != napi_ok) {
+    return false;
   }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t len = 0;
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(
-            env, value, &type, &len, &raw, &arraybuffer, &byte_offset) == napi_ok &&
-        (raw != nullptr || len == 0)) {
-      out->data = (raw != nullptr) ? static_cast<uint8_t*>(raw) : &g_empty_buffer;
-      out->len = len * TypedArrayElementSize(type);
-      return true;
-    }
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    size_t len = 0;
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, &len, &raw, &arraybuffer, &byte_offset) ==
-            napi_ok &&
-        (raw != nullptr || len == 0)) {
-      out->data = (raw != nullptr) ? static_cast<uint8_t*>(raw) : &g_empty_buffer;
-      out->len = len;
-      return true;
-    }
-  }
-
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* raw = nullptr;
-    size_t len = 0;
-    if (napi_get_arraybuffer_info(env, value, &raw, &len) == napi_ok &&
-        (raw != nullptr || len == 0)) {
-      out->data = (raw != nullptr) ? static_cast<uint8_t*>(raw) : &g_empty_buffer;
-      out->len = len;
-      return true;
-    }
-  }
-
-  return false;
+  out->data = data != nullptr ? static_cast<uint8_t*>(data) : &g_empty_buffer;
+  out->len = byte_length;
+  return true;
 }
 
 bool ByteLengthOfBinaryValue(napi_env env, napi_value value, size_t* length_out) {
@@ -1149,20 +1110,15 @@ bool AcquireBufferAccess(napi_env env,
 
 bool ExtractBinarySequence(napi_env env,
                            napi_value value,
-                           const uint8_t** data,
-                           size_t* len,
+                           ByteSpan* span,
                            std::string* temp_utf8) {
-  if (data == nullptr || len == nullptr || temp_utf8 == nullptr) return false;
-  *data = nullptr;
-  *len = 0;
+  if (span == nullptr || temp_utf8 == nullptr) return false;
+  span->data = nullptr;
+  span->len = 0;
+  span->lease = nullptr;
   temp_utf8->clear();
 
-  ByteSpan span;
-  if (ExtractByteSpan(env, value, &span)) {
-    *data = span.data;
-    *len = span.len;
-    return true;
-  }
+  if (ExtractByteSpan(env, value, span)) return true;
 
   napi_valuetype type = napi_undefined;
   if (napi_typeof(env, value, &type) == napi_ok && type == napi_string) {
@@ -1176,33 +1132,33 @@ bool ExtractBinarySequence(napi_env env,
       return false;
     }
     temp_utf8->resize(written);
-    *data = reinterpret_cast<const uint8_t*>(temp_utf8->data());
-    *len = temp_utf8->size();
+    span->data = reinterpret_cast<uint8_t*>(temp_utf8->data());
+    span->len = temp_utf8->size();
     return true;
   }
 
   return false;
 }
 
-bool ExtractUint32ArrayData(napi_env env, napi_value value, uint32_t** data, size_t* len) {
+bool AcquireUint32Array(napi_env env, napi_value value, ByteSpan* data, size_t* len) {
   if (data == nullptr || len == nullptr) return false;
-  *data = nullptr;
   *len = 0;
   bool is_typedarray = false;
   if (napi_is_typedarray(env, value, &is_typedarray) != napi_ok || !is_typedarray) return false;
   napi_typedarray_type type = napi_uint8_array;
   size_t array_len = 0;
-  void* raw = nullptr;
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
   if (napi_get_typedarray_info(
-          env, value, &type, &array_len, &raw, &arraybuffer, &byte_offset) != napi_ok ||
-      type != napi_uint32_array || raw == nullptr) {
+          env, value, &type, &array_len, nullptr, nullptr, nullptr) != napi_ok ||
+      type != napi_uint32_array) {
     return false;
   }
-  *data = static_cast<uint32_t*>(raw);
   *len = array_len;
-  return true;
+  return AcquireBufferAccess(env,
+                             value,
+                             0,
+                             array_len * sizeof(uint32_t),
+                             unofficial_napi_buffer_access_read,
+                             data);
 }
 
 bool StoreWriteResultRef(CompressionHandle* handle, napi_value value) {
@@ -1645,6 +1601,7 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
         if (ExtractByteSpan(env, argv[6], &span) && span.data != nullptr && span.len > 0) {
           dictionary.assign(span.data, span.data + span.len);
         }
+        if (span.lease != nullptr) (void)ReleaseBufferAccess(env, span.lease, false);
       }
 
       auto* zlib_context = dynamic_cast<ZlibContext*>(handle->context.get());
@@ -1664,12 +1621,20 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
     case HandleKind::kBrotliEncoder:
     case HandleKind::kBrotliDecoder: {
       if (argc < 3) return Undefined(env);
-      uint32_t* init_params = nullptr;
+      ByteSpan init_params_span;
       size_t init_params_len = 0;
-      if (!ExtractUint32ArrayData(env, argv[0], &init_params, &init_params_len) ||
+      if (!AcquireUint32Array(env, argv[0], &init_params_span, &init_params_len) ||
           !StoreWriteResultRef(handle, argv[1])) {
+        if (init_params_span.lease != nullptr) {
+          (void)ReleaseBufferAccess(env, init_params_span.lease, false);
+        }
         return Undefined(env);
       }
+      std::vector<uint32_t> init_params(init_params_len);
+      if (init_params_len != 0) {
+        std::memcpy(init_params.data(), init_params_span.data, init_params_span.len);
+      }
+      (void)ReleaseBufferAccess(env, init_params_span.lease, false);
       StoreProcessCallback(handle, argv[2]);
 
       CompressionError init_error;
@@ -1701,12 +1666,20 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
     case HandleKind::kZstdCompress:
     case HandleKind::kZstdDecompress: {
       if (argc < 4) return Undefined(env);
-      uint32_t* init_params = nullptr;
+      ByteSpan init_params_span;
       size_t init_params_len = 0;
-      if (!ExtractUint32ArrayData(env, argv[0], &init_params, &init_params_len) ||
+      if (!AcquireUint32Array(env, argv[0], &init_params_span, &init_params_len) ||
           !StoreWriteResultRef(handle, argv[2])) {
+        if (init_params_span.lease != nullptr) {
+          (void)ReleaseBufferAccess(env, init_params_span.lease, false);
+        }
         return Undefined(env);
       }
+      std::vector<uint32_t> init_params(init_params_len);
+      if (init_params_len != 0) {
+        std::memcpy(init_params.data(), init_params_span.data, init_params_span.len);
+      }
+      (void)ReleaseBufferAccess(env, init_params_span.lease, false);
       StoreProcessCallback(handle, argv[3]);
 
       uint64_t pledged_src_size = ZSTD_CONTENTSIZE_UNKNOWN;
@@ -1736,6 +1709,9 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
         init_error = compress->Init(pledged_src_size, dictionary);
       } else if (auto* decompress = dynamic_cast<ZstdDecompressContext*>(handle->context.get())) {
         init_error = decompress->Init(pledged_src_size, dictionary);
+      }
+      if (dictionary_span.lease != nullptr) {
+        (void)ReleaseBufferAccess(env, dictionary_span.lease, false);
       }
       ReportExternalMemory(handle);
 
@@ -1973,19 +1949,20 @@ napi_value ZlibCrc32(napi_env env, napi_callback_info info) {
 
   if (argc < 1 || argv[0] == nullptr) return Undefined(env);
 
-  const uint8_t* data = nullptr;
-  size_t len = 0;
+  ByteSpan data;
   std::string temp_utf8;
-  if (!ExtractBinarySequence(env, argv[0], &data, &len, &temp_utf8)) return Undefined(env);
+  if (!ExtractBinarySequence(env, argv[0], &data, &temp_utf8)) return Undefined(env);
 
   uint32_t initial = 0;
   if (argc >= 2 && argv[1] != nullptr) {
     CoerceToUint32(env, argv[1], &initial);
   }
 
+  const uint32_t checksum =
+      static_cast<uint32_t>(crc32(initial, reinterpret_cast<const Bytef*>(data.data), data.len));
+  if (data.lease != nullptr) (void)ReleaseBufferAccess(env, data.lease, false);
   napi_value out = nullptr;
-  napi_create_uint32(
-      env, static_cast<uint32_t>(crc32(initial, reinterpret_cast<const Bytef*>(data), len)), &out);
+  napi_create_uint32(env, checksum, &out);
   return out != nullptr ? out : Undefined(env);
 }
 

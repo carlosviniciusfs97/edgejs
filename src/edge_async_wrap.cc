@@ -227,6 +227,8 @@ double* GetAsyncIdFields(napi_env env) {
   void* data = nullptr;
   napi_value arraybuffer = nullptr;
   size_t byte_offset = 0;
+  // async_id_fields comes from EdgeCreateSharedTypedArray. It is an
+  // intentionally aliased guest control block, not a transient BufferSource.
   if (napi_get_typedarray_info(env,
                                fields,
                                &type,

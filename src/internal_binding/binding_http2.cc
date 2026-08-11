@@ -21,6 +21,7 @@
 #include "nghttp2/nghttp2.h"
 #include "uv.h"
 
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_util.h"
 #include "internal_binding/helpers.h"
@@ -354,11 +355,19 @@ std::string StreamDiagnosticName(const Http2StreamWrap* stream) {
 
 bool SetNamedInt64(napi_env env, napi_value obj, const char* name, int64_t value);
 bool SetNamedString(napi_env env, napi_value obj, const char* name, const char* value);
-bool GetByteSpan(napi_env env,
-                 napi_value value,
-                 const uint8_t** data,
-                 size_t* len,
-                 std::string* temp_utf8);
+class ByteSpan {
+ public:
+  bool Acquire(napi_env env, napi_value value, bool allow_string = true);
+  const uint8_t* data() const {
+    return lease_.data() != nullptr ? lease_.data()
+                                    : reinterpret_cast<const uint8_t*>(text_.data());
+  }
+  size_t size() const { return lease_.data() != nullptr ? lease_.size() : text_.size(); }
+
+ private:
+  EdgeBufferLease lease_;
+  std::string text_;
+};
 Http2StreamWrap* UnwrapStream(napi_env env, napi_value value);
 void SetStreamWriteState(napi_env env, size_t bytes_written, bool async);
 void QueueOutboundChunk(Http2StreamWrap* stream, napi_value req_obj, const uint8_t* data, size_t len);
@@ -385,18 +394,16 @@ int Http2StreamWriteBufferDirect(EdgeStreamBase* base,
     return UV_EPIPE;
   }
 
-  const uint8_t* data = nullptr;
-  size_t len = 0;
-  std::string temp_utf8;
-  if (!GetByteSpan(base->env, payload, &data, &len, &temp_utf8)) {
+  ByteSpan payload_bytes;
+  if (!payload_bytes.Acquire(base->env, payload)) {
     return UV_EINVAL;
   }
 
   if (req_obj != nullptr) {
     EdgeStreamReqActivate(base->env, req_obj, kEdgeProviderWriteWrap, wrap->async_id);
   }
-  SetStreamWriteState(base->env, len, true);
-  QueueOutboundChunk(wrap, req_obj, data, len);
+  SetStreamWriteState(base->env, payload_bytes.size(), true);
+  QueueOutboundChunk(wrap, req_obj, payload_bytes.data(), payload_bytes.size());
   (void)nghttp2_session_resume_data(wrap->session->session, wrap->id);
   MaybeScheduleSessionFlush(wrap->session);
   return 0;
@@ -901,88 +908,24 @@ int32_t GetFrameId(const nghttp2_frame* frame) {
                                                                     : (frame != nullptr ? frame->hd.stream_id : 0);
 }
 
-size_t TypedArrayElementSize(napi_typedarray_type type) {
-  switch (type) {
-    case napi_int8_array:
-    case napi_uint8_array:
-    case napi_uint8_clamped_array:
-      return 1;
-    case napi_int16_array:
-    case napi_uint16_array:
-    case napi_float16_array:
-      return 2;
-    case napi_int32_array:
-    case napi_uint32_array:
-    case napi_float32_array:
-      return 4;
-    case napi_float64_array:
-    case napi_bigint64_array:
-    case napi_biguint64_array:
-      return 8;
-    default:
-      return 1;
-  }
-}
-
-bool GetByteSpan(napi_env env, napi_value value, const uint8_t** data, size_t* len, std::string* temp_utf8 = nullptr) {
-  if (data == nullptr || len == nullptr) return false;
-  *data = nullptr;
-  *len = 0;
+bool ByteSpan::Acquire(napi_env env, napi_value value, bool allow_string) {
   if (value == nullptr) return false;
 
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* raw = nullptr;
-    if (napi_get_buffer_info(env, value, &raw, len) != napi_ok || raw == nullptr) return false;
-    *data = static_cast<const uint8_t*>(raw);
-    return true;
-  }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type type = napi_uint8_array;
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t offset = 0;
-    size_t element_length = 0;
-    if (napi_get_typedarray_info(env, value, &type, &element_length, &raw, &arraybuffer, &offset) != napi_ok ||
-        raw == nullptr) {
-      return false;
-    }
-    *data = static_cast<const uint8_t*>(raw);
-    *len = element_length * TypedArrayElementSize(type);
-    return true;
-  }
-
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* raw = nullptr;
-    size_t byte_length = 0;
-    if (napi_get_arraybuffer_info(env, value, &raw, &byte_length) != napi_ok || raw == nullptr) {
-      return false;
-    }
-    *data = static_cast<const uint8_t*>(raw);
-    *len = byte_length;
-    return true;
-  }
-
   napi_valuetype type = napi_undefined;
-  if (napi_typeof(env, value, &type) == napi_ok && type == napi_string && temp_utf8 != nullptr) {
+  if (allow_string && napi_typeof(env, value, &type) == napi_ok && type == napi_string) {
     size_t str_len = 0;
     if (napi_get_value_string_utf8(env, value, nullptr, 0, &str_len) != napi_ok) return false;
-    temp_utf8->assign(str_len + 1, '\0');
+    text_.assign(str_len + 1, '\0');
     size_t copied = 0;
-    if (napi_get_value_string_utf8(env, value, temp_utf8->data(), temp_utf8->size(), &copied) != napi_ok) {
-      temp_utf8->clear();
+    if (napi_get_value_string_utf8(env, value, text_.data(), text_.size(), &copied) != napi_ok) {
+      text_.clear();
       return false;
     }
-    temp_utf8->resize(copied);
-    *data = reinterpret_cast<const uint8_t*>(temp_utf8->data());
-    *len = temp_utf8->size();
+    text_.resize(copied);
     return true;
   }
 
-  return false;
+  return lease_.Acquire(env, value, unofficial_napi_buffer_access_read);
 }
 
 bool GetAsciiStringPreserveNulls(napi_env env, napi_value value, std::string* out) {
@@ -2382,12 +2325,16 @@ InboundDelivery DeliverInboundChunk(Http2StreamWrap* stream, const uint8_t* data
   }
 
   napi_value arraybuffer = nullptr;
-  void* out = nullptr;
-  if (napi_create_arraybuffer(stream->env, len, &out, &arraybuffer) != napi_ok || out == nullptr ||
+  if (napi_create_arraybuffer(stream->env, len, nullptr, &arraybuffer) != napi_ok ||
       arraybuffer == nullptr) {
     return InboundDelivery::kQueued;
   }
-  std::memcpy(out, data, len);
+  EdgeBufferLease output;
+  if (!output.Acquire(stream->env, arraybuffer, unofficial_napi_buffer_access_readwrite)) {
+    return InboundDelivery::kQueued;
+  }
+  std::memcpy(output.data(), data, len);
+  if (!output.Release(true)) return InboundDelivery::kQueued;
   DebugStream(stream, "invoking JS onread for inbound chunk len=%zu", len);
   SetReadState(stream->env, static_cast<int32_t>(std::min<size_t>(len, INT32_MAX)));
   napi_value argv[1] = {arraybuffer};
@@ -3036,11 +2983,9 @@ napi_value SessionReceive(napi_env env, napi_callback_info info) {
   napi_get_cb_info(env, info, &argc, argv, &self, nullptr);
   Http2SessionWrap* wrap = UnwrapSession(env, self);
   if (wrap != nullptr && wrap->session != nullptr && argc >= 1) {
-    const uint8_t* data = nullptr;
-    size_t len = 0;
-    std::string temp_utf8;
-    if (GetByteSpan(env, argv[0], &data, &len, &temp_utf8) && data != nullptr) {
-      AppendPendingParentRead(wrap, data, len);
+    ByteSpan data;
+    if (data.Acquire(env, argv[0])) {
+      AppendPendingParentRead(wrap, data.data(), data.size());
       ConsumeHTTP2Data(wrap);
     }
   }
@@ -3096,12 +3041,15 @@ napi_value SessionGoaway(napi_env env, napi_callback_info info) {
     int32_t last_stream_id = 0;
     if (argc >= 1) (void)napi_get_value_uint32(env, argv[0], &code);
     if (argc >= 2) (void)napi_get_value_int32(env, argv[1], &last_stream_id);
-    const uint8_t* data = nullptr;
-    size_t len = 0;
-    std::string temp_utf8;
-    if (argc >= 3) (void)GetByteSpan(env, argv[2], &data, &len, &temp_utf8);
+    ByteSpan data;
+    if (argc >= 3) (void)data.Acquire(env, argv[2]);
     if (last_stream_id <= 0) last_stream_id = nghttp2_session_get_last_proc_stream_id(wrap->session);
-    if (nghttp2_submit_goaway(wrap->session, NGHTTP2_FLAG_NONE, last_stream_id, code, data, len) == 0) {
+    if (nghttp2_submit_goaway(wrap->session,
+                              NGHTTP2_FLAG_NONE,
+                              last_stream_id,
+                              code,
+                              data.data(),
+                              data.size()) == 0) {
       wrap->goaway_pending = true;
       if (!wrap->parent_write_in_progress && !wrap->in_scope) {
         (void)FlushSessionOutput(wrap);
@@ -3378,14 +3326,11 @@ napi_value SessionPing(napi_env env, napi_callback_info info) {
       napi_get_boolean(env, false, &out);
       return out != nullptr ? out : Undefined(env);
     }
-    const uint8_t* payload = nullptr;
-    size_t payload_len = 0;
-    std::string temp_utf8;
+    ByteSpan payload;
     if (argc >= 1 && argv[0] != nullptr &&
-        GetByteSpan(env, argv[0], &payload, &payload_len, &temp_utf8) &&
-        payload != nullptr) {
-      const size_t copy_len = std::min<size_t>(payload_len, pending.payload.size());
-      std::memcpy(pending.payload.data(), payload, copy_len);
+        payload.Acquire(env, argv[0])) {
+      const size_t copy_len = std::min<size_t>(payload.size(), pending.payload.size());
+      std::memcpy(pending.payload.data(), payload.data(), copy_len);
     } else if (has_pending) {
       std::memcpy(pending.payload.data(), &pending.start_time, pending.payload.size());
     }
@@ -3414,16 +3359,18 @@ napi_value SessionAltSvc(napi_env env, napi_callback_info info) {
   if (wrap != nullptr && wrap->session != nullptr) {
     int32_t stream_id = 0;
     if (argc >= 1) (void)napi_get_value_int32(env, argv[0], &stream_id);
-    const uint8_t* origin = nullptr;
-    size_t origin_len = 0;
-    const uint8_t* alt = nullptr;
-    size_t alt_len = 0;
-    std::string temp_origin;
-    std::string temp_alt;
-    if (argc >= 2) (void)GetByteSpan(env, argv[1], &origin, &origin_len, &temp_origin);
-    if (argc >= 3) (void)GetByteSpan(env, argv[2], &alt, &alt_len, &temp_alt);
+    ByteSpan origin;
+    ByteSpan alt;
+    if (argc >= 2) (void)origin.Acquire(env, argv[1]);
+    if (argc >= 3) (void)alt.Acquire(env, argv[2]);
     const int rc =
-        nghttp2_submit_altsvc(wrap->session, NGHTTP2_FLAG_NONE, stream_id, origin, origin_len, alt, alt_len);
+        nghttp2_submit_altsvc(wrap->session,
+                             NGHTTP2_FLAG_NONE,
+                             stream_id,
+                             origin.data(),
+                             origin.size(),
+                             alt.data(),
+                             alt.size());
     if (rc == 0) MaybeScheduleSessionFlush(wrap);
   }
   return Undefined(env);
@@ -3775,16 +3722,14 @@ size_t SumWritevBytes(napi_env env, napi_value chunks, bool all_buffers) {
   for (uint32_t i = 0; i < length; ++i) {
     napi_value entry = nullptr;
     if (napi_get_element(env, chunks, i, &entry) != napi_ok || entry == nullptr) continue;
-    const uint8_t* data = nullptr;
-    size_t len = 0;
-    std::string temp_utf8;
+    ByteSpan data;
     napi_value payload = entry;
     if (!all_buffers) {
       const uint32_t value_index = (i * 2);
       if (napi_get_element(env, chunks, value_index, &payload) != napi_ok || payload == nullptr) continue;
       i++;
     }
-    if (GetByteSpan(env, payload, &data, &len, &temp_utf8)) total += len;
+    if (data.Acquire(env, payload)) total += data.size();
   }
   return total;
 }
@@ -3795,16 +3740,14 @@ napi_value StreamWriteBuffer(napi_env env, napi_callback_info info) {
   napi_value self = nullptr;
   napi_get_cb_info(env, info, &argc, argv, &self, nullptr);
   Http2StreamWrap* wrap = UnwrapStream(env, self);
-  const uint8_t* data = nullptr;
-  size_t len = 0;
-  std::string temp_utf8;
-  if (argc >= 2) (void)GetByteSpan(env, argv[1], &data, &len, &temp_utf8);
+  ByteSpan data;
+  if (argc >= 2) (void)data.Acquire(env, argv[1]);
   if (argc >= 1 && argv[0] != nullptr) {
     EdgeStreamReqActivate(env, argv[0], kEdgeProviderWriteWrap, wrap != nullptr ? wrap->async_id : -1);
   }
-  SetStreamWriteState(env, len, true);
+  SetStreamWriteState(env, data.size(), true);
   if (wrap != nullptr && wrap->session != nullptr && wrap->session->session != nullptr) {
-    QueueOutboundChunk(wrap, argc >= 1 ? argv[0] : nullptr, data, len);
+    QueueOutboundChunk(wrap, argc >= 1 ? argv[0] : nullptr, data.data(), data.size());
     (void)nghttp2_session_resume_data(wrap->session->session, wrap->id);
     MaybeScheduleSessionFlush(wrap->session);
   }
@@ -3819,16 +3762,14 @@ napi_value StreamWriteStringWithEncoding(napi_env env, napi_callback_info info) 
   napi_value self = nullptr;
   napi_get_cb_info(env, info, &argc, argv, &self, nullptr);
   Http2StreamWrap* wrap = UnwrapStream(env, self);
-  const uint8_t* data = nullptr;
-  size_t len = 0;
-  std::string temp_utf8;
-  if (argc >= 2) (void)GetByteSpan(env, argv[1], &data, &len, &temp_utf8);
+  ByteSpan data;
+  if (argc >= 2) (void)data.Acquire(env, argv[1]);
   if (argc >= 1 && argv[0] != nullptr) {
     EdgeStreamReqActivate(env, argv[0], kEdgeProviderWriteWrap, wrap != nullptr ? wrap->async_id : -1);
   }
-  SetStreamWriteState(env, len, true);
+  SetStreamWriteState(env, data.size(), true);
   if (wrap != nullptr && wrap->session != nullptr && wrap->session->session != nullptr) {
-    QueueOutboundChunk(wrap, argc >= 1 ? argv[0] : nullptr, data, len);
+    QueueOutboundChunk(wrap, argc >= 1 ? argv[0] : nullptr, data.data(), data.size());
     (void)nghttp2_session_resume_data(wrap->session->session, wrap->id);
     MaybeScheduleSessionFlush(wrap->session);
   }
@@ -3859,14 +3800,12 @@ napi_value StreamWritev(napi_env env, napi_callback_info info) {
       for (uint32_t i = 0; i < count; ++i) {
         napi_value chunk = nullptr;
         napi_get_element(env, argv[1], all_buffers ? i : i * 2, &chunk);
-        const uint8_t* data = nullptr;
-        size_t len = 0;
-        std::string temp_utf8;
-        if (GetByteSpan(env, chunk, &data, &len, &temp_utf8)) {
+        ByteSpan data;
+        if (data.Acquire(env, chunk)) {
           QueueOutboundChunk(wrap,
                              (argc >= 1 && argv[0] != nullptr && i == count - 1) ? argv[0] : nullptr,
-                             data,
-                             len);
+                             data.data(),
+                             data.size());
         }
       }
       (void)nghttp2_session_resume_data(wrap->session->session, wrap->id);

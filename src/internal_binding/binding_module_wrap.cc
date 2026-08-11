@@ -7,6 +7,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "internal_binding/helpers.h"
 #include "unofficial_napi.h"
@@ -338,18 +339,13 @@ bool IsNullishValue(napi_env env, napi_value value) {
 
 // Extracts the bytes of any ArrayBufferView (typed array or DataView) —
 // Node's vm cachedData accepts every view flavor over the same buffer.
-bool GetArrayBufferViewBytes(napi_env env, napi_value value, const uint8_t** data_out, size_t* len_out) {
-  *data_out = nullptr;
-  *len_out = 0;
-  if (value == nullptr) return false;
+bool AcquireArrayBufferView(napi_env env, napi_value value, EdgeBufferLease* lease) {
+  if (value == nullptr || lease == nullptr) return false;
 
   bool is_typedarray = false;
   if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
     napi_typedarray_type type = napi_uint8_array;
-    size_t length = 0;
-    void* data = nullptr;
-    if (napi_get_typedarray_info(env, value, &type, &length, &data, nullptr, nullptr) != napi_ok ||
-        data == nullptr) {
+    if (napi_get_typedarray_info(env, value, &type, nullptr, nullptr, nullptr, nullptr) != napi_ok) {
       return false;
     }
     size_t element_size = 1;
@@ -377,22 +373,13 @@ bool GetArrayBufferViewBytes(napi_env env, napi_value value, const uint8_t** dat
       default:
         return false;
     }
-    *data_out = static_cast<const uint8_t*>(data);
-    *len_out = length * element_size;
-    return true;
+    (void)element_size;
+    return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
   bool is_dataview = false;
   if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    size_t byte_length = 0;
-    void* data = nullptr;
-    if (napi_get_dataview_info(env, value, &byte_length, &data, nullptr, nullptr) != napi_ok ||
-        data == nullptr) {
-      return false;
-    }
-    *data_out = static_cast<const uint8_t*>(data);
-    *len_out = byte_length;
-    return true;
+    return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
   return false;
 }
@@ -469,13 +456,12 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
         // QJSB header) and reports a mismatch via rejected_out. Node throws
         // ERR_VM_MODULE_CACHED_DATA_REJECTED from the constructor on reject.
         bool rejected = true;
-        const uint8_t* data = nullptr;
-        size_t length = 0;
-        if (GetArrayBufferViewBytes(env, arg5, &data, &length) && length > 0) {
+        EdgeBufferLease data;
+        if (AcquireArrayBufferView(env, arg5, &data) && data.size() > 0) {
           bool deserialize_rejected = false;
           if (unofficial_napi_bytecode_deserialize(env,
-                                                   data,
-                                                   length,
+                                                   data.data(),
+                                                   data.size(),
                                                    argv[2],
                                                    argc >= 1 ? argv[0] : nullptr,
                                                    unofficial_napi_bytecode_shape_module,
@@ -544,17 +530,13 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
                 napi_value cache_buffer = nullptr;
                 if (unofficial_napi_bytecode_serialize(env, module_bytecode, &cache_buffer) == napi_ok &&
                     cache_buffer != nullptr) {
-                  napi_typedarray_type type = napi_uint8_array;
-                  size_t length = 0;
-                  void* data = nullptr;
-                  if (napi_get_typedarray_info(env, cache_buffer, &type, &length, &data, nullptr, nullptr) ==
-                          napi_ok &&
-                      type == napi_uint8_array && data != nullptr && length > 0) {
+                  EdgeBufferLease data;
+                  if (AcquireArrayBufferView(env, cache_buffer, &data) && data.size() > 0) {
                     edge_bytecode_cache::WriteSidecar(sidecar_source_path,
                                                       sidecar_source_utf8,
                                                       edge_bytecode_cache::kFlagEsmModuleV1,
-                                                      static_cast<const uint8_t*>(data),
-                                                      length);
+                                                      data.data(),
+                                                      data.size());
                   }
                 }
               } else {
@@ -798,8 +780,7 @@ napi_value ModuleWrapCreateCachedData(napi_env env, napi_callback_info info) {
     }
   }
   napi_value arraybuffer = nullptr;
-  void* data = nullptr;
-  if (napi_create_arraybuffer(env, 0, &data, &arraybuffer) != napi_ok || arraybuffer == nullptr) {
+  if (napi_create_arraybuffer(env, 0, nullptr, &arraybuffer) != napi_ok || arraybuffer == nullptr) {
     return Undefined(env);
   }
   napi_value typed_array = nullptr;

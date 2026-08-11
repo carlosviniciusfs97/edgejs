@@ -181,6 +181,9 @@ bool GetTypedArrayView(napi_env env,
                        size_t min_length,
                        void** data,
                        size_t* length) {
+  // These arrays are created by EdgeCreateSharedTypedArray. Their defining
+  // contract is stable guest-backed aliasing between native async-hook code and
+  // JavaScript, so a copied lease would be the wrong ownership model here.
   if (data == nullptr || length == nullptr) return false;
   *data = nullptr;
   *length = 0;

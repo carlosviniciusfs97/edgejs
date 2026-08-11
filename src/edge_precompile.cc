@@ -9,6 +9,7 @@
 #include <string_view>
 #include <system_error>
 
+#include "edge_buffer_lease.h"
 #include "edge_bytecode_cache.h"
 #include "edge_url.h"
 #include "simdjson/simdjson.h"
@@ -235,10 +236,13 @@ FileResult PrecompileFile(napi_env env,
   }
 
   napi_typedarray_type type = napi_uint8_array;
-  size_t length = 0;
-  void* data = nullptr;
-  if (napi_get_typedarray_info(env, cache_buffer, &type, &length, &data, nullptr, nullptr) != napi_ok ||
-      type != napi_uint8_array || data == nullptr || length == 0) {
+  if (napi_get_typedarray_info(env, cache_buffer, &type, nullptr, nullptr, nullptr, nullptr) != napi_ok ||
+      type != napi_uint8_array) {
+    *detail_out = "engine produced no cached data";
+    return FileResult::kFailed;
+  }
+  EdgeBufferLease data;
+  if (!data.Acquire(env, cache_buffer, unofficial_napi_buffer_access_read) || data.size() == 0) {
     *detail_out = "engine produced no cached data";
     return FileResult::kFailed;
   }
@@ -246,7 +250,7 @@ FileResult PrecompileFile(napi_env env,
   const uint32_t sidecar_flags = shape == FileShape::kEsm ? edge_bytecode_cache::kFlagEsmModuleV1
                                                           : edge_bytecode_cache::kFlagCjsFunctionV1;
   if (!edge_bytecode_cache::WriteSidecar(path_utf8, source, sidecar_flags,
-                                         static_cast<const uint8_t*>(data), length)) {
+                                         data.data(), data.size())) {
     *detail_out = "failed to write sidecar (read-only or inaccessible location?)";
     return FileResult::kFailed;
   }

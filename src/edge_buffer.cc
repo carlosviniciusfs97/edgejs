@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_encoding_ids.h"
 #include "edge_runtime.h"
@@ -165,106 +166,23 @@ bool GetBool(napi_env env, napi_value value, bool* out) {
   return value != nullptr && out != nullptr && napi_get_value_bool(env, value, out) == napi_ok;
 }
 
-uint8_t* ZeroLengthDataSentinel() {
-  static uint8_t sentinel = 0;
-  return &sentinel;
-}
-
-bool ExtractBytesFromValue(napi_env env, napi_value value, uint8_t** data, size_t* len) {
-  if (value == nullptr || data == nullptr || len == nullptr) return false;
+bool AcquireBytesFromValue(napi_env env,
+                           napi_value value,
+                           unofficial_napi_buffer_access_mode mode,
+                           EdgeBufferLease* lease) {
+  if (value == nullptr || lease == nullptr) return false;
   bool is_buffer = false;
   if (napi_is_buffer(env, value, &is_buffer) != napi_ok) return false;
-  if (is_buffer) {
-    void* ptr = nullptr;
-    if (napi_get_buffer_info(env, value, &ptr, len) != napi_ok) return false;
-    if (ptr == nullptr && *len != 0) return false;
-    *data = (ptr != nullptr) ? static_cast<uint8_t*>(ptr) : ZeroLengthDataSentinel();
-    return true;
-  }
+  if (is_buffer) return lease->Acquire(env, value, mode);
 
   bool is_typed = false;
   if (napi_is_typedarray(env, value, &is_typed) == napi_ok && is_typed) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t element_len = 0;
-    void* ptr = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(
-            env, value, &type, &element_len, &ptr, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-
-    size_t bytes_per_element = 1;
-    switch (type) {
-      case napi_int16_array:
-      case napi_uint16_array:
-      case napi_float16_array:
-        bytes_per_element = 2;
-        break;
-      case napi_int32_array:
-      case napi_uint32_array:
-      case napi_float32_array:
-        bytes_per_element = 4;
-        break;
-      case napi_float64_array:
-      case napi_bigint64_array:
-      case napi_biguint64_array:
-        bytes_per_element = 8;
-        break;
-      default:
-        bytes_per_element = 1;
-        break;
-    }
-    *len = element_len * bytes_per_element;
-    if (*len == 0) {
-      *data = ZeroLengthDataSentinel();
-      return true;
-    }
-
-    void* ab_data = nullptr;
-    size_t ab_len = 0;
-    if (arraybuffer != nullptr &&
-        napi_get_arraybuffer_info(env, arraybuffer, &ab_data, &ab_len) == napi_ok &&
-        ab_data != nullptr &&
-        byte_offset <= ab_len) {
-      *data = static_cast<uint8_t*>(ab_data) + byte_offset;
-    } else if (ptr != nullptr) {
-      *data = static_cast<uint8_t*>(ptr);
-    } else {
-      return false;
-    }
-    return true;
+    return lease->Acquire(env, value, mode);
   }
 
   bool is_dataview = false;
   if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    void* ptr = nullptr;
-    size_t byte_len = 0;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, &byte_len, &ptr, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-    if (byte_len == 0) {
-      *data = ZeroLengthDataSentinel();
-      *len = 0;
-      return true;
-    }
-    if (ptr != nullptr) {
-      *data = static_cast<uint8_t*>(ptr);
-      *len = byte_len;
-      return true;
-    }
-    void* ab_data = nullptr;
-    size_t ab_len = 0;
-    if (arraybuffer != nullptr &&
-        napi_get_arraybuffer_info(env, arraybuffer, &ab_data, &ab_len) == napi_ok &&
-        ab_data != nullptr &&
-        byte_offset <= ab_len) {
-      *data = static_cast<uint8_t*>(ab_data) + byte_offset;
-      *len = byte_len;
-      return true;
-    }
+    return lease->Acquire(env, value, mode);
   }
 
   return false;
@@ -321,51 +239,11 @@ bool ByteLengthOfBinaryValue(napi_env env, napi_value value, size_t* length_out)
          napi_get_arraybuffer_info(env, value, nullptr, length_out) == napi_ok;
 }
 
-class ScopedReadBufferRange {
- public:
-  ScopedReadBufferRange() = default;
-  ScopedReadBufferRange(const ScopedReadBufferRange&) = delete;
-  ScopedReadBufferRange& operator=(const ScopedReadBufferRange&) = delete;
-
-  ~ScopedReadBufferRange() {
-    if (lease_ != nullptr) {
-      (void)unofficial_napi_release_buffer_lease(env_, lease_, false);
-    }
-  }
-
-  bool Acquire(napi_env env,
-               napi_value value,
-               size_t byte_offset,
-               size_t byte_length) {
-    void* data = nullptr;
-    unofficial_napi_buffer_lease lease = nullptr;
-    if (unofficial_napi_acquire_buffer_lease(
-            env,
-            value,
-            byte_offset,
-            byte_length,
-            unofficial_napi_buffer_access_read,
-            &lease,
-            &data) != napi_ok) {
-      return false;
-    }
-    env_ = env;
-    lease_ = lease;
-    data_ = data != nullptr ? static_cast<const uint8_t*>(data)
-                            : ZeroLengthDataSentinel();
-    return true;
-  }
-
-  const uint8_t* data() const { return data_; }
-
- private:
-  const uint8_t* data_ = nullptr;
-  napi_env env_ = nullptr;
-  unofficial_napi_buffer_lease lease_ = nullptr;
-};
-
-bool ExtractArrayBufferParts(napi_env env, napi_value value, uint8_t** data, size_t* len) {
-  if (value == nullptr || data == nullptr || len == nullptr) return false;
+bool AcquireArrayBuffer(napi_env env,
+                        napi_value value,
+                        unofficial_napi_buffer_access_mode mode,
+                        EdgeBufferLease* lease) {
+  if (value == nullptr || lease == nullptr) return false;
 
   bool is_ab = false;
   bool is_typed = false;
@@ -379,13 +257,7 @@ bool ExtractArrayBufferParts(napi_env env, napi_value value, uint8_t** data, siz
     if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) return false;
   }
 
-  void* ptr = nullptr;
-  size_t byte_len = 0;
-  if (napi_get_arraybuffer_info(env, value, &ptr, &byte_len) != napi_ok) return false;
-  if (ptr == nullptr && byte_len != 0) return false;
-  *data = (ptr != nullptr) ? static_cast<uint8_t*>(ptr) : ZeroLengthDataSentinel();
-  *len = byte_len;
-  return true;
+  return lease->Acquire(env, value, mode);
 }
 
 bool IsValueTrackedDetachedArrayBuffer(napi_env env, napi_value value) {
@@ -461,8 +333,8 @@ bool IsArrayBufferDetached(napi_env env, napi_value value) {
   return IsValueTrackedDetachedArrayBuffer(env, value);
 }
 
-bool ExtractValidationBytesOrThrow(napi_env env, napi_value value, uint8_t** data, size_t* len) {
-  if (value == nullptr || data == nullptr || len == nullptr) return false;
+bool AcquireValidationBytesOrThrow(napi_env env, napi_value value, EdgeBufferLease* lease) {
+  if (value == nullptr || lease == nullptr) return false;
 
   bool is_ab = false;
   if (napi_is_arraybuffer(env, value, &is_ab) == napi_ok && is_ab) {
@@ -470,41 +342,37 @@ bool ExtractValidationBytesOrThrow(napi_env env, napi_value value, uint8_t** dat
       napi_throw_error(env, "ERR_INVALID_STATE", "Cannot validate on a detached buffer");
       return false;
     }
-    return ExtractArrayBufferParts(env, value, data, len);
+    return AcquireArrayBuffer(env, value, unofficial_napi_buffer_access_read, lease);
   }
 
   bool is_typed = false;
   if (napi_is_typedarray(env, value, &is_typed) == napi_ok && is_typed) {
     napi_typedarray_type type = napi_uint8_array;
     size_t element_len = 0;
-    void* ptr = nullptr;
     napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env, value, &type, &element_len, &ptr, &arraybuffer, &byte_offset) == napi_ok &&
+    if (napi_get_typedarray_info(env, value, &type, &element_len, nullptr, &arraybuffer, nullptr) == napi_ok &&
         arraybuffer != nullptr &&
         IsArrayBufferDetached(env, arraybuffer)) {
       napi_throw_error(env, "ERR_INVALID_STATE", "Cannot validate on a detached buffer");
       return false;
     }
-    return ExtractBytesFromValue(env, value, data, len);
+    return AcquireBytesFromValue(env, value, unofficial_napi_buffer_access_read, lease);
   }
 
   bool is_dataview = false;
   if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    void* ptr = nullptr;
     size_t byte_len = 0;
     napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, &byte_len, &ptr, &arraybuffer, &byte_offset) == napi_ok &&
+    if (napi_get_dataview_info(env, value, &byte_len, nullptr, &arraybuffer, nullptr) == napi_ok &&
         arraybuffer != nullptr &&
         IsArrayBufferDetached(env, arraybuffer)) {
       napi_throw_error(env, "ERR_INVALID_STATE", "Cannot validate on a detached buffer");
       return false;
     }
-    return ExtractBytesFromValue(env, value, data, len);
+    return AcquireBytesFromValue(env, value, unofficial_napi_buffer_access_read, lease);
   }
 
-  if (ExtractArrayBufferParts(env, value, data, len)) {
+  if (AcquireArrayBuffer(env, value, unofficial_napi_buffer_access_read, lease)) {
     return true;
   }
 
@@ -695,15 +563,16 @@ napi_value BindingCompare(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2] = {nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 2) return nullptr;
-  uint8_t* a = nullptr;
-  uint8_t* b = nullptr;
-  size_t a_len = 0;
-  size_t b_len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &a, &a_len) || !ExtractBytesFromValue(env, argv[1], &b, &b_len)) {
+  EdgeBufferLease a;
+  EdgeBufferLease b;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_read, &a) ||
+      !AcquireBytesFromValue(env, argv[1], unofficial_napi_buffer_access_read, &b)) {
     return MakeInt32(env, 0);
   }
+  const size_t a_len = a.size();
+  const size_t b_len = b.size();
   const size_t min_len = std::min(a_len, b_len);
-  int cmp = (min_len == 0) ? 0 : std::memcmp(a, b, min_len);
+  int cmp = (min_len == 0) ? 0 : std::memcmp(a.data(), b.data(), min_len);
   if (cmp < 0) return MakeInt32(env, -1);
   if (cmp > 0) return MakeInt32(env, 1);
   if (a_len < b_len) return MakeInt32(env, -1);
@@ -715,13 +584,14 @@ napi_value BindingCompareOffset(napi_env env, napi_callback_info info) {
   size_t argc = 6;
   napi_value argv[6] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 6) return nullptr;
-  uint8_t* src = nullptr;
-  uint8_t* dst = nullptr;
-  size_t src_len = 0;
-  size_t dst_len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &src, &src_len) || !ExtractBytesFromValue(env, argv[1], &dst, &dst_len)) {
+  EdgeBufferLease src;
+  EdgeBufferLease dst;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_read, &src) ||
+      !AcquireBytesFromValue(env, argv[1], unofficial_napi_buffer_access_read, &dst)) {
     return MakeInt32(env, 0);
   }
+  const size_t src_len = src.size();
+  const size_t dst_len = dst.size();
   int32_t dst_start = 0;
   int32_t src_start = 0;
   int32_t dst_end = 0;
@@ -737,7 +607,7 @@ napi_value BindingCompareOffset(napi_env env, napi_callback_info info) {
   const size_t d_len = dst_end > dst_start ? static_cast<size_t>(dst_end - dst_start) : 0;
   const size_t s_len = src_end > src_start ? static_cast<size_t>(src_end - src_start) : 0;
   const size_t min_len = std::min(d_len, s_len);
-  int cmp = (min_len == 0) ? 0 : std::memcmp(src + src_start, dst + dst_start, min_len);
+  int cmp = (min_len == 0) ? 0 : std::memcmp(src.data() + src_start, dst.data() + dst_start, min_len);
   if (cmp < 0) return MakeInt32(env, -1);
   if (cmp > 0) return MakeInt32(env, 1);
   if (s_len < d_len) return MakeInt32(env, -1);
@@ -749,13 +619,14 @@ napi_value BindingCopy(napi_env env, napi_callback_info info) {
   size_t argc = 5;
   napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
-  uint8_t* src = nullptr;
-  uint8_t* dst = nullptr;
-  size_t src_len = 0;
-  size_t dst_len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &src, &src_len) || !ExtractBytesFromValue(env, argv[1], &dst, &dst_len)) {
+  EdgeBufferLease src;
+  EdgeBufferLease dst;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_read, &src) ||
+      !AcquireBytesFromValue(env, argv[1], unofficial_napi_buffer_access_readwrite, &dst)) {
     return MakeInt32(env, 0);
   }
+  const size_t src_len = src.size();
+  const size_t dst_len = dst.size();
   int32_t dst_start = 0;
   int32_t src_start = 0;
   int32_t count = 0;
@@ -767,7 +638,8 @@ napi_value BindingCopy(napi_env env, napi_callback_info info) {
   const size_t available_dst = dst_start < static_cast<int32_t>(dst_len) ? dst_len - static_cast<size_t>(dst_start) : 0;
   size_t to_copy = std::min<size_t>(static_cast<size_t>(count), std::min(available_src, available_dst));
   if (to_copy == 0) return MakeInt32(env, 0);
-  std::memmove(dst + dst_start, src + src_start, to_copy);
+  std::memmove(dst.data() + dst_start, src.data() + src_start, to_copy);
+  if (!dst.Release(true)) return MakeInt32(env, 0);
   return MakeInt32(env, static_cast<int32_t>(to_copy));
 }
 
@@ -775,9 +647,8 @@ napi_value BindingFill(napi_env env, napi_callback_info info) {
   size_t argc = 5;
   napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 4) return nullptr;
-  uint8_t* dst = nullptr;
   size_t dst_len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &dst, &dst_len)) return MakeInt32(env, -2);
+  if (!ByteLengthOfBinaryValue(env, argv[0], &dst_len)) return MakeInt32(env, -2);
   int32_t start = 0;
   int32_t end = 0;
   GetInt32(env, argv[2], &start);
@@ -789,13 +660,23 @@ napi_value BindingFill(napi_env env, napi_callback_info info) {
   napi_valuetype value_type = napi_undefined;
   napi_typeof(env, argv[1], &value_type);
   if (value_type == napi_null || value_type == napi_undefined) {
-    std::memset(dst + start, 0, fill_len);
+    EdgeBufferLease dst;
+    if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_readwrite, &dst)) {
+      return MakeInt32(env, -2);
+    }
+    std::memset(dst.data() + start, 0, fill_len);
+    if (!dst.Release(true)) return MakeInt32(env, -2);
     return MakeUndefined(env);
   }
   if (value_type == napi_number) {
     int32_t n = 0;
     napi_get_value_int32(env, argv[1], &n);
-    std::memset(dst + start, static_cast<uint8_t>(n & 0xff), fill_len);
+    EdgeBufferLease dst;
+    if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_readwrite, &dst)) {
+      return MakeInt32(env, -2);
+    }
+    std::memset(dst.data() + start, static_cast<uint8_t>(n & 0xff), fill_len);
+    if (!dst.Release(true)) return MakeInt32(env, -2);
     return MakeUndefined(env);
   }
 
@@ -808,9 +689,8 @@ napi_value BindingFill(napi_env env, napi_callback_info info) {
     if (argc >= 5) enc = ParseEncodingArg(env, argv[4], kEncUtf8);
     if (!EncodeStringToBytes(env, argv[1], enc, &bytes)) return MakeInt32(env, -1);
   } else {
-    uint8_t* src = nullptr;
-    size_t src_len = 0;
-    if (!ExtractBytesFromValue(env, argv[1], &src, &src_len)) {
+    EdgeBufferLease src;
+    if (!AcquireBytesFromValue(env, argv[1], unofficial_napi_buffer_access_read, &src)) {
       napi_value coerced = nullptr;
       double d = 0;
       if (napi_coerce_to_number(env, argv[1], &coerced) == napi_ok &&
@@ -818,22 +698,32 @@ napi_value BindingFill(napi_env env, napi_callback_info info) {
           napi_get_value_double(env, coerced, &d) == napi_ok) {
         int32_t n = 0;
         if (std::isfinite(d)) n = static_cast<int32_t>(d);
-        std::memset(dst + start, static_cast<uint8_t>(n & 0xff), fill_len);
+        EdgeBufferLease dst;
+        if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_readwrite, &dst)) {
+          return MakeInt32(env, -2);
+        }
+        std::memset(dst.data() + start, static_cast<uint8_t>(n & 0xff), fill_len);
+        if (!dst.Release(true)) return MakeInt32(env, -2);
         return MakeUndefined(env);
       }
       return MakeInt32(env, -1);
     }
     from_buffer_source = true;
-    bytes.assign(src, src + src_len);
+    bytes.assign(src.data(), src.data() + src.size());
   }
   if (bytes.empty()) {
     if (value_type == napi_string) return MakeInt32(env, -1);
     if (from_buffer_source) return MakeInt32(env, -1);
     return MakeUndefined(env);
   }
-  for (size_t i = 0; i < fill_len; i++) {
-    dst[start + i] = bytes[i % bytes.size()];
+  EdgeBufferLease dst;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_readwrite, &dst)) {
+    return MakeInt32(env, -2);
   }
+  for (size_t i = 0; i < fill_len; i++) {
+    dst.data()[start + i] = bytes[i % bytes.size()];
+  }
+  if (!dst.Release(true)) return MakeInt32(env, -2);
   return MakeUndefined(env);
 }
 
@@ -841,12 +731,11 @@ napi_value BindingIsAscii(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1] = {nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!ExtractValidationBytesOrThrow(env, argv[0], &data, &len)) return nullptr;
+  EdgeBufferLease data;
+  if (!AcquireValidationBytesOrThrow(env, argv[0], &data)) return nullptr;
   bool ok = true;
-  for (size_t i = 0; i < len; i++) {
-    if (data[i] > 0x7f) {
+  for (size_t i = 0; i < data.size(); i++) {
+    if (data.data()[i] > 0x7f) {
       ok = false;
       break;
     }
@@ -860,15 +749,16 @@ napi_value BindingIsUtf8(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1] = {nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!ExtractValidationBytesOrThrow(env, argv[0], &data, &len)) return nullptr;
+  EdgeBufferLease data;
+  if (!AcquireValidationBytesOrThrow(env, argv[0], &data)) return nullptr;
   napi_value out = nullptr;
-  if (len == 0) {
+  if (data.size() == 0) {
     napi_get_boolean(env, true, &out);
     return out;
   }
-  napi_get_boolean(env, simdutf::validate_utf8(reinterpret_cast<const char*>(data), len), &out);
+  napi_get_boolean(env,
+                   simdutf::validate_utf8(reinterpret_cast<const char*>(data.data()), data.size()),
+                   &out);
   return out;
 }
 
@@ -876,9 +766,11 @@ napi_value BindingIndexOfNumber(napi_env env, napi_callback_info info) {
   size_t argc = 4;
   napi_value argv[4] = {nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 4) return nullptr;
-  uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &data, &len)) return MakeInt32(env, -1);
+  EdgeBufferLease data;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_read, &data)) {
+    return MakeInt32(env, -1);
+  }
+  const size_t len = data.size();
   int32_t value = 0;
   int32_t offset = 0;
   bool dir = true;
@@ -889,13 +781,13 @@ napi_value BindingIndexOfNumber(napi_env env, napi_callback_info info) {
   if (dir) {
     int32_t start = ClampOffset(offset, len, true);
     for (size_t i = static_cast<size_t>(start); i < len; i++) {
-      if (data[i] == needle) return MakeInt32(env, static_cast<int32_t>(i));
+      if (data.data()[i] == needle) return MakeInt32(env, static_cast<int32_t>(i));
     }
   } else {
     int32_t start = offset < 0 ? static_cast<int32_t>(len) + offset : offset;
     if (start >= static_cast<int32_t>(len)) start = static_cast<int32_t>(len) - 1;
     for (int32_t i = start; i >= 0; i--) {
-      if (data[i] == needle) return MakeInt32(env, i);
+      if (data.data()[i] == needle) return MakeInt32(env, i);
     }
   }
   return MakeInt32(env, -1);
@@ -942,14 +834,14 @@ napi_value BindingIndexOfBuffer(napi_env env, napi_callback_info info) {
   size_t argc = 5;
   napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
-  uint8_t* hay = nullptr;
-  uint8_t* needle = nullptr;
-  size_t hay_len = 0;
-  size_t needle_len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &hay, &hay_len) ||
-      !ExtractBytesFromValue(env, argv[1], &needle, &needle_len)) {
+  EdgeBufferLease hay;
+  EdgeBufferLease needle;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_read, &hay) ||
+      !AcquireBytesFromValue(env, argv[1], unofficial_napi_buffer_access_read, &needle)) {
     return MakeInt32(env, -1);
   }
+  const size_t hay_len = hay.size();
+  const size_t needle_len = needle.size();
   int32_t offset = 0;
   int32_t enc = kEncUtf8;
   bool dir = true;
@@ -970,7 +862,7 @@ napi_value BindingIndexOfBuffer(napi_env env, napi_callback_info info) {
       if (unit_offset < 0) unit_offset = std::max<int32_t>(0, static_cast<int32_t>(hay_units) + unit_offset);
       if (unit_offset > static_cast<int32_t>(hay_units)) unit_offset = static_cast<int32_t>(hay_units);
       for (size_t i = static_cast<size_t>(unit_offset); i + needle_units <= hay_units; i++) {
-        if (std::memcmp(hay + (i * 2), needle, needle_len) == 0) return MakeInt32(env, static_cast<int32_t>(i * 2));
+        if (std::memcmp(hay.data() + (i * 2), needle.data(), needle_len) == 0) return MakeInt32(env, static_cast<int32_t>(i * 2));
       }
       return MakeInt32(env, -1);
     }
@@ -981,20 +873,22 @@ napi_value BindingIndexOfBuffer(napi_env env, napi_callback_info info) {
       start = static_cast<int32_t>(hay_units - needle_units);
     }
     for (int32_t i = start; i >= 0; i--) {
-      if (std::memcmp(hay + (static_cast<size_t>(i) * 2), needle, needle_len) == 0) return MakeInt32(env, i * 2);
+      if (std::memcmp(hay.data() + (static_cast<size_t>(i) * 2), needle.data(), needle_len) == 0) return MakeInt32(env, i * 2);
     }
     return MakeInt32(env, -1);
   }
-  return MakeInt32(env, FindSubsequence(hay, hay_len, needle, needle_len, offset, dir));
+  return MakeInt32(env, FindSubsequence(hay.data(), hay_len, needle.data(), needle_len, offset, dir));
 }
 
 napi_value BindingIndexOfString(napi_env env, napi_callback_info info) {
   size_t argc = 5;
   napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
-  uint8_t* hay = nullptr;
-  size_t hay_len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &hay, &hay_len)) return MakeInt32(env, -1);
+  EdgeBufferLease hay;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_read, &hay)) {
+    return MakeInt32(env, -1);
+  }
+  const size_t hay_len = hay.size();
   int32_t offset = 0;
   int32_t enc = kEncUtf8;
   bool dir = true;
@@ -1018,7 +912,7 @@ napi_value BindingIndexOfString(napi_env env, napi_callback_info info) {
       if (unit_offset < 0) unit_offset = std::max<int32_t>(0, static_cast<int32_t>(hay_units) + unit_offset);
       if (unit_offset > static_cast<int32_t>(hay_units)) unit_offset = static_cast<int32_t>(hay_units);
       for (size_t i = static_cast<size_t>(unit_offset); i + needle_units <= hay_units; i++) {
-        if (std::memcmp(hay + (i * 2), needle.data(), needle_len) == 0) return MakeInt32(env, static_cast<int32_t>(i * 2));
+        if (std::memcmp(hay.data() + (i * 2), needle.data(), needle_len) == 0) return MakeInt32(env, static_cast<int32_t>(i * 2));
       }
       return MakeInt32(env, -1);
     }
@@ -1029,21 +923,21 @@ napi_value BindingIndexOfString(napi_env env, napi_callback_info info) {
       start = static_cast<int32_t>(hay_units - needle_units);
     }
     for (int32_t i = start; i >= 0; i--) {
-      if (std::memcmp(hay + (static_cast<size_t>(i) * 2), needle.data(), needle_len) == 0) return MakeInt32(env, i * 2);
+      if (std::memcmp(hay.data() + (static_cast<size_t>(i) * 2), needle.data(), needle_len) == 0) return MakeInt32(env, i * 2);
     }
     return MakeInt32(env, -1);
   }
-  return MakeInt32(env, FindSubsequence(hay, hay_len, needle.data(), needle.size(), offset, dir));
+  return MakeInt32(env, FindSubsequence(hay.data(), hay_len, needle.data(), needle.size(), offset, dir));
 }
 
 napi_value BindingSwap16(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1] = {nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &data, &len)) return nullptr;
-  for (size_t i = 0; i + 1 < len; i += 2) std::swap(data[i], data[i + 1]);
+  EdgeBufferLease data;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_readwrite, &data)) return nullptr;
+  for (size_t i = 0; i + 1 < data.size(); i += 2) std::swap(data.data()[i], data.data()[i + 1]);
+  if (!data.Release(true)) return nullptr;
   return argv[0];
 }
 
@@ -1051,13 +945,13 @@ napi_value BindingSwap32(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1] = {nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &data, &len)) return nullptr;
-  for (size_t i = 0; i + 3 < len; i += 4) {
-    std::swap(data[i], data[i + 3]);
-    std::swap(data[i + 1], data[i + 2]);
+  EdgeBufferLease data;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_readwrite, &data)) return nullptr;
+  for (size_t i = 0; i + 3 < data.size(); i += 4) {
+    std::swap(data.data()[i], data.data()[i + 3]);
+    std::swap(data.data()[i + 1], data.data()[i + 2]);
   }
+  if (!data.Release(true)) return nullptr;
   return argv[0];
 }
 
@@ -1065,15 +959,15 @@ napi_value BindingSwap64(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1] = {nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &data, &len)) return nullptr;
-  for (size_t i = 0; i + 7 < len; i += 8) {
-    std::swap(data[i], data[i + 7]);
-    std::swap(data[i + 1], data[i + 6]);
-    std::swap(data[i + 2], data[i + 5]);
-    std::swap(data[i + 3], data[i + 4]);
+  EdgeBufferLease data;
+  if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_readwrite, &data)) return nullptr;
+  for (size_t i = 0; i + 7 < data.size(); i += 8) {
+    std::swap(data.data()[i], data.data()[i + 7]);
+    std::swap(data.data()[i + 1], data.data()[i + 6]);
+    std::swap(data.data()[i + 2], data.data()[i + 5]);
+    std::swap(data.data()[i + 3], data.data()[i + 4]);
   }
+  if (!data.Release(true)) return nullptr;
   return argv[0];
 }
 
@@ -1106,8 +1000,12 @@ napi_value SliceByEncoding(napi_env env, napi_callback_info info, int32_t enc) {
     return nullptr;
   }
 
-  ScopedReadBufferRange range;
-  if (!range.Acquire(env, argv[0], static_cast<size_t>(start), n)) {
+  EdgeBufferLease range;
+  if (!range.Acquire(env,
+                     argv[0],
+                     static_cast<size_t>(start),
+                     n,
+                     unofficial_napi_buffer_access_read)) {
     return MakeStringUtf8(env, "");
   }
   const uint8_t* p = range.data();
@@ -1173,9 +1071,8 @@ napi_value WriteByEncoding(napi_env env, napi_callback_info info, int32_t enc) {
   size_t argc = 4;
   napi_value argv[4] = {nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 4) return nullptr;
-  uint8_t* dst = nullptr;
   size_t dst_len = 0;
-  if (!ExtractBytesFromValue(env, argv[0], &dst, &dst_len)) return MakeInt32(env, 0);
+  if (!ByteLengthOfBinaryValue(env, argv[0], &dst_len)) return MakeInt32(env, 0);
   int32_t offset = 0;
   int32_t max_len = 0;
   GetInt32(env, argv[2], &offset);
@@ -1193,7 +1090,14 @@ napi_value WriteByEncoding(napi_env env, napi_callback_info info, int32_t enc) {
       to_write--;
     }
   }
-  if (to_write > 0) std::memcpy(dst + offset, bytes.data(), to_write);
+  if (to_write > 0) {
+    EdgeBufferLease dst;
+    if (!AcquireBytesFromValue(env, argv[0], unofficial_napi_buffer_access_readwrite, &dst)) {
+      return MakeInt32(env, 0);
+    }
+    std::memcpy(dst.data() + offset, bytes.data(), to_write);
+    if (!dst.Release(true)) return MakeInt32(env, 0);
+  }
   return MakeInt32(env, static_cast<int32_t>(to_write));
 }
 
@@ -1258,12 +1162,10 @@ napi_value BindingCopyArrayBuffer(napi_env env, napi_callback_info info) {
   napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
 
-  uint8_t* dst = nullptr;
-  uint8_t* src = nullptr;
-  size_t dst_len = 0;
-  size_t src_len = 0;
-  if (!ExtractArrayBufferParts(env, argv[0], &dst, &dst_len) ||
-      !ExtractArrayBufferParts(env, argv[2], &src, &src_len)) {
+  EdgeBufferLease dst;
+  EdgeBufferLease src;
+  if (!AcquireArrayBuffer(env, argv[0], unofficial_napi_buffer_access_readwrite, &dst) ||
+      !AcquireArrayBuffer(env, argv[2], unofficial_napi_buffer_access_read, &src)) {
     napi_throw_type_error(env, "ERR_INVALID_ARG_TYPE", "copyArrayBuffer expects (ArrayBuffer, ...)");
     return nullptr;
   }
@@ -1281,11 +1183,12 @@ napi_value BindingCopyArrayBuffer(napi_env env, napi_callback_info info) {
   const size_t dst_off = static_cast<size_t>(dst_offset);
   const size_t src_off = static_cast<size_t>(src_offset);
   const size_t count = static_cast<size_t>(bytes_to_copy);
-  if (dst_off > dst_len || src_off > src_len || count > (dst_len - dst_off) || count > (src_len - src_off)) {
+  if (dst_off > dst.size() || src_off > src.size() || count > (dst.size() - dst_off) || count > (src.size() - src_off)) {
     napi_throw_range_error(env, "ERR_OUT_OF_RANGE", "copyArrayBuffer range is out of bounds");
     return nullptr;
   }
-  if (count > 0) std::memcpy(dst + dst_off, src + src_off, count);
+  if (count > 0) std::memmove(dst.data() + dst_off, src.data() + src_off, count);
+  if (!dst.Release(count > 0)) return nullptr;
 
   napi_value undef = nullptr;
   napi_get_undefined(env, &undef);

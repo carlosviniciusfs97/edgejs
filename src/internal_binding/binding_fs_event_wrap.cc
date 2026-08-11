@@ -8,6 +8,7 @@
 
 #include "internal_binding/helpers.h"
 #include "edge_active_resource.h"
+#include "edge_buffer_lease.h"
 #include "edge_env_loop.h"
 #include "edge_handle_scope.h"
 #include "edge_handle_wrap.h"
@@ -33,11 +34,10 @@ bool ValueToUtf8(napi_env env, napi_value value, std::string* out) {
 
   bool is_buffer = false;
   if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* data = nullptr;
-    size_t len = 0;
-    if (napi_get_buffer_info(env, value, &data, &len) != napi_ok || data == nullptr) return false;
-    out->assign(static_cast<const char*>(data), len);
-    return true;
+    EdgeBufferLease path;
+    if (!path.Acquire(env, value, unofficial_napi_buffer_access_read)) return false;
+    out->assign(reinterpret_cast<const char*>(path.data()), path.size());
+    return path.Release(false);
   }
 
   size_t len = 0;

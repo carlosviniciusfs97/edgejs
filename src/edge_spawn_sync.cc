@@ -820,11 +820,15 @@ napi_value BuildOutputArray(napi_env env, const SpawnSyncRunner& runner) {
 
     napi_value buffer = nullptr;
     const size_t output_length = GetPipeOutputLength(pipe);
-    void* buffer_data = nullptr;
-    napi_create_buffer(env, output_length, &buffer_data, &buffer);
-    if (output_length > 0 && buffer_data != nullptr) {
-      CopyPipeOutput(pipe, static_cast<uint8_t*>(buffer_data));
+    if (napi_create_buffer(env, output_length, nullptr, &buffer) != napi_ok || buffer == nullptr) {
+      return nullptr;
     }
+    EdgeBufferLease output_lease;
+    if (!output_lease.Acquire(env, buffer, unofficial_napi_buffer_access_readwrite)) return nullptr;
+    if (output_length > 0) {
+      CopyPipeOutput(pipe, output_lease.data());
+    }
+    if (!output_lease.Release(true)) return nullptr;
     napi_set_element(env, output, i, buffer);
   }
 

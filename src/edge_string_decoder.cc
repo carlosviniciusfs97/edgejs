@@ -1,12 +1,14 @@
 #include "edge_string_decoder.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
 
+#include "edge_buffer_lease.h"
 #include "edge_encoding_ids.h"
 #include "edge_module_loader.h"
 
@@ -54,133 +56,51 @@ void SetMethod(napi_env env, napi_value obj, const char* name, napi_callback cb)
   }
 }
 
-size_t TypedArrayElementSize(napi_typedarray_type t) {
-  switch (t) {
-    case napi_int8_array:
-    case napi_uint8_array:
-    case napi_uint8_clamped_array:
-      return 1;
-    case napi_int16_array:
-    case napi_uint16_array:
-    case napi_float16_array:
-      return 2;
-    case napi_int32_array:
-    case napi_uint32_array:
-    case napi_float32_array:
-      return 4;
-    case napi_float64_array:
-    case napi_bigint64_array:
-    case napi_biguint64_array:
-      return 8;
-    default:
-      return 1;
-  }
+bool AcquireState(napi_env env, napi_value state_value, EdgeBufferLease* state) {
+  return state != nullptr &&
+         state->Acquire(env, state_value, unofficial_napi_buffer_access_readwrite) &&
+         state->size() >= kSize;
 }
 
-bool ReadState(napi_env env, napi_value state_value, uint8_t** state, size_t* state_len) {
-  void* data = nullptr;
-  size_t len = 0;
-  bool is_buffer = false;
-  if (napi_is_buffer(env, state_value, &is_buffer) == napi_ok && is_buffer) {
-    if (napi_get_buffer_info(env, state_value, &data, &len) == napi_ok &&
-        data != nullptr &&
-        len >= kSize) {
-      *state = static_cast<uint8_t*>(data);
-      *state_len = len;
-      return true;
-    }
-  }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, state_value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type t;
-    size_t element_len = 0;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env, state_value, &t, &element_len, &data, &ab, &byte_offset) == napi_ok &&
-        data != nullptr) {
-      const size_t byte_len = element_len * TypedArrayElementSize(t);
-      if (byte_len < kSize) return false;
-      *state = static_cast<uint8_t*>(data);
-      *state_len = byte_len;
-      return true;
-    }
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, state_value, &is_dataview) == napi_ok && is_dataview) {
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, state_value, &len, &data, &ab, &byte_offset) == napi_ok &&
-        len >= kSize) {
-      if (ab != nullptr) {
-        void* ab_data = nullptr;
-        size_t ab_len = 0;
-        if (napi_get_arraybuffer_info(env, ab, &ab_data, &ab_len) == napi_ok &&
-            ab_data != nullptr &&
-            byte_offset <= ab_len &&
-            len <= (ab_len - byte_offset)) {
-          data = static_cast<uint8_t*>(ab_data) + byte_offset;
-        }
-      }
-      if (data == nullptr) return false;
-      *state = static_cast<uint8_t*>(data);
-      *state_len = len;
-      return true;
-    }
-  }
-
-  return false;
-}
-
-bool ReadView(napi_env env, napi_value value, const uint8_t** data, size_t* len) {
+bool AcquireView(napi_env env, napi_value value, EdgeBufferLease* data) {
+  if (data == nullptr) return false;
   bool is_buffer = false;
   if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* ptr = nullptr;
-    size_t blen = 0;
-    if (napi_get_buffer_info(env, value, &ptr, &blen) != napi_ok) return false;
-    *data = static_cast<const uint8_t*>(ptr);
-    *len = blen;
-    return true;
+    return data->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
   bool is_typedarray = false;
   if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
     napi_typedarray_type t;
-    size_t element_len = 0;
-    void* ptr = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env, value, &t, &element_len, &ptr, &ab, &byte_offset) != napi_ok) return false;
-    *data = static_cast<const uint8_t*>(ptr);
-    *len = element_len * TypedArrayElementSize(t);
-    return true;
+    if (napi_get_typedarray_info(env, value, &t, nullptr, nullptr, nullptr, nullptr) != napi_ok) return false;
+    return data->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
   bool is_dataview = false;
   if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    size_t byte_len = 0;
-    void* ptr = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, &byte_len, &ptr, &ab, &byte_offset) != napi_ok) return false;
-    if (ab != nullptr) {
-      void* ab_data = nullptr;
-      size_t ab_len = 0;
-      if (napi_get_arraybuffer_info(env, ab, &ab_data, &ab_len) == napi_ok &&
-          ab_data != nullptr &&
-          byte_offset <= ab_len &&
-          byte_len <= (ab_len - byte_offset)) {
-        ptr = static_cast<uint8_t*>(ab_data) + byte_offset;
-      }
-    }
-    if (ptr == nullptr) return false;
-    *data = static_cast<const uint8_t*>(ptr);
-    *len = byte_len;
-    return true;
+    return data->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
   return false;
+}
+
+napi_value CreateUint8ArrayCopy(napi_env env, const uint8_t* data, size_t len) {
+  napi_value array_buffer = nullptr;
+  if (napi_create_arraybuffer(env, len, nullptr, &array_buffer) != napi_ok ||
+      array_buffer == nullptr) {
+    return nullptr;
+  }
+  EdgeBufferLease destination;
+  if (!destination.Acquire(env, array_buffer, unofficial_napi_buffer_access_readwrite)) {
+    return nullptr;
+  }
+  if (len != 0) std::memcpy(destination.data(), data, len);
+  if (!destination.Release(true)) return nullptr;
+  napi_value view = nullptr;
+  if (napi_create_typedarray(env, napi_uint8_array, len, array_buffer, 0, &view) != napi_ok) {
+    return nullptr;
+  }
+  return view;
 }
 
 const char* EncodingName(uint8_t enc) {
@@ -233,18 +153,8 @@ napi_value MakeStringFromBytes(napi_env env, const uint8_t* data, size_t len, ui
         napi_typeof(env, buffer_ctor, &ctor_type) == napi_ok &&
         ctor_type == napi_function &&
         napi_get_named_property(env, buffer_ctor, "from", &from_fn) == napi_ok) {
-      void* ab_data = nullptr;
-      napi_value array_buffer = nullptr;
-      if (napi_create_arraybuffer(env, len, &ab_data, &array_buffer) == napi_ok && ab_data != nullptr) {
-        std::memcpy(ab_data, data, len);
-        napi_value uint8_view = nullptr;
-        if (napi_create_typedarray(env,
-                                   napi_uint8_array,
-                                   len,
-                                   array_buffer,
-                                   0,
-                                   &uint8_view) == napi_ok &&
-            uint8_view != nullptr) {
+      napi_value uint8_view = CreateUint8ArrayCopy(env, data, len);
+      if (uint8_view != nullptr) {
           napi_value from_argv[1] = { uint8_view };
           napi_value buffer_value = nullptr;
           if (napi_call_function(env, buffer_ctor, from_fn, 1, from_argv, &buffer_value) == napi_ok &&
@@ -260,8 +170,7 @@ napi_value MakeStringFromBytes(napi_env env, const uint8_t* data, size_t len, ui
               }
             }
           }
-          ClearPendingException(env);
-        }
+        ClearPendingException(env);
       }
     }
   }
@@ -286,19 +195,8 @@ napi_value MakeStringFromBytes(napi_env env, const uint8_t* data, size_t len, ui
         napi_value from_fn = nullptr;
         if (napi_get_named_property(env, buffer_mod, "Buffer", &buffer_ctor) == napi_ok &&
             napi_get_named_property(env, buffer_ctor, "from", &from_fn) == napi_ok) {
-          void* ab_data = nullptr;
-          napi_value array_buffer = nullptr;
-          if (napi_create_arraybuffer(env, len, &ab_data, &array_buffer) == napi_ok &&
-              ab_data != nullptr) {
-            std::memcpy(ab_data, data, len);
-            napi_value uint8_view = nullptr;
-            if (napi_create_typedarray(env,
-                                       napi_uint8_array,
-                                       len,
-                                       array_buffer,
-                                       0,
-                                       &uint8_view) == napi_ok &&
-                uint8_view != nullptr) {
+          napi_value uint8_view = CreateUint8ArrayCopy(env, data, len);
+          if (uint8_view != nullptr) {
               napi_value from_argv[1] = { uint8_view };
               napi_value buffer_value = nullptr;
               if (napi_call_function(env, buffer_ctor, from_fn, 1, from_argv, &buffer_value) == napi_ok &&
@@ -314,8 +212,7 @@ napi_value MakeStringFromBytes(napi_env env, const uint8_t* data, size_t len, ui
                   }
                 }
               }
-              ClearPendingException(env);
-            }
+            ClearPendingException(env);
           }
         }
       }
@@ -522,29 +419,34 @@ napi_value DecodeBinding(napi_env env, napi_callback_info info) {
   napi_value argv[2] = {nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 2) return nullptr;
 
-  uint8_t* state = nullptr;
-  size_t state_len = 0;
-  if (!ReadState(env, argv[0], &state, &state_len)) return nullptr;
-  (void)state_len;
+  EdgeBufferLease state_lease;
+  if (!AcquireState(env, argv[0], &state_lease)) return nullptr;
+  std::array<uint8_t, kSize> local_state{};
+  std::memcpy(local_state.data(), state_lease.data(), local_state.size());
+  uint8_t* state = local_state.data();
 
-  const uint8_t* data = nullptr;
-  size_t nread = 0;
-  if (!ReadView(env, argv[1], &data, &nread)) return nullptr;
+  EdgeBufferLease input_lease;
+  if (!AcquireView(env, argv[1], &input_lease)) return nullptr;
+  std::vector<uint8_t> input(input_lease.data(), input_lease.data() + input_lease.size());
+  if (!input_lease.Release(false)) return nullptr;
+  const uint8_t* data = input.data();
+  size_t nread = input.size();
 
   const uint8_t enc = state[kEncodingField];
   const bool variable = (enc == kEncUtf8 || enc == kEncUtf16Le || enc == kEncBase64 || enc == kEncBase64Url);
   const size_t max_input_for_string =
       enc == kEncUtf16Le ? kEdgeStringMaxLength * 2 : kEdgeStringMaxLength;
   if (nread > max_input_for_string) {
+    (void)state_lease.Release(false);
     napi_throw_range_error(env, "ERR_STRING_TOO_LONG", "Cannot create a string longer than the maximum allowed length");
     return nullptr;
   }
   if (!variable) {
+    if (!state_lease.Release(false)) return nullptr;
     return MakeStringFromBytes(env, data, nread, enc);
   }
 
-  napi_value prepend = nullptr;
-  bool has_prepend = false;
+  std::vector<uint8_t> prepend_bytes;
 
   if (state[kMissingBytes] > 0) {
     if (enc == kEncUtf8) {
@@ -568,17 +470,21 @@ napi_value DecodeBinding(napi_env env, napi_callback_info info) {
     state[kBufferedBytes] = static_cast<uint8_t>(state[kBufferedBytes] + found);
 
     if (state[kMissingBytes] == 0) {
-      prepend = MakeStringFromBytes(env, state + kIncompleteCharactersStart, state[kBufferedBytes], enc);
-      has_prepend = prepend != nullptr;
+      prepend_bytes.assign(state + kIncompleteCharactersStart,
+                           state + kIncompleteCharactersStart + state[kBufferedBytes]);
       state[kBufferedBytes] = 0;
     }
   }
 
-  napi_value body = nullptr;
   if (nread == 0) {
-    if (has_prepend) return prepend;
-    napi_create_string_utf8(env, "", 0, &body);
-    return body;
+    std::memcpy(state_lease.data(), state, local_state.size());
+    if (!state_lease.Release(true)) return nullptr;
+    if (!prepend_bytes.empty()) {
+      return MakeStringFromBytes(env, prepend_bytes.data(), prepend_bytes.size(), enc);
+    }
+    napi_value empty = nullptr;
+    napi_create_string_utf8(env, "", 0, &empty);
+    return empty;
   }
 
   if (enc == kEncUtf8 && (data[nread - 1] & 0x80)) {
@@ -625,8 +531,13 @@ napi_value DecodeBinding(napi_env env, napi_callback_info info) {
     std::memcpy(state + kIncompleteCharactersStart, data + nread, state[kBufferedBytes]);
   }
 
-  body = MakeStringFromBytes(env, data, nread, enc);
-  if (!has_prepend) return body;
+  std::vector<uint8_t> body_bytes(data, data + nread);
+  std::memcpy(state_lease.data(), state, local_state.size());
+  if (!state_lease.Release(true)) return nullptr;
+  napi_value body = MakeStringFromBytes(env, body_bytes.data(), body_bytes.size(), enc);
+  if (prepend_bytes.empty()) return body;
+  napi_value prepend = MakeStringFromBytes(env, prepend_bytes.data(), prepend_bytes.size(), enc);
+  if (prepend == nullptr || body == nullptr) return nullptr;
   return ConcatStrings(env, prepend, body);
 }
 
@@ -635,10 +546,11 @@ napi_value FlushBinding(napi_env env, napi_callback_info info) {
   napi_value argv[1] = {nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
 
-  uint8_t* state = nullptr;
-  size_t state_len = 0;
-  if (!ReadState(env, argv[0], &state, &state_len)) return nullptr;
-  (void)state_len;
+  EdgeBufferLease state_lease;
+  if (!AcquireState(env, argv[0], &state_lease)) return nullptr;
+  std::array<uint8_t, kSize> local_state{};
+  std::memcpy(local_state.data(), state_lease.data(), local_state.size());
+  uint8_t* state = local_state.data();
 
   const uint8_t enc = state[kEncodingField];
   if (enc == kEncUtf16Le && (state[kBufferedBytes] % 2) == 1) {
@@ -646,15 +558,20 @@ napi_value FlushBinding(napi_env env, napi_callback_info info) {
     state[kBufferedBytes] = static_cast<uint8_t>(state[kBufferedBytes] - 1);
   }
   if (state[kBufferedBytes] == 0) {
+    std::memcpy(state_lease.data(), state, local_state.size());
+    if (!state_lease.Release(true)) return nullptr;
     napi_value empty = nullptr;
     napi_create_string_utf8(env, "", 0, &empty);
     return empty;
   }
 
-  napi_value ret = MakeStringFromBytes(env, state + kIncompleteCharactersStart, state[kBufferedBytes], enc);
+  std::vector<uint8_t> pending(state + kIncompleteCharactersStart,
+                               state + kIncompleteCharactersStart + state[kBufferedBytes]);
   state[kMissingBytes] = 0;
   state[kBufferedBytes] = 0;
-  return ret;
+  std::memcpy(state_lease.data(), state, local_state.size());
+  if (!state_lease.Release(true)) return nullptr;
+  return MakeStringFromBytes(env, pending.data(), pending.size(), enc);
 }
 
 }  // namespace

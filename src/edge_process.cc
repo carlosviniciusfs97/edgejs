@@ -1,5 +1,6 @@
 #include "edge_process.h"
 #include "edge_active_resource.h"
+#include "edge_buffer_lease.h"
 #include "binding_registry/binding_registry.h"
 #include "edge_env_loop.h"
 #include "edge_module_loader.h"
@@ -927,21 +928,21 @@ std::string GetProcessTitleString() {
 bool GetFloat64ArrayData(napi_env env,
                          napi_value value,
                          size_t min_length,
+                         EdgeBufferLease* lease,
                          double** data_out,
                          size_t* length_out = nullptr) {
-  if (data_out == nullptr || value == nullptr) return false;
+  if (lease == nullptr || data_out == nullptr || value == nullptr) return false;
   bool is_typedarray = false;
   if (napi_is_typedarray(env, value, &is_typedarray) != napi_ok || !is_typedarray) return false;
   napi_typedarray_type ta_type = napi_int8_array;
   size_t length = 0;
-  void* data = nullptr;
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
-  if (napi_get_typedarray_info(env, value, &ta_type, &length, &data, &arraybuffer, &byte_offset) != napi_ok ||
-      ta_type != napi_float64_array || data == nullptr || length < min_length) {
+  if (napi_get_typedarray_info(
+          env, value, &ta_type, &length, nullptr, nullptr, nullptr) != napi_ok ||
+      ta_type != napi_float64_array || length < min_length ||
+      !lease->Acquire(env, value, unofficial_napi_buffer_access_readwrite)) {
     return false;
   }
-  *data_out = static_cast<double*>(data);
+  *data_out = static_cast<double*>(static_cast<void*>(lease->data()));
   if (length_out != nullptr) *length_out = length;
   return true;
 }
@@ -4476,8 +4477,9 @@ napi_value ProcessMethodsCpuUsageBufferCallback(napi_env env, napi_callback_info
   napi_value argv[1] = {nullptr};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   if (argc < 1 || argv[0] == nullptr) return nullptr;
+  EdgeBufferLease output;
   double* values = nullptr;
-  if (!GetFloat64ArrayData(env, argv[0], 2, &values)) return nullptr;
+  if (!GetFloat64ArrayData(env, argv[0], 2, &output, &values)) return nullptr;
   uv_rusage_t rusage;
   const int rc = uv_getrusage(&rusage);
   if (rc != 0) {
@@ -4486,6 +4488,7 @@ napi_value ProcessMethodsCpuUsageBufferCallback(napi_env env, napi_callback_info
   }
   values[0] = kMicrosPerSec * rusage.ru_utime.tv_sec + rusage.ru_utime.tv_usec;
   values[1] = kMicrosPerSec * rusage.ru_stime.tv_sec + rusage.ru_stime.tv_usec;
+  if (!output.Release(true)) return nullptr;
   napi_value undefined = nullptr;
   napi_get_undefined(env, &undefined);
   return undefined;
@@ -4496,8 +4499,9 @@ napi_value ProcessMethodsThreadCpuUsageBufferCallback(napi_env env, napi_callbac
   napi_value argv[1] = {nullptr};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   if (argc < 1 || argv[0] == nullptr) return nullptr;
+  EdgeBufferLease output;
   double* values = nullptr;
-  if (!GetFloat64ArrayData(env, argv[0], 2, &values)) return nullptr;
+  if (!GetFloat64ArrayData(env, argv[0], 2, &output, &values)) return nullptr;
   uv_rusage_t rusage;
   const int rc = uv_getrusage_thread(&rusage);
   if (rc != 0) {
@@ -4510,6 +4514,7 @@ napi_value ProcessMethodsThreadCpuUsageBufferCallback(napi_env env, napi_callbac
   }
   values[0] = kMicrosPerSec * rusage.ru_utime.tv_sec + rusage.ru_utime.tv_usec;
   values[1] = kMicrosPerSec * rusage.ru_stime.tv_sec + rusage.ru_stime.tv_usec;
+  if (!output.Release(true)) return nullptr;
   napi_value undefined = nullptr;
   napi_get_undefined(env, &undefined);
   return undefined;
@@ -4520,8 +4525,9 @@ napi_value ProcessMethodsMemoryUsageBufferCallback(napi_env env, napi_callback_i
   napi_value argv[1] = {nullptr};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   if (argc < 1 || argv[0] == nullptr) return nullptr;
+  EdgeBufferLease output;
   double* values = nullptr;
-  if (!GetFloat64ArrayData(env, argv[0], 5, &values)) return nullptr;
+  if (!GetFloat64ArrayData(env, argv[0], 5, &output, &values)) return nullptr;
   size_t rss = 0;
   const int rss_rc = uv_resident_set_memory(&rss);
   if (rss_rc != 0) {
@@ -4540,6 +4546,7 @@ napi_value ProcessMethodsMemoryUsageBufferCallback(napi_env env, napi_callback_i
   values[2] = heap_used;
   values[3] = external;
   values[4] = array_buffers;
+  if (!output.Release(true)) return nullptr;
   napi_value undefined = nullptr;
   napi_get_undefined(env, &undefined);
   return undefined;
@@ -4550,9 +4557,10 @@ napi_value ProcessMethodsResourceUsageBufferCallback(napi_env env, napi_callback
   napi_value argv[1] = {nullptr};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   if (argc < 1 || argv[0] == nullptr) return nullptr;
+  EdgeBufferLease output;
   double* values = nullptr;
   size_t length = 0;
-  if (!GetFloat64ArrayData(env, argv[0], 16, &values, &length)) return nullptr;
+  if (!GetFloat64ArrayData(env, argv[0], 16, &output, &values, &length)) return nullptr;
   uv_rusage_t rusage;
   const int rc = uv_getrusage(&rusage);
   if (rc != 0) {
@@ -4576,6 +4584,7 @@ napi_value ProcessMethodsResourceUsageBufferCallback(napi_env env, napi_callback
   values[13] = static_cast<double>(rusage.ru_nsignals);
   values[14] = static_cast<double>(rusage.ru_nvcsw);
   values[15] = static_cast<double>(rusage.ru_nivcsw);
+  if (!output.Release(true)) return nullptr;
   napi_value undefined = nullptr;
   napi_get_undefined(env, &undefined);
   return undefined;
@@ -4590,18 +4599,19 @@ void UpdateHrtimeBuffer(napi_env env, bool write_bigint) {
   if (napi_is_typedarray(env, buffer, &is_typedarray) != napi_ok || !is_typedarray) return;
   napi_typedarray_type ta_type;
   size_t length = 0;
-  void* data = nullptr;
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
-  if (napi_get_typedarray_info(env, buffer, &ta_type, &length, &data, &arraybuffer, &byte_offset) != napi_ok ||
-      data == nullptr || ta_type != napi_uint32_array || length < 3) {
+  if (napi_get_typedarray_info(
+          env, buffer, &ta_type, &length, nullptr, nullptr, nullptr) != napi_ok ||
+      ta_type != napi_uint32_array || length < 3) {
     return;
   }
-  uint32_t* values = static_cast<uint32_t*>(data);
+  EdgeBufferLease output;
+  if (!output.Acquire(env, buffer, unofficial_napi_buffer_access_readwrite)) return;
+  uint32_t* values = static_cast<uint32_t*>(static_cast<void*>(output.data()));
   const uint64_t now_ns = GetHrtimeNanoseconds();
   if (write_bigint) {
     values[0] = static_cast<uint32_t>(now_ns & 0xffffffffull);
     values[1] = static_cast<uint32_t>((now_ns >> 32) & 0xffffffffull);
+    (void)output.Release(true);
     return;
   }
   const uint64_t sec = now_ns / 1000000000ull;
@@ -4609,6 +4619,7 @@ void UpdateHrtimeBuffer(napi_env env, bool write_bigint) {
   values[0] = static_cast<uint32_t>((sec >> 32) & 0xffffffffull);
   values[1] = static_cast<uint32_t>(sec & 0xffffffffull);
   values[2] = nsec;
+  (void)output.Release(true);
 }
 
 napi_value ProcessMethodsHrtimeCallback(napi_env env, napi_callback_info info) {

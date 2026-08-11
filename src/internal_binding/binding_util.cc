@@ -177,11 +177,8 @@ napi_value UtilIsUint8Array(napi_env env, napi_callback_info info) {
     bool is_typedarray = false;
     if (napi_is_typedarray(env, argv[0], &is_typedarray) == napi_ok && is_typedarray) {
       napi_typedarray_type type = napi_uint8_array;
-      size_t length = 0;
-      void* data = nullptr;
-      napi_value arraybuffer = nullptr;
-      size_t offset = 0;
-      if (napi_get_typedarray_info(env, argv[0], &type, &length, &data, &arraybuffer, &offset) == napi_ok) {
+      if (napi_get_typedarray_info(
+              env, argv[0], &type, nullptr, nullptr, nullptr, nullptr) == napi_ok) {
         result = (type == napi_uint8_array);
       }
     }

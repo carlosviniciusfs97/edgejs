@@ -188,113 +188,42 @@ std::string ValueToUtf8(napi_env env, napi_value value) {
   return out;
 }
 
-size_t TypedArrayBytesPerElement(napi_typedarray_type type);
+class CryptoByteSpan {
+ public:
+  bool Acquire(napi_env env, napi_value value, bool allow_string = false) {
+    if (value == nullptr) return false;
+    napi_valuetype type = napi_undefined;
+    if (allow_string && napi_typeof(env, value, &type) == napi_ok && type == napi_string) {
+      const std::string text = ValueToUtf8(env, value);
+      owned_.assign(text.begin(), text.end());
+      return true;
+    }
+    return lease_.Acquire(env, value, unofficial_napi_buffer_access_read);
+  }
 
-bool GetBufferBytes(napi_env env, napi_value value, uint8_t** data, size_t* len) {
-  static uint8_t kEmptyBufferSentinel = 0;
-  if (value == nullptr || data == nullptr || len == nullptr) return false;
-
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    if (napi_get_buffer_info(env, value, reinterpret_cast<void**>(data), len) != napi_ok) {
+  bool AcquireKey(napi_env env, napi_value value) {
+    if (Acquire(env, value, true)) return true;
+    napi_value export_fn = nullptr;
+    napi_valuetype type = napi_undefined;
+    if (value == nullptr ||
+        napi_get_named_property(env, value, "export", &export_fn) != napi_ok ||
+        export_fn == nullptr ||
+        napi_typeof(env, export_fn, &type) != napi_ok ||
+        type != napi_function) {
       return false;
     }
-    if (*len == 0 && *data == nullptr) {
-      *data = &kEmptyBufferSentinel;
-    }
-    return true;
+    napi_value exported = nullptr;
+    return napi_call_function(env, value, export_fn, 0, nullptr, &exported) == napi_ok &&
+           exported != nullptr && Acquire(env, exported, true);
   }
 
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* raw = nullptr;
-    size_t byte_len = 0;
-    if (napi_get_arraybuffer_info(env, value, &raw, &byte_len) != napi_ok) return false;
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<uint8_t*>(raw) : &kEmptyBufferSentinel;
-    *len = byte_len;
-    return true;
-  }
+  const uint8_t* data() const { return lease_.data() != nullptr ? lease_.data() : owned_.data(); }
+  size_t size() const { return lease_.data() != nullptr ? lease_.size() : owned_.size(); }
 
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type ta_type = napi_uint8_array;
-    size_t element_len = 0;
-    void* raw = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env, value, &ta_type, &element_len, &raw, &ab, &byte_offset) != napi_ok) {
-      return false;
-    }
-    const size_t byte_len = element_len * TypedArrayBytesPerElement(ta_type);
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<uint8_t*>(raw) : &kEmptyBufferSentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    size_t byte_len = 0;
-    void* raw = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, &byte_len, &raw, &ab, &byte_offset) != napi_ok) return false;
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<uint8_t*>(raw) : &kEmptyBufferSentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  return false;
-}
-
-bool GetBufferOrStringBytes(napi_env env,
-                            napi_value value,
-                            std::vector<uint8_t>* owned,
-                            uint8_t** data,
-                            size_t* len) {
-  static uint8_t kEmptyBufferSentinel = 0;
-  if (owned == nullptr || data == nullptr || len == nullptr) return false;
-  if (GetBufferBytes(env, value, data, len)) return true;
-
-  napi_valuetype type = napi_undefined;
-  if (napi_typeof(env, value, &type) != napi_ok || type != napi_string) return false;
-  std::string text = ValueToUtf8(env, value);
-  owned->assign(text.begin(), text.end());
-  if (owned->empty()) {
-    *data = &kEmptyBufferSentinel;
-    *len = 0;
-  } else {
-    *data = owned->data();
-    *len = owned->size();
-  }
-  return true;
-}
-
-bool GetKeyBytes(napi_env env,
-                 napi_value value,
-                 std::vector<uint8_t>* owned,
-                 uint8_t** data,
-                 size_t* len) {
-  if (GetBufferOrStringBytes(env, value, owned, data, len)) return true;
-  if (value == nullptr) return false;
-
-  napi_value export_fn = nullptr;
-  napi_valuetype type = napi_undefined;
-  if (napi_get_named_property(env, value, "export", &export_fn) != napi_ok ||
-      export_fn == nullptr ||
-      napi_typeof(env, export_fn, &type) != napi_ok ||
-      type != napi_function) {
-    return false;
-  }
-
-  napi_value exported = nullptr;
-  if (napi_call_function(env, value, export_fn, 0, nullptr, &exported) != napi_ok || exported == nullptr) {
-    return false;
-  }
-  return GetBufferOrStringBytes(env, exported, owned, data, len);
-}
+ private:
+  EdgeBufferLease lease_;
+  std::vector<uint8_t> owned_;
+};
 
 bool IsNullOrUndefined(napi_env env, napi_value value) {
   napi_valuetype type = napi_undefined;
@@ -308,10 +237,9 @@ bool ReadPassphrase(napi_env env, napi_value value, std::string* out, bool* prov
   out->clear();
   if (value == nullptr || IsNullOrUndefined(env, value)) return true;
 
-  uint8_t* bytes = nullptr;
-  size_t byte_len = 0;
-  if (GetBufferBytes(env, value, &bytes, &byte_len)) {
-    out->assign(reinterpret_cast<const char*>(bytes), byte_len);
+  CryptoByteSpan bytes;
+  if (bytes.Acquire(env, value)) {
+    out->assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     *provided = true;
     return true;
   }
@@ -321,29 +249,6 @@ bool ReadPassphrase(napi_env env, napi_value value, std::string* out, bool* prov
   *out = ValueToUtf8(env, value);
   *provided = true;
   return true;
-}
-
-size_t TypedArrayBytesPerElement(napi_typedarray_type type) {
-  switch (type) {
-    case napi_int8_array:
-    case napi_uint8_array:
-    case napi_uint8_clamped_array:
-      return 1;
-    case napi_int16_array:
-    case napi_uint16_array:
-    case napi_float16_array:
-      return 2;
-    case napi_int32_array:
-    case napi_uint32_array:
-    case napi_float32_array:
-      return 4;
-    case napi_float64_array:
-    case napi_bigint64_array:
-    case napi_biguint64_array:
-      return 8;
-    default:
-      return 1;
-  }
 }
 
 std::vector<std::string> GetStringArrayProperty(napi_env env, napi_value obj, const char* name) {
@@ -413,11 +318,9 @@ bool GetByteStringArray(napi_env env, napi_value value, std::vector<std::string>
     napi_value entry = nullptr;
     if (napi_get_element(env, value, i, &entry) != napi_ok || entry == nullptr) return false;
 
-    std::vector<uint8_t> owned;
-    uint8_t* bytes = nullptr;
-    size_t byte_len = 0;
-    if (!GetBufferOrStringBytes(env, entry, &owned, &bytes, &byte_len)) return false;
-    out->emplace_back(reinterpret_cast<const char*>(bytes), byte_len);
+    CryptoByteSpan bytes;
+    if (!bytes.Acquire(env, entry, true)) return false;
+    out->emplace_back(reinterpret_cast<const char*>(bytes.data()), bytes.size());
   }
   return true;
 }
@@ -655,65 +558,6 @@ void EnsureRootCertThreadCleanupHook(napi_env env) {
   std::call_once(g_cert_loading_cleanup_once, []() {
     std::atexit([]() { CleanupRootCertLoading(nullptr); });
   });
-}
-
-bool GetAnyBufferSourceBytesImpl(napi_env env, napi_value value, uint8_t** data, size_t* len) {
-  static uint8_t kEmptyBufferSentinel = 0;
-  if (GetBufferBytes(env, value, data, len)) return true;
-
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* raw = nullptr;
-    size_t byte_len = 0;
-    if (napi_get_arraybuffer_info(env, value, &raw, &byte_len) != napi_ok) return false;
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<uint8_t*>(raw) : &kEmptyBufferSentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  bool is_sharedarraybuffer = false;
-  if (node_api_is_sharedarraybuffer(env, value, &is_sharedarraybuffer) == napi_ok && is_sharedarraybuffer) {
-    void* raw = nullptr;
-    size_t byte_len = 0;
-    if (napi_get_arraybuffer_info(env, value, &raw, &byte_len) != napi_ok) return false;
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<uint8_t*>(raw) : &kEmptyBufferSentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type ta_type = napi_uint8_array;
-    size_t element_len = 0;
-    void* raw = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env, value, &ta_type, &element_len, &raw, &ab, &byte_offset) != napi_ok) {
-      return false;
-    }
-    const size_t byte_len = element_len * TypedArrayBytesPerElement(ta_type);
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<uint8_t*>(raw) : &kEmptyBufferSentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    size_t byte_len = 0;
-    void* raw = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, &byte_len, &raw, &ab, &byte_offset) != napi_ok) return false;
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<uint8_t*>(raw) : &kEmptyBufferSentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  return false;
 }
 
 napi_value MakeError(napi_env env, const char* code, const char* message) {
@@ -1355,12 +1199,12 @@ napi_value CryptoHkdfSync(napi_env env, napi_callback_info info) {
   napi_value argv[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
   const std::string digest = ValueToUtf8(env, argv[0]);
-  std::vector<uint8_t> key_owned;
-  uint8_t *ikm = nullptr, *salt = nullptr, *info_bytes = nullptr;
-  size_t ikm_len = 0, salt_len = 0, info_len = 0;
-  if (!GetKeyBytes(env, argv[1], &key_owned, &ikm, &ikm_len) ||
-      !GetAnyBufferSourceBytesImpl(env, argv[2], &salt, &salt_len) ||
-      !GetAnyBufferSourceBytesImpl(env, argv[3], &info_bytes, &info_len)) {
+  CryptoByteSpan ikm;
+  CryptoByteSpan salt;
+  CryptoByteSpan info_bytes;
+  if (!ikm.AcquireKey(env, argv[1]) ||
+      !salt.Acquire(env, argv[2]) ||
+      !info_bytes.Acquire(env, argv[3])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "hkdf input/salt/info must be Buffers or strings");
     return nullptr;
   }
@@ -1380,7 +1224,10 @@ napi_value CryptoHkdfSync(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_CRYPTO_INVALID_KEYLEN", "Invalid key length");
     return nullptr;
   }
-  auto out = ncrypto::hkdf(md, {ikm, ikm_len}, {info_bytes, info_len}, {salt, salt_len},
+  auto out = ncrypto::hkdf(md,
+                           {ikm.data(), ikm.size()},
+                           {info_bytes.data(), info_bytes.size()},
+                           {salt.data(), salt.size()},
                            static_cast<size_t>(keylen));
   if (!out) {
     ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "hkdf failed");
@@ -1685,17 +1532,16 @@ napi_value CryptoParsePfx(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2] = {nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* pfx = nullptr;
-  size_t pfx_len = 0;
-  if (!GetBufferBytes(env, argv[0], &pfx, &pfx_len)) return nullptr;
+  CryptoByteSpan pfx;
+  if (!pfx.Acquire(env, argv[0])) return nullptr;
   std::string pass;
   bool has_pass = false;
   if (argc >= 2 && !ReadPassphrase(env, argv[1], &pass, &has_pass)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "passphrase must be a string or Buffer");
     return nullptr;
   }
-  const unsigned char* p = pfx;
-  PKCS12* pkcs12 = d2i_PKCS12(nullptr, &p, static_cast<long>(pfx_len));
+  const unsigned char* p = pfx.data();
+  PKCS12* pkcs12 = d2i_PKCS12(nullptr, &p, static_cast<long>(pfx.size()));
   if (pkcs12 == nullptr) {
     ThrowError(env, "ERR_CRYPTO_PFX", "not enough data");
     return nullptr;
@@ -1721,10 +1567,9 @@ napi_value CryptoParseCrl(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1] = {nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* crl_data = nullptr;
-  size_t crl_len = 0;
-  if (!GetBufferBytes(env, argv[0], &crl_data, &crl_len)) return nullptr;
-  BIO* bio = BIO_new_mem_buf(crl_data, static_cast<int>(crl_len));
+  CryptoByteSpan crl_data;
+  if (!crl_data.Acquire(env, argv[0])) return nullptr;
+  BIO* bio = BIO_new_mem_buf(crl_data.data(), static_cast<int>(crl_data.size()));
   X509_CRL* crl = bio ? PEM_read_bio_X509_CRL(bio, nullptr, nullptr, nullptr) : nullptr;
   if (crl == nullptr && bio != nullptr) {
     (void)BIO_reset(bio);
@@ -2026,22 +1871,20 @@ napi_value CryptoSecureContextSetCert(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "context must be a secure context handle");
     return nullptr;
   }
-  std::vector<uint8_t> cert_owned;
-  uint8_t* cert_bytes = nullptr;
-  size_t cert_len = 0;
-  if (!GetBufferOrStringBytes(env, argv[1], &cert_owned, &cert_bytes, &cert_len)) {
+  CryptoByteSpan cert_bytes;
+  if (!cert_bytes.Acquire(env, argv[1], true)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "cert must be a string or Buffer");
     return nullptr;
   }
   int ok = 0;
   const bool looks_like_pem =
-      cert_len >= 11 &&
-      std::memcmp(cert_bytes, "-----BEGIN ", 11) == 0;
+      cert_bytes.size() >= 11 &&
+      std::memcmp(cert_bytes.data(), "-----BEGIN ", 11) == 0;
   if (looks_like_pem) {
-    ok = UseCertificateChain(holder, cert_bytes, cert_len);
+    ok = UseCertificateChain(holder, cert_bytes.data(), cert_bytes.size());
   }
   if (ok != 1) {
-    X509* cert = ParseX509(cert_bytes, cert_len);
+    X509* cert = ParseX509(cert_bytes.data(), cert_bytes.size());
     if (cert == nullptr) {
       ThrowLastOpenSslError(env, "ERR_OSSL_PEM_NO_START_LINE", "Failed to parse certificate");
       return nullptr;
@@ -2071,10 +1914,8 @@ napi_value CryptoSecureContextSetKey(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "context must be a secure context handle");
     return nullptr;
   }
-  std::vector<uint8_t> key_owned;
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
-  if (!GetBufferOrStringBytes(env, argv[1], &key_owned, &key_bytes, &key_len)) {
+  CryptoByteSpan key_bytes;
+  if (!key_bytes.Acquire(env, argv[1], true)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "key must be a string or Buffer");
     return nullptr;
   }
@@ -2088,8 +1929,8 @@ napi_value CryptoSecureContextSetKey(napi_env env, napi_callback_info info) {
     passphrase.clear();
     has_passphrase = true;
   }
-  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes,
-                                                 key_len,
+  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes.data(),
+                                                 key_bytes.size(),
                                                  reinterpret_cast<const uint8_t*>(passphrase.data()),
                                                  passphrase.size(),
                                                  has_passphrase);
@@ -2117,14 +1958,12 @@ napi_value CryptoSecureContextAddCACert(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "context must be a secure context handle");
     return nullptr;
   }
-  std::vector<uint8_t> cert_owned;
-  uint8_t* cert_bytes = nullptr;
-  size_t cert_len = 0;
-  if (!GetBufferOrStringBytes(env, argv[1], &cert_owned, &cert_bytes, &cert_len)) {
+  CryptoByteSpan cert_bytes;
+  if (!cert_bytes.Acquire(env, argv[1], true)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "ca must be a string or Buffer");
     return nullptr;
   }
-  BIO* bio = BIO_new_mem_buf(cert_bytes, static_cast<int>(cert_len));
+  BIO* bio = BIO_new_mem_buf(cert_bytes.data(), static_cast<int>(cert_bytes.size()));
   if (bio == nullptr) {
     ThrowLastOpenSslError(env, "ERR_OSSL_PEM_NO_START_LINE", "Failed to parse CA certificate");
     return nullptr;
@@ -2174,14 +2013,12 @@ napi_value CryptoSecureContextAddCrl(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "context must be a secure context handle");
     return nullptr;
   }
-  std::vector<uint8_t> crl_owned;
-  uint8_t* crl_bytes = nullptr;
-  size_t crl_len = 0;
-  if (!GetBufferOrStringBytes(env, argv[1], &crl_owned, &crl_bytes, &crl_len)) {
+  CryptoByteSpan crl_bytes;
+  if (!crl_bytes.Acquire(env, argv[1], true)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "crl must be a string or Buffer");
     return nullptr;
   }
-  X509_CRL* crl = ParseX509Crl(crl_bytes, crl_len);
+  X509_CRL* crl = ParseX509Crl(crl_bytes.data(), crl_bytes.size());
   if (crl == nullptr) {
     ThrowError(env, "ERR_CRYPTO_CRL", "Failed to parse CRL");
     return nullptr;
@@ -2286,13 +2123,12 @@ napi_value CryptoSecureContextSetTicketKeys(napi_env env, napi_callback_info inf
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "context must be a secure context handle");
     return nullptr;
   }
-  uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!GetBufferBytes(env, argv[1], &data, &len) || len != 48) {
+  CryptoByteSpan data;
+  if (!data.Acquire(env, argv[1]) || data.size() != 48) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "ticket keys must be a 48-byte Buffer");
     return nullptr;
   }
-  holder->ticket_keys.assign(data, data + len);
+  holder->ticket_keys.assign(data.data(), data.data() + data.size());
   EnsureTicketCallback(holder);
   napi_value true_v = nullptr;
   napi_get_boolean(env, true, &true_v);
@@ -2341,9 +2177,8 @@ napi_value CryptoSecureContextLoadPKCS12(napi_env env, napi_callback_info info) 
     return nullptr;
   }
 
-  uint8_t* pfx = nullptr;
-  size_t pfx_len = 0;
-  if (!GetBufferBytes(env, argv[1], &pfx, &pfx_len)) {
+  CryptoByteSpan pfx;
+  if (!pfx.Acquire(env, argv[1])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "pfx must be a string or Buffer");
     return nullptr;
   }
@@ -2355,7 +2190,7 @@ napi_value CryptoSecureContextLoadPKCS12(napi_env env, napi_callback_info info) 
     return nullptr;
   }
 
-  BIO* bio = BIO_new_mem_buf(pfx, static_cast<int>(pfx_len));
+  BIO* bio = BIO_new_mem_buf(pfx.data(), static_cast<int>(pfx.size()));
   if (bio == nullptr) {
     ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "Unable to load PFX certificate");
     return nullptr;
@@ -2534,15 +2369,13 @@ napi_value CryptoSecureContextSetDHParam(napi_env env, napi_callback_info info) 
     return undefined;
   }
 
-  std::vector<uint8_t> dh_owned;
-  uint8_t* dh_bytes = nullptr;
-  size_t dh_len = 0;
-  if (!GetBufferOrStringBytes(env, argv[1], &dh_owned, &dh_bytes, &dh_len)) {
+  CryptoByteSpan dh_bytes;
+  if (!dh_bytes.Acquire(env, argv[1], true)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "DH parameters must be a string or Buffer");
     return nullptr;
   }
 
-  BIO* bio = BIO_new_mem_buf(dh_bytes, static_cast<int>(dh_len));
+  BIO* bio = BIO_new_mem_buf(dh_bytes.data(), static_cast<int>(dh_bytes.size()));
   if (bio == nullptr) {
     ThrowLastOpenSslError(env, "ERR_TLS_INVALID_CONTEXT", "Failed to load DH parameters");
     return nullptr;
@@ -2982,9 +2815,8 @@ napi_value CryptoGetAsymmetricKeyDetails(napi_env env, napi_callback_info info) 
   napi_value argv[2] = {nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
 
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
-  if (!GetBufferBytes(env, argv[0], &key_bytes, &key_len)) {
+  CryptoByteSpan key_bytes;
+  if (!key_bytes.Acquire(env, argv[0])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "key must be a Buffer");
     return nullptr;
   }
@@ -2997,12 +2829,12 @@ napi_value CryptoGetAsymmetricKeyDetails(napi_env env, napi_callback_info info) 
     }
   }
 
-  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes,
-                                                 key_len,
+  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes.data(),
+                                                 key_bytes.size(),
                                                  reinterpret_cast<const uint8_t*>(passphrase.data()),
                                                  passphrase.size(),
                                                  has_passphrase);
-  if (pkey == nullptr) pkey = ParsePublicKeyOrCert(key_bytes, key_len);
+  if (pkey == nullptr) pkey = ParsePublicKeyOrCert(key_bytes.data(), key_bytes.size());
   if (pkey == nullptr) {
     napi_value null_v = nullptr;
     napi_get_null(env, &null_v);
@@ -3130,9 +2962,8 @@ napi_value CryptoGetAsymmetricKeyType(napi_env env, napi_callback_info info) {
   size_t argc = 2;
   napi_value argv[2] = {nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 1) return nullptr;
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
-  if (!GetBufferBytes(env, argv[0], &key_bytes, &key_len)) {
+  CryptoByteSpan key_bytes;
+  if (!key_bytes.Acquire(env, argv[0])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "key must be a Buffer");
     return nullptr;
   }
@@ -3144,12 +2975,12 @@ napi_value CryptoGetAsymmetricKeyType(napi_env env, napi_callback_info info) {
       return nullptr;
     }
   }
-  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes,
-                                                 key_len,
+  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes.data(),
+                                                 key_bytes.size(),
                                                  reinterpret_cast<const uint8_t*>(passphrase.data()),
                                                  passphrase.size(),
                                                  has_passphrase);
-  if (pkey == nullptr) pkey = ParsePublicKeyOrCert(key_bytes, key_len);
+  if (pkey == nullptr) pkey = ParsePublicKeyOrCert(key_bytes.data(), key_bytes.size());
   if (pkey == nullptr) {
     napi_value null_v = nullptr;
     napi_get_null(env, &null_v);
@@ -3171,13 +3002,9 @@ napi_value CryptoPublicEncrypt(napi_env env, napi_callback_info info) {
   size_t argc = 8;
   napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
-  std::vector<uint8_t> owned_key;
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
-  uint8_t* input = nullptr;
-  size_t in_len = 0;
-  if (!GetKeyBytes(env, argv[0], &owned_key, &key_bytes, &key_len) ||
-      !GetBufferBytes(env, argv[4], &input, &in_len)) {
+  CryptoByteSpan key_bytes;
+  CryptoByteSpan input;
+  if (!key_bytes.AcquireKey(env, argv[0]) || !input.Acquire(env, argv[4])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "key and buffer must be Buffers or strings");
     return nullptr;
   }
@@ -3195,9 +3022,8 @@ napi_value CryptoPublicEncrypt(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_OSSL_EVP_INVALID_DIGEST", "Invalid digest used");
     return nullptr;
   }
-  uint8_t* label = nullptr;
-  size_t label_len = 0;
-  bool has_label = (argc >= 8 && argv[7] != nullptr && GetBufferBytes(env, argv[7], &label, &label_len));
+  CryptoByteSpan label;
+  bool has_label = argc >= 8 && argv[7] != nullptr && label.Acquire(env, argv[7]);
   std::string passphrase;
   bool has_passphrase = false;
   if (argc >= 4 && argv[3] != nullptr && !ReadPassphrase(env, argv[3], &passphrase, &has_passphrase)) {
@@ -3205,11 +3031,11 @@ napi_value CryptoPublicEncrypt(napi_env env, napi_callback_info info) {
     return nullptr;
   }
 
-  EVP_PKEY* pkey = ParsePublicKeyOrCert(key_bytes, key_len);
+  EVP_PKEY* pkey = ParsePublicKeyOrCert(key_bytes.data(), key_bytes.size());
   if (pkey == nullptr) {
     ERR_clear_error();
-    pkey = ParsePrivateKeyWithPassphrase(key_bytes,
-                                         key_len,
+    pkey = ParsePrivateKeyWithPassphrase(key_bytes.data(),
+                                         key_bytes.size(),
                                          reinterpret_cast<const uint8_t*>(passphrase.data()),
                                          passphrase.size(),
                                          has_passphrase);
@@ -3234,16 +3060,16 @@ napi_value CryptoPublicEncrypt(napi_env env, napi_callback_info info) {
       ThrowLastOpenSslError(env, "ERR_OSSL_EVP_INVALID_DIGEST", "Invalid digest used");
       return nullptr;
     }
-    if (has_label && label_len > 0) {
-      unsigned char* copied = reinterpret_cast<unsigned char*>(OPENSSL_malloc(label_len));
+    if (has_label && label.size() > 0) {
+      unsigned char* copied = reinterpret_cast<unsigned char*>(OPENSSL_malloc(label.size()));
       if (copied == nullptr) {
         EVP_PKEY_CTX_free(ctx);
         EVP_PKEY_free(pkey);
         ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "Failed to allocate OAEP label");
         return nullptr;
       }
-      std::memcpy(copied, label, label_len);
-      if (EVP_PKEY_CTX_set0_rsa_oaep_label(ctx, copied, static_cast<int>(label_len)) != 1) {
+      std::memcpy(copied, label.data(), label.size());
+      if (EVP_PKEY_CTX_set0_rsa_oaep_label(ctx, copied, static_cast<int>(label.size())) != 1) {
         OPENSSL_free(copied);
         EVP_PKEY_CTX_free(ctx);
         EVP_PKEY_free(pkey);
@@ -3253,14 +3079,14 @@ napi_value CryptoPublicEncrypt(napi_env env, napi_callback_info info) {
     }
   }
   size_t out_len = 0;
-  if (EVP_PKEY_encrypt(ctx, nullptr, &out_len, input, in_len) != 1) {
+  if (EVP_PKEY_encrypt(ctx, nullptr, &out_len, input.data(), input.size()) != 1) {
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pkey);
     ThrowLastOpenSslError(env, "ERR_CRYPTO_OPERATION_FAILED", "publicEncrypt failed");
     return nullptr;
   }
   std::vector<uint8_t> out(out_len);
-  if (EVP_PKEY_encrypt(ctx, out.data(), &out_len, input, in_len) != 1) {
+  if (EVP_PKEY_encrypt(ctx, out.data(), &out_len, input.data(), input.size()) != 1) {
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pkey);
     ThrowLastOpenSslError(env, "ERR_CRYPTO_OPERATION_FAILED", "publicEncrypt failed");
@@ -3275,13 +3101,9 @@ napi_value CryptoPrivateEncrypt(napi_env env, napi_callback_info info) {
   size_t argc = 8;
   napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
-  std::vector<uint8_t> owned_key;
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
-  uint8_t* input = nullptr;
-  size_t in_len = 0;
-  if (!GetKeyBytes(env, argv[0], &owned_key, &key_bytes, &key_len) ||
-      !GetBufferBytes(env, argv[4], &input, &in_len)) {
+  CryptoByteSpan key_bytes;
+  CryptoByteSpan input;
+  if (!key_bytes.AcquireKey(env, argv[0]) || !input.Acquire(env, argv[4])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "key and buffer must be Buffers or strings");
     return nullptr;
   }
@@ -3296,8 +3118,8 @@ napi_value CryptoPrivateEncrypt(napi_env env, napi_callback_info info) {
   int32_t padding = RSA_PKCS1_PADDING;
   if (argc >= 6 && argv[5] != nullptr) napi_get_value_int32(env, argv[5], &padding);
 
-  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes,
-                                                 key_len,
+  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes.data(),
+                                                 key_bytes.size(),
                                                  reinterpret_cast<const uint8_t*>(passphrase.data()),
                                                  passphrase.size(),
                                                  has_passphrase);
@@ -3313,7 +3135,8 @@ napi_value CryptoPrivateEncrypt(napi_env env, napi_callback_info info) {
   }
 
   std::vector<uint8_t> out(static_cast<size_t>(RSA_size(rsa)));
-  const int written = RSA_private_encrypt(static_cast<int>(in_len), input, out.data(), rsa, padding);
+  const int written = RSA_private_encrypt(
+      static_cast<int>(input.size()), input.data(), out.data(), rsa, padding);
   RSA_free(rsa);
   if (written < 0) {
     ThrowLastOpenSslError(env, "ERR_CRYPTO_OPERATION_FAILED", "privateEncrypt failed");
@@ -3326,13 +3149,9 @@ napi_value CryptoPrivateDecrypt(napi_env env, napi_callback_info info) {
   size_t argc = 8;
   napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
-  std::vector<uint8_t> owned_key;
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
-  uint8_t* input = nullptr;
-  size_t in_len = 0;
-  if (!GetKeyBytes(env, argv[0], &owned_key, &key_bytes, &key_len) ||
-      !GetBufferBytes(env, argv[4], &input, &in_len)) {
+  CryptoByteSpan key_bytes;
+  CryptoByteSpan input;
+  if (!key_bytes.AcquireKey(env, argv[0]) || !input.Acquire(env, argv[4])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "key and buffer must be Buffers or strings");
     return nullptr;
   }
@@ -3350,9 +3169,8 @@ napi_value CryptoPrivateDecrypt(napi_env env, napi_callback_info info) {
     ThrowError(env, "ERR_OSSL_EVP_INVALID_DIGEST", "Invalid digest used");
     return nullptr;
   }
-  uint8_t* label = nullptr;
-  size_t label_len = 0;
-  bool has_label = (argc >= 8 && argv[7] != nullptr && GetBufferBytes(env, argv[7], &label, &label_len));
+  CryptoByteSpan label;
+  bool has_label = argc >= 8 && argv[7] != nullptr && label.Acquire(env, argv[7]);
 
   std::string passphrase;
   bool has_passphrase = false;
@@ -3361,8 +3179,8 @@ napi_value CryptoPrivateDecrypt(napi_env env, napi_callback_info info) {
     return nullptr;
   }
 
-  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes,
-                                                 key_len,
+  EVP_PKEY* pkey = ParsePrivateKeyWithPassphrase(key_bytes.data(),
+                                                 key_bytes.size(),
                                                  reinterpret_cast<const uint8_t*>(passphrase.data()),
                                                  passphrase.size(),
                                                  has_passphrase);
@@ -3386,16 +3204,16 @@ napi_value CryptoPrivateDecrypt(napi_env env, napi_callback_info info) {
       ThrowLastOpenSslError(env, "ERR_OSSL_EVP_INVALID_DIGEST", "Invalid digest used");
       return nullptr;
     }
-    if (has_label && label_len > 0) {
-      unsigned char* copied = reinterpret_cast<unsigned char*>(OPENSSL_malloc(label_len));
+    if (has_label && label.size() > 0) {
+      unsigned char* copied = reinterpret_cast<unsigned char*>(OPENSSL_malloc(label.size()));
       if (copied == nullptr) {
         EVP_PKEY_CTX_free(ctx);
         EVP_PKEY_free(pkey);
         ThrowError(env, "ERR_CRYPTO_OPERATION_FAILED", "Failed to allocate OAEP label");
         return nullptr;
       }
-      std::memcpy(copied, label, label_len);
-      if (EVP_PKEY_CTX_set0_rsa_oaep_label(ctx, copied, static_cast<int>(label_len)) != 1) {
+      std::memcpy(copied, label.data(), label.size());
+      if (EVP_PKEY_CTX_set0_rsa_oaep_label(ctx, copied, static_cast<int>(label.size())) != 1) {
         OPENSSL_free(copied);
         EVP_PKEY_CTX_free(ctx);
         EVP_PKEY_free(pkey);
@@ -3405,14 +3223,14 @@ napi_value CryptoPrivateDecrypt(napi_env env, napi_callback_info info) {
     }
   }
   size_t out_len = 0;
-  if (EVP_PKEY_decrypt(ctx, nullptr, &out_len, input, in_len) != 1) {
+  if (EVP_PKEY_decrypt(ctx, nullptr, &out_len, input.data(), input.size()) != 1) {
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pkey);
     ThrowLastOpenSslError(env, "ERR_CRYPTO_OPERATION_FAILED", "privateDecrypt failed");
     return nullptr;
   }
   std::vector<uint8_t> out(out_len);
-  if (EVP_PKEY_decrypt(ctx, out.data(), &out_len, input, in_len) != 1) {
+  if (EVP_PKEY_decrypt(ctx, out.data(), &out_len, input.data(), input.size()) != 1) {
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(pkey);
     ThrowLastOpenSslError(env, "ERR_CRYPTO_OPERATION_FAILED", "privateDecrypt failed");
@@ -3427,13 +3245,9 @@ napi_value CryptoPublicDecrypt(napi_env env, napi_callback_info info) {
   size_t argc = 8;
   napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 5) return nullptr;
-  std::vector<uint8_t> owned_key;
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
-  uint8_t* input = nullptr;
-  size_t in_len = 0;
-  if (!GetKeyBytes(env, argv[0], &owned_key, &key_bytes, &key_len) ||
-      !GetBufferBytes(env, argv[4], &input, &in_len)) {
+  CryptoByteSpan key_bytes;
+  CryptoByteSpan input;
+  if (!key_bytes.AcquireKey(env, argv[0]) || !input.Acquire(env, argv[4])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "key and buffer must be Buffers or strings");
     return nullptr;
   }
@@ -3448,11 +3262,11 @@ napi_value CryptoPublicDecrypt(napi_env env, napi_callback_info info) {
   int32_t padding = RSA_PKCS1_PADDING;
   if (argc >= 6 && argv[5] != nullptr) napi_get_value_int32(env, argv[5], &padding);
 
-  EVP_PKEY* pkey = ParsePublicKeyOrCert(key_bytes, key_len);
+  EVP_PKEY* pkey = ParsePublicKeyOrCert(key_bytes.data(), key_bytes.size());
   if (pkey == nullptr) {
     ERR_clear_error();
-    pkey = ParsePrivateKeyWithPassphrase(key_bytes,
-                                         key_len,
+    pkey = ParsePrivateKeyWithPassphrase(key_bytes.data(),
+                                         key_bytes.size(),
                                          reinterpret_cast<const uint8_t*>(passphrase.data()),
                                          passphrase.size(),
                                          has_passphrase);
@@ -3469,7 +3283,8 @@ napi_value CryptoPublicDecrypt(napi_env env, napi_callback_info info) {
   }
 
   std::vector<uint8_t> out(static_cast<size_t>(RSA_size(rsa)));
-  const int written = RSA_public_decrypt(static_cast<int>(in_len), input, out.data(), rsa, padding);
+  const int written = RSA_public_decrypt(
+      static_cast<int>(input.size()), input.data(), out.data(), rsa, padding);
   RSA_free(rsa);
   if (written < 0) {
     ThrowLastOpenSslError(env, "ERR_CRYPTO_OPERATION_FAILED", "publicDecrypt failed");
@@ -3483,12 +3298,15 @@ napi_value CryptoCipherTransformAead(napi_env env, napi_callback_info info) {
   napi_value argv[8] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc < 6) return nullptr;
   const std::string algo = ValueToUtf8(env, argv[0]);
-  uint8_t *key = nullptr, *iv = nullptr, *input = nullptr, *aad = nullptr, *auth_tag = nullptr;
-  size_t key_len = 0, iv_len = 0, in_len = 0, aad_len = 0, auth_tag_len = 0;
-  if (!GetBufferBytes(env, argv[1], &key, &key_len) ||
-      !GetBufferBytes(env, argv[2], &iv, &iv_len) ||
-      !GetBufferBytes(env, argv[3], &input, &in_len) ||
-      !GetBufferBytes(env, argv[5], &aad, &aad_len)) {
+  CryptoByteSpan key;
+  CryptoByteSpan iv;
+  CryptoByteSpan input;
+  CryptoByteSpan aad;
+  CryptoByteSpan auth_tag;
+  if (!key.Acquire(env, argv[1]) ||
+      !iv.Acquire(env, argv[2]) ||
+      !input.Acquire(env, argv[3]) ||
+      !aad.Acquire(env, argv[5])) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "aead arguments must be Buffers");
     return nullptr;
   }
@@ -3498,7 +3316,7 @@ napi_value CryptoCipherTransformAead(napi_env env, napi_callback_info info) {
     napi_valuetype tag_type = napi_undefined;
     napi_typeof(env, argv[6], &tag_type);
     if (tag_type != napi_undefined && tag_type != napi_null) {
-      if (!GetBufferBytes(env, argv[6], &auth_tag, &auth_tag_len)) {
+      if (!auth_tag.Acquire(env, argv[6])) {
         ThrowError(env, "ERR_INVALID_ARG_TYPE", "auth tag must be a Buffer");
         return nullptr;
       }
@@ -3524,21 +3342,30 @@ napi_value CryptoCipherTransformAead(napi_env env, napi_callback_info info) {
     return nullptr;
   }
   int ok = EVP_CipherInit_ex(ctx, cipher, nullptr, nullptr, nullptr, decrypt ? 0 : 1);
-  if (ok == 1) ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, static_cast<int>(iv_len), nullptr);
+  if (ok == 1) ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, static_cast<int>(iv.size()), nullptr);
   if (ok == 1 && (is_ccm || is_ocb) && requested_tag_len > 0) {
-    void* tag_ptr = (is_ccm && decrypt && auth_tag != nullptr) ? auth_tag : nullptr;
+    void* tag_ptr = (is_ccm && decrypt && auth_tag.size() != 0)
+                        ? const_cast<uint8_t*>(auth_tag.data())
+                        : nullptr;
     ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, requested_tag_len, tag_ptr);
   }
-  if (ok == 1) ok = EVP_CipherInit_ex(ctx, nullptr, nullptr, key, iv, decrypt ? 0 : 1);
+  if (ok == 1) ok = EVP_CipherInit_ex(ctx, nullptr, nullptr, key.data(), iv.data(), decrypt ? 0 : 1);
   int tmp_len = 0;
-  if (ok == 1 && is_ccm) ok = EVP_CipherUpdate(ctx, nullptr, &tmp_len, nullptr, static_cast<int>(in_len));
-  if (ok == 1 && aad_len > 0) ok = EVP_CipherUpdate(ctx, nullptr, &tmp_len, aad, static_cast<int>(aad_len));
-  if (ok == 1 && decrypt && auth_tag != nullptr && !is_ccm) {
-    ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, static_cast<int>(auth_tag_len), auth_tag);
+  if (ok == 1 && is_ccm) ok = EVP_CipherUpdate(ctx, nullptr, &tmp_len, nullptr, static_cast<int>(input.size()));
+  if (ok == 1 && aad.size() > 0) {
+    ok = EVP_CipherUpdate(ctx, nullptr, &tmp_len, aad.data(), static_cast<int>(aad.size()));
   }
-  std::vector<uint8_t> out(in_len + 32);
+  if (ok == 1 && decrypt && auth_tag.size() != 0 && !is_ccm) {
+    ok = EVP_CIPHER_CTX_ctrl(ctx,
+                             EVP_CTRL_AEAD_SET_TAG,
+                             static_cast<int>(auth_tag.size()),
+                             const_cast<uint8_t*>(auth_tag.data()));
+  }
+  std::vector<uint8_t> out(input.size() + 32);
   int out_len = 0;
-  if (ok == 1) ok = EVP_CipherUpdate(ctx, out.data(), &out_len, input, static_cast<int>(in_len));
+  if (ok == 1) {
+    ok = EVP_CipherUpdate(ctx, out.data(), &out_len, input.data(), static_cast<int>(input.size()));
+  }
   int final_len = 0;
   if (ok == 1) ok = EVP_CipherFinal_ex(ctx, out.data() + out_len, &final_len);
   out.resize(static_cast<size_t>(out_len + final_len));
@@ -3584,17 +3411,17 @@ napi_value CryptoSignOneShot(napi_env env, napi_callback_info info) {
     null_digest = (digest_type == napi_null || digest_type == napi_undefined);
   }
   const std::string algo = null_digest ? std::string() : ValueToUtf8(env, argv[0]);
-  uint8_t* data = nullptr;
-  size_t data_len = 0;
-  std::vector<uint8_t> key_owned;
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
+  CryptoByteSpan data_span;
+  CryptoByteSpan key_span;
   napi_value key_value = argv[2];
-  if (!GetBufferBytes(env, argv[1], &data, &data_len) ||
-      !GetKeyBytes(env, key_value, &key_owned, &key_bytes, &key_len)) {
+  if (!data_span.Acquire(env, argv[1]) || !key_span.AcquireKey(env, key_value)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "data and key must be Buffers or strings");
     return nullptr;
   }
+  const uint8_t* data = data_span.data();
+  const size_t data_len = data_span.size();
+  const uint8_t* key_bytes = key_span.data();
+  const size_t key_len = key_span.size();
 
   std::string passphrase;
   bool has_passphrase = false;
@@ -3637,7 +3464,8 @@ napi_value CryptoSignOneShot(napi_env env, napi_callback_info info) {
       napi_get_value_int32(env, dsa_sig_enc_arg, &dsa_sig_enc);
     }
   }
-  uint8_t* context = nullptr;
+  CryptoByteSpan context_span;
+  const uint8_t* context = nullptr;
   size_t context_len = 0;
   bool has_context = false;
   napi_value context_arg = extended_key_args ? argv[9] : (argc >= 6 ? argv[5] : nullptr);
@@ -3646,10 +3474,12 @@ napi_value CryptoSignOneShot(napi_env env, napi_callback_info info) {
     if (napi_typeof(env, context_arg, &context_type) == napi_ok &&
         context_type != napi_null &&
         context_type != napi_undefined) {
-      if (!GetBufferBytes(env, context_arg, &context, &context_len)) {
+      if (!context_span.Acquire(env, context_arg)) {
         ThrowError(env, "ERR_INVALID_ARG_TYPE", "context must be a Buffer");
         return nullptr;
       }
+      context = context_span.data();
+      context_len = context_span.size();
       has_context = true;
     }
   }
@@ -3861,22 +3691,26 @@ napi_value CryptoVerifyOneShot(napi_env env, napi_callback_info info) {
     null_digest = (digest_type == napi_null || digest_type == napi_undefined);
   }
   const std::string algo = null_digest ? std::string() : ValueToUtf8(env, argv[0]);
-  uint8_t* data = nullptr;
-  size_t data_len = 0;
-  std::vector<uint8_t> key_owned;
-  uint8_t* key_bytes = nullptr;
-  size_t key_len = 0;
-  uint8_t* sig = nullptr;
+  CryptoByteSpan data_span;
+  CryptoByteSpan key_span;
+  CryptoByteSpan signature_span;
+  const uint8_t* sig = nullptr;
   size_t sig_len = 0;
   std::vector<uint8_t> signature_storage;
   napi_value key_value = argv[2];
   napi_value signature_value = extended_key_args ? argv[6] : argv[3];
-  if (!GetBufferBytes(env, argv[1], &data, &data_len) ||
-      !GetKeyBytes(env, key_value, &key_owned, &key_bytes, &key_len) ||
-      !GetBufferBytes(env, signature_value, &sig, &sig_len)) {
+  if (!data_span.Acquire(env, argv[1]) ||
+      !key_span.AcquireKey(env, key_value) ||
+      !signature_span.Acquire(env, signature_value)) {
     ThrowError(env, "ERR_INVALID_ARG_TYPE", "data, key and signature must be Buffers or strings");
     return nullptr;
   }
+  const uint8_t* data = data_span.data();
+  const size_t data_len = data_span.size();
+  const uint8_t* key_bytes = key_span.data();
+  const size_t key_len = key_span.size();
+  sig = signature_span.data();
+  sig_len = signature_span.size();
   std::string passphrase;
   bool has_passphrase = false;
   int32_t key_format = -1;
@@ -3917,7 +3751,8 @@ napi_value CryptoVerifyOneShot(napi_env env, napi_callback_info info) {
       napi_get_value_int32(env, dsa_sig_enc_arg, &dsa_sig_enc);
     }
   }
-  uint8_t* context = nullptr;
+  CryptoByteSpan context_span;
+  const uint8_t* context = nullptr;
   size_t context_len = 0;
   bool has_context = false;
   napi_value context_arg = extended_key_args ? argv[10] : (argc >= 7 ? argv[6] : nullptr);
@@ -3926,10 +3761,12 @@ napi_value CryptoVerifyOneShot(napi_env env, napi_callback_info info) {
     if (napi_typeof(env, context_arg, &context_type) == napi_ok &&
         context_type != napi_null &&
         context_type != napi_undefined) {
-      if (!GetBufferBytes(env, context_arg, &context, &context_len)) {
+      if (!context_span.Acquire(env, context_arg)) {
         ThrowError(env, "ERR_INVALID_ARG_TYPE", "context must be a Buffer");
         return nullptr;
       }
+      context = context_span.data();
+      context_len = context_span.size();
       has_context = true;
     }
   }
@@ -4122,10 +3959,6 @@ void SetMethod(napi_env env, napi_value obj, const char* name, napi_callback fn)
 }
 
 }  // namespace
-
-bool GetAnyBufferSourceBytes(napi_env env, napi_value value, uint8_t** data, size_t* len) {
-  return GetAnyBufferSourceBytesImpl(env, value, data, len);
-}
 
 EVP_PKEY* ParsePrivateKeyWithPassphrase(const uint8_t* data,
                                         size_t len,

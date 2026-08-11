@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -127,8 +128,8 @@ struct LibuvWriteReq {
   napi_ref send_handle_ref = nullptr;
   uv_buf_t* bufs = nullptr;
   uv_buf_t* bufs_storage = nullptr;
-  napi_ref* bufs_refs = nullptr;
   char** bufs_allocs = nullptr;
+  std::vector<std::unique_ptr<EdgeBufferLease>> bufs_leases;
   uint32_t nbufs = 0;
   uint32_t nbufs_storage = 0;
 };
@@ -479,37 +480,29 @@ bool UpdateUserReadBuffer(EdgeStreamBase* base, napi_value value) {
     byte_length = length * element_size;
   }
 
-  unofficial_napi_buffer_lease lease = nullptr;
-  void* data = nullptr;
-  if (unofficial_napi_acquire_buffer_lease(
-          base->env,
-          value,
-          0,
-          byte_length,
-          unofficial_napi_buffer_access_readwrite,
-          &lease,
-          &data) != napi_ok ||
-      lease == nullptr ||
-      data == nullptr) {
+  auto lease = std::make_unique<EdgeBufferLease>();
+  if (!lease->Acquire(base->env,
+                      value,
+                      0,
+                      byte_length,
+                      unofficial_napi_buffer_access_readwrite)) {
     return false;
   }
 
   napi_ref value_ref = nullptr;
   if (napi_create_reference(base->env, value, 1, &value_ref) != napi_ok ||
       value_ref == nullptr) {
-    (void)unofficial_napi_release_buffer_lease(base->env, lease, false);
     return false;
   }
 
   if (base->user_read_buffer_lease != nullptr) {
-    (void)unofficial_napi_release_buffer_lease(
-        base->env, base->user_read_buffer_lease, false);
+    (void)base->user_read_buffer_lease->Release(false);
   }
   DeleteRefIfPresent(base->env, &base->user_read_buffer_ref);
   base->user_read_buffer_ref = value_ref;
-  base->user_read_buffer_lease = lease;
-  base->user_buffer_base = static_cast<char*>(data);
+  base->user_buffer_base = reinterpret_cast<char*>(lease->data());
   base->user_buffer_len = byte_length;
+  base->user_read_buffer_lease = std::move(lease);
   return true;
 }
 
@@ -518,9 +511,8 @@ void ReleaseUserReadBufferLease(EdgeStreamBase* base, bool modified) {
       base->user_read_buffer_lease == nullptr) {
     return;
   }
-  (void)unofficial_napi_release_buffer_lease(
-      base->env, base->user_read_buffer_lease, modified);
-  base->user_read_buffer_lease = nullptr;
+  (void)base->user_read_buffer_lease->Release(modified);
+  base->user_read_buffer_lease.reset();
   base->user_buffer_base = nullptr;
   base->user_buffer_len = 0;
 }
@@ -789,13 +781,7 @@ void FreeWriteReq(LibuvWriteReq* wr) {
     EdgeUnregisterActiveRequestToken(wr->env, wr->active_request_token);
     wr->active_request_token = nullptr;
   }
-  if (wr->bufs_refs != nullptr) {
-    for (uint32_t i = 0; i < wr->nbufs_storage; ++i) {
-      DeleteRefIfPresent(wr->env, &wr->bufs_refs[i]);
-    }
-    delete[] wr->bufs_refs;
-    wr->bufs_refs = nullptr;
-  }
+  wr->bufs_leases.clear();
   if (wr->bufs_allocs != nullptr) {
     for (uint32_t i = 0; i < wr->nbufs_storage; ++i) {
       free(wr->bufs_allocs[i]);
@@ -1602,86 +1588,32 @@ int EdgeStreamBaseWritevDirect(EdgeStreamBase* base,
   return status;
 }
 
-size_t EdgeTypedArrayElementSize(napi_typedarray_type type) {
-  switch (type) {
-    case napi_int8_array:
-    case napi_uint8_array:
-    case napi_uint8_clamped_array:
-      return 1;
-    case napi_int16_array:
-    case napi_uint16_array:
-      return 2;
-    case napi_int32_array:
-    case napi_uint32_array:
-    case napi_float32_array:
-      return 4;
-    case napi_float64_array:
-    case napi_bigint64_array:
-    case napi_biguint64_array:
-      return 8;
-    default:
-      return 1;
-  }
-}
-
 bool EdgeStreamBaseExtractByteSpan(napi_env env,
                                   napi_value value,
+                                  EdgeBufferLease* lease,
                                   const uint8_t** data,
                                   size_t* len,
-                                  bool* refable,
                                   std::string* temp_utf8) {
-  if (data == nullptr || len == nullptr || refable == nullptr || temp_utf8 == nullptr) return false;
+  if (lease == nullptr || data == nullptr || len == nullptr || temp_utf8 == nullptr) return false;
   *data = nullptr;
   *len = 0;
-  *refable = false;
   temp_utf8->clear();
 
   if (env == nullptr || value == nullptr) return true;
 
   bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* raw = nullptr;
-    size_t length = 0;
-    if (napi_get_buffer_info(env, value, &raw, &length) == napi_ok && raw != nullptr) {
-      *data = static_cast<const uint8_t*>(raw);
-      *len = length;
-      *refable = true;
-      return true;
-    }
-  }
-
   bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type ta_type = napi_uint8_array;
-    size_t length = 0;
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env,
-                                 value,
-                                 &ta_type,
-                                 &length,
-                                 &raw,
-                                 &arraybuffer,
-                                 &byte_offset) == napi_ok &&
-        raw != nullptr) {
-      *data = static_cast<const uint8_t*>(raw);
-      *len = length * EdgeTypedArrayElementSize(ta_type);
-      *refable = true;
-      return true;
-    }
-  }
-
   bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* raw = nullptr;
-    size_t length = 0;
-    if (napi_get_arraybuffer_info(env, value, &raw, &length) == napi_ok && raw != nullptr) {
-      *data = static_cast<const uint8_t*>(raw);
-      *len = length;
-      *refable = true;
-      return true;
-    }
+  bool is_dataview = false;
+  (void)napi_is_buffer(env, value, &is_buffer);
+  (void)napi_is_typedarray(env, value, &is_typedarray);
+  (void)napi_is_arraybuffer(env, value, &is_arraybuffer);
+  (void)napi_is_dataview(env, value, &is_dataview);
+  if (is_buffer || is_typedarray || is_arraybuffer || is_dataview) {
+    if (!lease->Acquire(env, value, unofficial_napi_buffer_access_read)) return false;
+    *data = lease->data();
+    *len = lease->size();
+    return true;
   }
 
   *temp_utf8 = ValueToUtf8(env, value);
@@ -1704,17 +1636,13 @@ bool IsUint8ArrayPayload(napi_env env, napi_value value) {
   }
 
   napi_typedarray_type ta_type = napi_uint8_array;
-  size_t length = 0;
-  void* raw = nullptr;
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
   return napi_get_typedarray_info(env,
                                   value,
                                   &ta_type,
-                                  &length,
-                                  &raw,
-                                  &arraybuffer,
-                                  &byte_offset) == napi_ok &&
+                                  nullptr,
+                                  nullptr,
+                                  nullptr,
+                                  nullptr) == napi_ok &&
          ta_type == napi_uint8_array;
 }
 
@@ -1766,9 +1694,12 @@ napi_value EdgeLibuvStreamWriteBuffer(EdgeStreamBase* base,
 
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  auto lease = std::make_unique<EdgeBufferLease>();
   std::string temp_utf8;
-  EdgeStreamBaseExtractByteSpan(base->env, payload, &data, &len, &refable, &temp_utf8);
+  if (!EdgeStreamBaseExtractByteSpan(
+          base->env, payload, lease.get(), &data, &len, &temp_utf8)) {
+    return EdgeStreamBaseMakeInt32(base->env, UV_EINVAL);
+  }
 
   uv_stream_t* stream = base->ops->get_stream(base);
   base->bytes_written += len;
@@ -1820,14 +1751,12 @@ napi_value EdgeLibuvStreamWriteBuffer(EdgeStreamBase* base,
   wr->nbufs = 1;
   wr->nbufs_storage = 1;
   wr->bufs_storage = new uv_buf_t[1];
-  wr->bufs_refs = new napi_ref[1]();
   wr->bufs_allocs = new char*[1]();
   wr->bufs = wr->bufs_storage;
 
-  if (refable && payload != nullptr && remaining_base != nullptr &&
-      napi_create_reference(base->env, payload, 1, &wr->bufs_refs[0]) == napi_ok &&
-      wr->bufs_refs[0] != nullptr) {
+  if (lease->active() && remaining_base != nullptr) {
     wr->bufs_storage[0] = uv_buf_init(const_cast<char*>(remaining_base), static_cast<unsigned int>(remaining));
+    wr->bufs_leases.push_back(std::move(lease));
   } else {
     char* copy = static_cast<char*>(malloc(remaining));
     if (copy == nullptr && remaining > 0) {
@@ -1932,7 +1861,6 @@ napi_value EdgeLibuvStreamWriteV(EdgeStreamBase* base,
   wr->nbufs = nbufs;
   wr->nbufs_storage = nbufs;
   wr->bufs_storage = new uv_buf_t[nbufs];
-  wr->bufs_refs = new napi_ref[nbufs]();
   wr->bufs_allocs = new char*[nbufs]();
   wr->bufs = wr->bufs_storage;
 
@@ -1955,17 +1883,21 @@ napi_value EdgeLibuvStreamWriteV(EdgeStreamBase* base,
 
     const uint8_t* data = nullptr;
     size_t len = 0;
-    bool refable = false;
+    auto lease = std::make_unique<EdgeBufferLease>();
     std::string temp_utf8;
-    EdgeStreamBaseExtractByteSpan(base->env, chunk, &data, &len, &refable, &temp_utf8);
+    if (!EdgeStreamBaseExtractByteSpan(
+            base->env, chunk, lease.get(), &data, &len, &temp_utf8)) {
+      SetStreamState(base->env, kEdgeBytesWritten, 0);
+      SetStreamState(base->env, kEdgeLastWriteWasAsync, 0);
+      EdgeStreamBaseSetReqError(base->env, req_obj, UV_EINVAL);
+      FreeWriteReq(wr);
+      return EdgeStreamBaseMakeInt32(base->env, UV_EINVAL);
+    }
 
-    if (refable &&
-        chunk != nullptr &&
-        data != nullptr &&
-        napi_create_reference(base->env, chunk, 1, &wr->bufs_refs[i]) == napi_ok &&
-        wr->bufs_refs[i] != nullptr) {
+    if (lease->active() && data != nullptr) {
       wr->bufs_storage[i] = uv_buf_init(const_cast<char*>(reinterpret_cast<const char*>(data)),
                                         static_cast<unsigned int>(len));
+      wr->bufs_leases.push_back(std::move(lease));
     } else {
       char* copy = static_cast<char*>(malloc(len));
       if (copy == nullptr && len > 0) {

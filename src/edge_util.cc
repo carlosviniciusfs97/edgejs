@@ -5,6 +5,7 @@
 #include "edge_util.h"
 
 #include "unofficial_napi.h"
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_module_loader.h"
 
@@ -1240,11 +1241,13 @@ bool InstallConstants(napi_env env, napi_value binding) {
 
 bool InstallShouldAbortToggle(napi_env env, napi_value binding) {
   napi_value ab = nullptr;
-  void* data = nullptr;
-  if (napi_create_arraybuffer(env, sizeof(uint32_t), &data, &ab) != napi_ok || ab == nullptr || data == nullptr) {
+  if (napi_create_arraybuffer(env, sizeof(uint32_t), nullptr, &ab) != napi_ok || ab == nullptr) {
     return false;
   }
-  static_cast<uint32_t*>(data)[0] = 1;
+  EdgeBufferLease toggle;
+  if (!toggle.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return false;
+  static_cast<uint32_t*>(static_cast<void*>(toggle.data()))[0] = 1;
+  if (!toggle.Release(true)) return false;
 
   napi_value out = nullptr;
   if (napi_create_typedarray(env, napi_uint32_array, 1, ab, 0, &out) != napi_ok || out == nullptr) return false;

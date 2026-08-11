@@ -24,6 +24,7 @@
 #include "ada.h"
 
 #include "binding_registry/binding_registry.h"
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_fs.h"
 #include "internal_binding/helpers.h"
@@ -177,27 +178,23 @@ bool ValueToPathString(napi_env env, napi_value value, std::string* out) {
 
   bool is_buffer = false;
   if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* data = nullptr;
-    size_t length = 0;
-    if (napi_get_buffer_info(env, value, &data, &length) != napi_ok || data == nullptr) return false;
-    *out = std::string(static_cast<const char*>(data), length);
-    return true;
+    EdgeBufferLease path;
+    if (!path.Acquire(env, value, unofficial_napi_buffer_access_read)) return false;
+    out->assign(reinterpret_cast<const char*>(path.data()), path.size());
+    return path.Release(false);
   }
 
   bool is_typed_array = false;
   if (napi_is_typedarray(env, value, &is_typed_array) == napi_ok && is_typed_array) {
     napi_typedarray_type type = napi_uint8_array;
-    size_t length = 0;
-    void* data = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env, value, &type, &length, &data, &arraybuffer, &byte_offset) != napi_ok ||
-        data == nullptr) {
+    if (napi_get_typedarray_info(env, value, &type, nullptr, nullptr, nullptr, nullptr) != napi_ok) {
       return false;
     }
     if (type != napi_uint8_array && type != napi_uint8_clamped_array) return false;
-    *out = std::string(static_cast<const char*>(data), length);
-    return true;
+    EdgeBufferLease path;
+    if (!path.Acquire(env, value, unofficial_napi_buffer_access_read)) return false;
+    out->assign(reinterpret_cast<const char*>(path.data()), path.size());
+    return path.Release(false);
   }
 
   return false;
@@ -4677,10 +4674,12 @@ void EnsureTypedArrayProperty(napi_env env,
   bool has = false;
   if (napi_has_named_property(env, binding, name, &has) != napi_ok || has) return;
   napi_value ab = nullptr;
-  void* data = nullptr;
   const size_t byte_length = (type == napi_bigint64_array ? sizeof(int64_t) : sizeof(double)) * length;
-  if (napi_create_arraybuffer(env, byte_length, &data, &ab) != napi_ok || ab == nullptr || data == nullptr) return;
-  std::memset(data, 0, byte_length);
+  if (napi_create_arraybuffer(env, byte_length, nullptr, &ab) != napi_ok || ab == nullptr) return;
+  EdgeBufferLease output;
+  if (!output.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return;
+  std::memset(output.data(), 0, byte_length);
+  if (!output.Release(true)) return;
   napi_value out = nullptr;
   if (napi_create_typedarray(env, type, length, ab, 0, &out) == napi_ok && out != nullptr) {
     napi_set_named_property(env, binding, name, out);

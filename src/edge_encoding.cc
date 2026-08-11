@@ -25,13 +25,13 @@ napi_value GetUndefined(napi_env env) {
 
 napi_value MakeUint8Array(napi_env env, const char* data, size_t len) {
   napi_value arraybuffer = nullptr;
-  void* out = nullptr;
-  if (napi_create_arraybuffer(env, len, &out, &arraybuffer) != napi_ok || arraybuffer == nullptr) {
+  if (napi_create_arraybuffer(env, len, nullptr, &arraybuffer) != napi_ok || arraybuffer == nullptr) {
     return nullptr;
   }
-  if (len > 0 && out != nullptr && data != nullptr) {
-    std::memcpy(out, data, len);
-  }
+  EdgeBufferLease output;
+  if (!output.Acquire(env, arraybuffer, unofficial_napi_buffer_access_readwrite)) return nullptr;
+  if (len > 0 && data != nullptr) std::memcpy(output.data(), data, len);
+  if (!output.Release(true)) return nullptr;
   napi_value typed = nullptr;
   if (napi_create_typedarray(env, napi_uint8_array, len, arraybuffer, 0, &typed) != napi_ok) {
     return nullptr;

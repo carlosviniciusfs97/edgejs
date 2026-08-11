@@ -112,6 +112,7 @@ public:
   uint8_t *data() { return data_; }
   const uint8_t *data() const { return data_; }
   size_t size() const { return size_; }
+  bool active() const { return lease_ != nullptr; }
 
 private:
   static uint8_t *ZeroLengthSentinel() {

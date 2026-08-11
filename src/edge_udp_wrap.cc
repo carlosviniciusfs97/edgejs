@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,6 +23,7 @@
 #include "edge_runtime.h"
 #include "edge_active_resource.h"
 #include "edge_async_wrap.h"
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_env_loop.h"
 #include "edge_handle_scope.h"
@@ -54,6 +56,7 @@ struct SendWrap final : public EdgeUdpSendWrap {
   int32_t provider_type = kEdgeProviderUdpSendWrap;
   bool destroy_queued = false;
   bool active = false;
+  std::vector<std::unique_ptr<EdgeBufferLease>> leases;
 
   napi_value object(napi_env env_in) const override;
 };
@@ -113,28 +116,6 @@ std::string FormatIPv6AddressWithScope(const sockaddr_in6* a6) {
   }
 #endif
   return out;
-}
-
-size_t TypedArrayElementSize(napi_typedarray_type type) {
-  switch (type) {
-    case napi_int8_array:
-    case napi_uint8_array:
-    case napi_uint8_clamped_array:
-      return 1;
-    case napi_int16_array:
-    case napi_uint16_array:
-      return 2;
-    case napi_int32_array:
-    case napi_uint32_array:
-    case napi_float32_array:
-      return 4;
-    case napi_float64_array:
-    case napi_bigint64_array:
-    case napi_biguint64_array:
-      return 8;
-    default:
-      return 1;
-  }
 }
 
 bool IsFunction(napi_env env, napi_value value) {
@@ -197,67 +178,6 @@ bool GetInt32Like(napi_env env, napi_value value, int32_t* out) {
   return true;
 }
 
-bool ReadUint32Property(napi_env env, napi_value obj, const char* key, uint32_t* out) {
-  if (obj == nullptr || out == nullptr) return false;
-  napi_value v = nullptr;
-  if (napi_get_named_property(env, obj, key, &v) != napi_ok || v == nullptr) return false;
-  return napi_get_value_uint32(env, v, out) == napi_ok;
-}
-
-bool ExtractArrayBufferViewBytes(napi_env env, napi_value value, const char** src, size_t* len) {
-  if (value == nullptr || src == nullptr || len == nullptr) return false;
-  *src = nullptr;
-  *len = 0;
-
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* data = nullptr;
-    if (napi_get_buffer_info(env, value, &data, len) != napi_ok) return false;
-    *src = static_cast<const char*>(data);
-    return true;
-  }
-
-  bool is_typed = false;
-  if (napi_is_typedarray(env, value, &is_typed) == napi_ok && is_typed) {
-    napi_typedarray_type tt = napi_uint8_array;
-    size_t element_len = 0;
-    void* data = nullptr;
-    napi_value ab = nullptr;
-    size_t off = 0;
-    if (napi_get_typedarray_info(env, value, &tt, &element_len, &data, &ab, &off) != napi_ok) {
-      return false;
-    }
-    *src = static_cast<const char*>(data);
-    uint32_t byte_len = 0;
-    if (ReadUint32Property(env, value, "byteLength", &byte_len)) {
-      *len = static_cast<size_t>(byte_len);
-    } else {
-      *len = element_len * TypedArrayElementSize(tt);
-    }
-    return true;
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    void* data = nullptr;
-    napi_value ab = nullptr;
-    size_t off = 0;
-    if (napi_get_dataview_info(env, value, len, &data, &ab, &off) != napi_ok) return false;
-    *src = static_cast<const char*>(data);
-    return true;
-  }
-
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* data = nullptr;
-    if (napi_get_arraybuffer_info(env, value, &data, len) != napi_ok) return false;
-    *src = static_cast<const char*>(data);
-    return true;
-  }
-
-  return false;
-}
-
 void ReleaseSendWrapState(SendWrap* wrap) {
   if (wrap == nullptr) return;
   if (wrap->active_request_token != nullptr) {
@@ -266,6 +186,7 @@ void ReleaseSendWrapState(SendWrap* wrap) {
   }
   DeleteRef(wrap->env, &wrap->active_ref);
   DeleteRef(wrap->env, &wrap->chunks_ref);
+  wrap->leases.clear();
   delete[] wrap->bufs;
   wrap->bufs = nullptr;
   wrap->nbufs = 0;
@@ -315,9 +236,8 @@ void ExternalBufferFinalize(napi_env env, void* data, void* hint) {
 napi_value CreateExternalBuffer(napi_env env, char* data, size_t len) {
   if (len == 0) {
     free(data);
-    void* out = nullptr;
     napi_value buffer = nullptr;
-    if (napi_create_buffer(env, 0, &out, &buffer) != napi_ok) return nullptr;
+    if (napi_create_buffer(env, 0, nullptr, &buffer) != napi_ok) return nullptr;
     return buffer;
   }
 
@@ -642,6 +562,7 @@ class UdpWrap final : public EdgeUdpWrapBase, public EdgeUdpListener {
       ReleaseSendWrapState(req_wrap);
       return nullptr;
     }
+    req_wrap->leases = std::move(current_send_leases);
     return req_wrap;
   }
 
@@ -716,6 +637,7 @@ class UdpWrap final : public EdgeUdpWrapBase, public EdgeUdpListener {
   napi_value current_send_req_obj = nullptr;
   napi_value current_send_chunks_obj = nullptr;
   bool current_send_has_callback = false;
+  std::vector<std::unique_ptr<EdgeBufferLease>> current_send_leases;
 };
 
 bool UdpHandleHasRef(void* data) {
@@ -969,19 +891,20 @@ napi_value UdpSendImpl(napi_env env, napi_callback_info info, bool ipv6) {
 
   std::vector<uv_buf_t> bufs;
   bufs.reserve(count);
+  std::vector<std::unique_ptr<EdgeBufferLease>> leases;
+  leases.reserve(count);
   for (uint32_t i = 0; i < count; i++) {
     napi_value chunk = nullptr;
     if (napi_get_element(env, chunks, i, &chunk) != napi_ok || chunk == nullptr) {
       return MakeInt32(env, UV_EINVAL);
     }
-    const char* data = nullptr;
-    size_t len = 0;
-    if (!ExtractArrayBufferViewBytes(env, chunk, &data, &len)) {
+    auto lease = std::make_unique<EdgeBufferLease>();
+    if (!lease->Acquire(env, chunk, unofficial_napi_buffer_access_read)) {
       return MakeInt32(env, UV_EINVAL);
     }
-    char* base = const_cast<char*>(data);
-    if (base == nullptr && len != 0) return MakeInt32(env, UV_EINVAL);
-    bufs.emplace_back(uv_buf_init(base, static_cast<unsigned int>(len)));
+    bufs.emplace_back(uv_buf_init(reinterpret_cast<char*>(lease->data()),
+                                  static_cast<unsigned int>(lease->size())));
+    leases.push_back(std::move(lease));
   }
 
   const bool send_to = argc == 6;
@@ -1008,11 +931,13 @@ napi_value UdpSendImpl(napi_env env, napi_callback_info info, bool ipv6) {
   wrap->current_send_req_obj = req_obj;
   wrap->current_send_chunks_obj = chunks;
   wrap->current_send_has_callback = have_callback;
+  wrap->current_send_leases = std::move(leases);
   const ssize_t rc =
       wrap->Send(bufs.empty() ? nullptr : bufs.data(), static_cast<size_t>(count), addr);
   wrap->current_send_req_obj = nullptr;
   wrap->current_send_chunks_obj = nullptr;
   wrap->current_send_has_callback = false;
+  wrap->current_send_leases.clear();
   return MakeInt32(env, static_cast<int32_t>(rc));
 }
 
