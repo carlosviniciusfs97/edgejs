@@ -1111,6 +1111,32 @@ TEST_F(Test3NodeDropinSubsetPhase02, NodeCompatEventEmitterMethodNamesTest) {
     EXPECT_TRUE(error.empty()) << "error=" << error;             \
   }
 
+// Dynamic-import referrer semantics depend on preserving exact host metadata
+// across bytecode and closing entry execution through the common callback
+// checkpoint. Keep both the absent-referrer rejection and explicit VM
+// default-loader success path in the focused native suite.
+TEST_F(Test3NodeDropinSubsetPhase02, RawEsmDynamicImportFromNodeTest) {
+  EnvScope s(runtime_.get());
+  std::string error;
+  const int exit_code = RunRawNodeTestScript(
+      s.env, "es-module/test-esm-dynamic-import.js", &error, true);
+  EXPECT_EQ(exit_code, 0) << "error=" << error;
+  EXPECT_TRUE(error.empty()) << "error=" << error;
+}
+
+TEST_F(Test3NodeDropinSubsetPhase02,
+       RawVmMainContextDefaultLoaderEvalFromNodeTest) {
+  EnvScope s(runtime_.get());
+  std::string error;
+  const int exit_code = RunRawNodeTestScript(
+      s.env,
+      "es-module/test-vm-main-context-default-loader-eval.js",
+      &error,
+      true);
+  EXPECT_EQ(exit_code, 0) << "error=" << error;
+  EXPECT_TRUE(error.empty()) << "error=" << error;
+}
+
 DEFINE_RAW_NODE_TEST(RawBufferAllocFromNodeTest, "test-buffer-alloc.js")
 DEFINE_RAW_NODE_TEST(RawBufferArraybufferFromNodeTest, "test-buffer-arraybuffer.js")
 DEFINE_RAW_NODE_TEST(RawBufferAsciiFromNodeTest, "test-buffer-ascii.js")

@@ -3146,8 +3146,18 @@ int RunScriptWithGlobals(napi_env env,
       }
     }
 
-    // Node semantics: flush the task queues once after top-level script eval.
-    (void)DrainProcessTickCallback(env);
+    // Close the successful entry execution like Node's outermost callback
+    // scope: checkpoint engine microtasks before entering the JavaScript tick
+    // callback when no tick is already scheduled. This keeps indirect eval's
+    // referrer tied to its actual script/realm rather than a task-queue frame.
+    const napi_status entry_checkpoint_status = EdgeRunCallbackScopeCheckpoint(env);
+    if (entry_checkpoint_status != napi_ok &&
+        entry_checkpoint_status != napi_pending_exception) {
+      if (error_out != nullptr) {
+        *error_out = "Failed to complete the callback-scope checkpoint after top-level script eval";
+      }
+      return 1;
+    }
     const int post_script_status = HandlePendingExceptionAfterLoopStep(env, error_out);
     if (post_script_status >= 0) {
       return post_script_status;
@@ -3441,7 +3451,7 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
   // work is pending, run a microtask checkpoint first and return early if no
   // task-queue work appeared as a result. Before task_queue is initialized,
   // fall back to running the microtask checkpoint only.
-  if (!have_task_queue_flags || (!has_tick_scheduled && !has_rejection_to_warn)) {
+  if (!have_task_queue_flags || !has_tick_scheduled) {
     napi_status status = unofficial_napi_event_loop_checkpoint(
         env, unofficial_napi_event_loop_checkpoint_microtasks, true, nullptr);
     if (status != napi_ok) {

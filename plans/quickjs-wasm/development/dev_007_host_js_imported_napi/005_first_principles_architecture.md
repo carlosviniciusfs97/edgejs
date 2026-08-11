@@ -150,10 +150,17 @@ Files under `lib/` must remain unchanged.
   catalog currently admits the builtin while its public loader receives no
   exports. Do not fake the module or tie that gap to the host-JavaScript N-API
   provider.
-- [ ] Diagnose the native indirect-`eval()` dynamic-import rejection mismatch
-  as a separate module-callback compatibility issue. Provider promise tracking
-  and extra checkpoints are confirmed to run, so this is not event-loop
-  liveness and must not reintroduce Edge promise bookkeeping.
+- [x] Fixed the native indirect-`eval()` dynamic-import rejection at the N-API
+  provider's bytecode metadata boundary. Function-shaped bytecode no longer
+  invents the CJS default-loader symbol when the caller supplied no host ID,
+  and the dynamic-import callback falls back to the realm-global ID only when
+  the host-options block is actually absent, matching Node. Internal builtins
+  therefore retain an absent referrer while the CJS loader continues to pass
+  its default-loader symbol explicitly. Successful entry execution now closes
+  through Edge's existing provider-neutral callback checkpoint, matching
+  Node's microtasks-before-ticks rule; no provider-specific scheduling branch
+  or promise registry was needed. Provider and upstream Node regressions cover
+  both the absent-ID rejection and explicit default-loader success paths.
 
 ## Architectural boundaries
 
