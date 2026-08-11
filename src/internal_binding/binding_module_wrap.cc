@@ -43,10 +43,6 @@ struct ModuleWrapInstance {
 struct ModuleWrapBindingState {
   explicit ModuleWrapBindingState(napi_env env_in) : env(env_in) {}
   ~ModuleWrapBindingState() {
-    for (napi_ref ref : pending_dynamic_imports) {
-      if (ref != nullptr) napi_delete_reference(env, ref);
-    }
-    pending_dynamic_imports.clear();
     ResetRef(env, &binding_ref);
     ResetRef(env, &module_wrap_ctor_ref);
     ResetRef(env, &import_module_dynamically_ref);
@@ -58,7 +54,6 @@ struct ModuleWrapBindingState {
   napi_ref module_wrap_ctor_ref = nullptr;
   napi_ref import_module_dynamically_ref = nullptr;
   napi_ref initialize_import_meta_ref = nullptr;
-  std::vector<napi_ref> pending_dynamic_imports;
 };
 
 ModuleWrapBindingState* GetBindingState(napi_env env) {
@@ -91,16 +86,6 @@ void SetRef(napi_env env, napi_ref* ref_ptr, napi_value value, napi_valuetype re
   napi_valuetype type = napi_undefined;
   if (napi_typeof(env, value, &type) != napi_ok || type != required) return;
   napi_create_reference(env, value, 1, ref_ptr);
-}
-
-void TrackDynamicImportPromise(napi_env env, napi_value value) {
-  if (value == nullptr) return;
-  bool is_promise = false;
-  if (napi_is_promise(env, value, &is_promise) != napi_ok || !is_promise) return;
-  napi_ref ref = nullptr;
-  if (napi_create_reference(env, value, 1, &ref) == napi_ok && ref != nullptr) {
-    EnsureBindingState(env).pending_dynamic_imports.push_back(ref);
-  }
 }
 
 ModuleWrapInstance* UnwrapModuleWrap(napi_env env, napi_value this_arg) {
@@ -904,7 +889,6 @@ napi_value ModuleWrapImportModuleDynamically(napi_env env, napi_callback_info in
   napi_value result = nullptr;
   if (argc >= 5) {
     if (!CallFunction(env, global, callback, 5, argv, &result)) return nullptr;
-    TrackDynamicImportPromise(env, result);
     return result != nullptr ? result : Undefined(env);
   }
 
@@ -928,7 +912,6 @@ napi_value ModuleWrapImportModuleDynamically(napi_env env, napi_callback_info in
   napi_value referrer_name = argc >= 2 ? argv[1] : nullptr;
   napi_value call_argv[5] = {referrer_symbol, argv[0], phase, attrs, referrer_name};
   if (!CallFunction(env, global, callback, 5, call_argv, &result)) return nullptr;
-  TrackDynamicImportPromise(env, result);
   return result != nullptr ? result : Undefined(env);
 }
 
@@ -971,35 +954,6 @@ napi_value ModuleWrapThrowIfPromiseRejected(napi_env env, napi_callback_info inf
 }
 
 }  // namespace
-
-bool ModuleWrapHasPendingDynamicImports(napi_env env) {
-  ModuleWrapBindingState* state = GetBindingState(env);
-  if (state == nullptr || state->pending_dynamic_imports.empty()) return false;
-
-  auto& imports = state->pending_dynamic_imports;
-  size_t write_index = 0;
-  for (napi_ref ref : imports) {
-    bool pending = false;
-    napi_value promise = nullptr;
-    if (ref != nullptr &&
-        napi_get_reference_value(env, ref, &promise) == napi_ok &&
-        promise != nullptr) {
-      int32_t promise_state = 0;
-      bool has_result = false;
-      if (unofficial_napi_get_promise_details(
-              env, promise, &promise_state, nullptr, &has_result) == napi_ok) {
-        pending = promise_state == 0;
-      }
-    }
-    if (pending) {
-      imports[write_index++] = ref;
-    } else if (ref != nullptr) {
-      napi_delete_reference(env, ref);
-    }
-  }
-  imports.resize(write_index);
-  return !imports.empty();
-}
 
 napi_value InitModuleWrap(napi_env env) {
   auto& state = EnsureBindingState(env);

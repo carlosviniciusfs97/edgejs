@@ -831,10 +831,10 @@ struct CompressionHandle {
   bool output_access_active = false;
   // processChunkSync() continues immediately with the same input whenever the
   // output buffer fills. Keep that read-only snapshot until the continuation
-  // is proven by object identity plus the exact next offset and length. This
-  // turns a sequence of output-sized writes into one host-to-guest input copy;
-  // any mismatch, asynchronous write, error, or close releases it.
-  napi_ref sync_input_ref = nullptr;
+  // supplies the exact next offset and remaining length. The lease itself owns
+  // the original JavaScript value, so the in-progress write state—not a second
+  // napi_ref—is the authority for the continuation. Any range mismatch,
+  // asynchronous write, error, or close releases it.
   void* sync_input_access_data = nullptr;
   unofficial_napi_buffer_lease sync_input_lease = nullptr;
   uint32_t sync_input_base_offset = 0;
@@ -916,7 +916,6 @@ void ClearSyncInputSnapshot(CompressionHandle* handle) {
   if (handle->sync_input_lease != nullptr) {
     (void)ReleaseBufferAccess(handle->env, handle->sync_input_lease, false);
   }
-  DeleteRefIfPresent(handle->env, &handle->sync_input_ref);
   handle->sync_input_access_data = nullptr;
   handle->sync_input_lease = nullptr;
   handle->sync_input_base_offset = 0;
@@ -926,23 +925,14 @@ void ClearSyncInputSnapshot(CompressionHandle* handle) {
 }
 
 bool ReuseSyncInputSnapshot(CompressionHandle* handle,
-                            napi_value input,
                             uint32_t input_offset,
                             uint32_t input_length,
                             ByteSpan* span) {
-  if (handle == nullptr || input == nullptr || span == nullptr ||
-      handle->sync_input_ref == nullptr ||
+  if (handle == nullptr || span == nullptr ||
       handle->sync_input_access_data == nullptr ||
       handle->sync_input_lease == nullptr ||
       input_offset != handle->sync_input_next_offset ||
       input_length != handle->sync_input_remaining) {
-    return false;
-  }
-  napi_value retained_input = GetRefValue(handle->env, handle->sync_input_ref);
-  bool equal = false;
-  if (retained_input == nullptr ||
-      napi_strict_equals(handle->env, retained_input, input, &equal) != napi_ok ||
-      !equal) {
     return false;
   }
   const uint32_t relative_offset = input_offset - handle->sync_input_base_offset;
@@ -957,19 +947,13 @@ bool ReuseSyncInputSnapshot(CompressionHandle* handle,
 }
 
 bool RetainSyncInputSnapshot(CompressionHandle* handle,
-                             napi_value input,
                              const ByteSpan& access,
                              uint32_t input_offset,
                              uint32_t input_length,
                              uint32_t remaining) {
-  if (handle == nullptr || input == nullptr || access.data == nullptr ||
+  if (handle == nullptr || access.data == nullptr ||
       access.lease == nullptr ||
       remaining == 0 || remaining > input_length) {
-    return false;
-  }
-  if (handle->sync_input_ref == nullptr &&
-      napi_create_reference(handle->env, input, 1, &handle->sync_input_ref) != napi_ok) {
-    handle->sync_input_ref = nullptr;
     return false;
   }
   handle->sync_input_access_data = access.data;
@@ -1837,7 +1821,7 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
   if (!IsNullOrUndefined(env, argv[1])) {
     if (!async) {
       reused_sync_input =
-          ReuseSyncInputSnapshot(handle, argv[1], in_off, in_len, &input);
+          ReuseSyncInputSnapshot(handle, in_off, in_len, &input);
       if (!reused_sync_input) ClearSyncInputSnapshot(handle);
     } else {
       ClearSyncInputSnapshot(handle);
@@ -1905,7 +1889,7 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
     } else if (!IsNullOrUndefined(env, argv[1])) {
       if (!continues_with_same_input ||
           !RetainSyncInputSnapshot(
-              handle, argv[1], input, in_off, in_len, remaining_input)) {
+              handle, input, in_off, in_len, remaining_input)) {
         (void)ReleaseBufferAccess(env, input.lease, false);
       }
     }

@@ -1750,9 +1750,6 @@ napi_value GetOrCreateEnvMessagePort(napi_env env) {
   if (!data) return Undefined(env);
   napi_value port = EdgeCreateMessagePortForData(env, data);
   if (port == nullptr || IsNullOrUndefinedValue(env, port)) return Undefined(env);
-  // Keep the child loop alive until the parent delivers LOAD_SCRIPT. Once the
-  // first message arrives, normal JavaScript ref/unref semantics take over.
-  EdgeKeepMessagePortAliveUntilFirstMessage(env, port);
   EdgeWorkerEnvSetEnvMessagePort(env, port);
   return port;
 }

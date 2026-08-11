@@ -1400,12 +1400,15 @@ napi_status DrainProcessTickCallback(napi_env env) {
 // rejection queues remain Edge logic, so drain them only when the provider's
 // checkpoint made that task-queue state runnable. This avoids a second engine
 // checkpoint in the same outer-loop turn.
-napi_status CompleteProviderEventLoopCheckpoint(napi_env env, bool has_runnable_work) {
+napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
+                                                bool has_runnable_work,
+                                                bool* has_pending_provider_work = nullptr) {
   napi_status status =
       unofficial_napi_event_loop_checkpoint(
           env,
           unofficial_napi_event_loop_checkpoint_host_tasks,
-          has_runnable_work);
+          has_runnable_work,
+          has_pending_provider_work);
   if (status != napi_ok) return status;
 
   bool has_tick_scheduled = false;
@@ -1665,7 +1668,7 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     const bool has_runnable_work =
         loop != nullptr && uv_backend_timeout(loop) == 0;
     const napi_status checkpoint_status =
-        CompleteProviderEventLoopCheckpoint(env, has_runnable_work);
+        CompleteProviderEventLoopCheckpoint(env, has_runnable_work, nullptr);
     if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider checkpoint while waiting for the top-level Promise";
@@ -1919,8 +1922,9 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     (void)uv_metrics_info(loop, &metrics_after);
     const bool has_runnable_work =
         metrics_after.events != metrics_before.events || uv_backend_timeout(loop) == 0;
-    const napi_status checkpoint_status =
-        CompleteProviderEventLoopCheckpoint(env, has_runnable_work);
+    bool has_pending_provider_work = false;
+    const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
+        env, has_runnable_work, &has_pending_provider_work);
     if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider event-loop checkpoint";
@@ -1940,8 +1944,7 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       break;
     }
 
-    bool more = uv_loop_alive(loop) != 0 ||
-                internal_binding::ModuleWrapHasPendingDynamicImports(env);
+    bool more = uv_loop_alive(loop) != 0 || has_pending_provider_work;
     if (more) {
       idle_drain_turns = 0;
       continue;
@@ -1952,8 +1955,9 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     if (idle_drain_turns < 8) {
       idle_drain_turns++;
       (void)EdgeRuntimePlatformDrainTasks(env);
-      const napi_status idle_checkpoint_status =
-          CompleteProviderEventLoopCheckpoint(env, false);
+      bool has_pending_idle_provider_work = false;
+      const napi_status idle_checkpoint_status = CompleteProviderEventLoopCheckpoint(
+          env, false, &has_pending_idle_provider_work);
       if (idle_checkpoint_status != napi_ok &&
           idle_checkpoint_status != napi_pending_exception) {
         if (error_out != nullptr) {
@@ -1965,8 +1969,7 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       if (async_status >= 0) {
         return async_status;
       }
-      if (uv_loop_alive(loop) != 0 ||
-          internal_binding::ModuleWrapHasPendingDynamicImports(env)) {
+      if (uv_loop_alive(loop) != 0 || has_pending_idle_provider_work) {
         idle_drain_turns = 0;
       }
       continue;
@@ -1977,13 +1980,25 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     EmitProcessLifecycleEvent(env, "beforeExit", before_exit_code);
     (void)EdgeRuntimePlatformDrainTasks(env);
 
+    bool has_pending_before_exit_provider_work = false;
+    const napi_status before_exit_checkpoint_status =
+        CompleteProviderEventLoopCheckpoint(
+            env, uv_backend_timeout(loop) == 0,
+            &has_pending_before_exit_provider_work);
+    if (before_exit_checkpoint_status != napi_ok &&
+        before_exit_checkpoint_status != napi_pending_exception) {
+      if (error_out != nullptr) {
+        *error_out = "Failed to complete the provider checkpoint after beforeExit";
+      }
+      return 1;
+    }
+
     async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
     if (async_status >= 0) {
       return async_status;
     }
 
-    more = uv_loop_alive(loop) != 0 ||
-           internal_binding::ModuleWrapHasPendingDynamicImports(env);
+    more = uv_loop_alive(loop) != 0 || has_pending_before_exit_provider_work;
     if (!more) {
       break;
     }
@@ -3428,7 +3443,7 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
   // fall back to running the microtask checkpoint only.
   if (!have_task_queue_flags || (!has_tick_scheduled && !has_rejection_to_warn)) {
     napi_status status = unofficial_napi_event_loop_checkpoint(
-        env, unofficial_napi_event_loop_checkpoint_microtasks, true);
+        env, unofficial_napi_event_loop_checkpoint_microtasks, true, nullptr);
     if (status != napi_ok) {
       return status;
     }

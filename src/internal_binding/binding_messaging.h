@@ -17,7 +17,6 @@ void EdgeEntangleMessagePortData(const EdgeMessagePortDataPtr& first,
                                 const EdgeMessagePortDataPtr& second);
 EdgeMessagePortDataPtr EdgeGetMessagePortData(napi_env env, napi_value value);
 napi_value EdgeCreateMessagePortForData(napi_env env, const EdgeMessagePortDataPtr& data);
-void EdgeKeepMessagePortAliveUntilFirstMessage(napi_env env, napi_value value);
 void EdgeCloseMessagePortForValue(napi_env env, napi_value value);
 
 }  // namespace internal_binding

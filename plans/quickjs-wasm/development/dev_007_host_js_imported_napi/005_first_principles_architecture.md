@@ -18,7 +18,7 @@ engine and memory-topology differences belong behind N-API provider contracts.
 
 Files under `lib/` must remain unchanged.
 
-## Implementation status (2026-08-10)
+## Implementation status (2026-08-11)
 
 - [x] Rebased the clean N-API architecture branch on current `main` while
   preserving the host-JavaScript backend on top.
@@ -63,6 +63,10 @@ Files under `lib/` must remain unchanged.
   turn; this preserves Node ordering without encoding the provider or target.
   Embedded idle policy is implemented by the embedded provider rather than
   duplicated in the Rust adapter.
+- [x] Made provider-owned asynchronous work part of the checkpoint result.
+  Dynamic-import promises are retained and observed inside the V8, QuickJS,
+  and host-JavaScript providers; Edge no longer owns a second dynamic-import
+  liveness registry.
 - [x] Moved unsafe ArrayBuffer allocation policy behind N-API. Edge no longer
   chooses between an external native allocation and a host-engine allocation.
 - [x] Made stream ingress provider-neutral. Default reads transfer ownership
@@ -104,8 +108,31 @@ Files under `lib/` must remain unchanged.
   WebAssembly bindings. Guest-backed control blocks are classified separately
   below because their pointers are intentionally shared and must not be
   converted to copied leases.
+- [x] Removed the Edge-side consequences of the old provider leaks: zlib no
+  longer reconstructs JavaScript values when releasing retained bytes, workers
+  no longer force a first-message keepalive, pipes no longer downgrade IPC on
+  WASI, and module evaluation no longer tracks dynamic-import promises in
+  Edge. The `lib/` tree remains unchanged.
+- [x] Removed SDK host timer/Promise captures, the scheduler sleep-message
+  protocol, and the permanent wake worker. Non-zero WASIX sleeps use the
+  generic worker-scoped timer design from SDK main; zero-duration nonblocking
+  polls complete immediately and Edge performs its explicit provider
+  checkpoint at the event-loop boundary.
+- [x] Rebuilt Edge with exnref, validated the engine-free import surface (110
+  N-API imports and 91 extension imports), rebuilt the SDK against
+  `/Users/syrusakbary/Development/wasmer`, and passed all 18 focused host-JS
+  Edge integration tests plus the SDK runtime, multi-worker, and isolated
+  host-N-API tests.
+- [x] Ran the complete WASIX Node compatibility selection with four workers:
+  1,671 tests passed and five HTTP/2/TLS tests failed under parallel load; all
+  five passed immediately when rerun alone. Treat these as harness contention,
+  not product defects, unless a serial run reproduces one.
 - [ ] Move the remaining WASIX/libuv lifecycle issues to Wasmer and run the
-  complete native/browser/wasmer-sh/pnpm/Next.js acceptance matrix.
+  complete browser/wasmer-sh/pnpm/Next.js acceptance matrix.
+- [ ] Diagnose the native indirect-`eval()` dynamic-import rejection mismatch
+  as a separate module-callback compatibility issue. Provider promise tracking
+  and extra checkpoints are confirmed to run, so this is not event-loop
+  liveness and must not reintroduce Edge promise bookkeeping.
 
 ## Architectural boundaries
 
@@ -262,6 +289,13 @@ layouts or VM handles. Fix pipe IPC semantics at the libuv/WASIX layer.
 9. Move remaining syscall and lifecycle defects to Wasmer/WASIX.
 10. Rebuild and verify native, Node, browser, wasmer-sh, pnpm, workers,
     networking, dynamic imports, and Next.js.
+
+Steps 1 through 8 are now implemented on the clean branches. Step 9 remains a
+layering rule for defects discovered by acceptance testing. Step 10 is partly
+complete: native focused tests, the full WASIX Node selection, SDK worker and
+runtime tests, and the host-JavaScript integration matrix have run; browser
+wasmer-sh, pnpm install/dev, and a Next.js development server remain the next
+end-to-end gates.
 
 ## Current conditional audit
 
