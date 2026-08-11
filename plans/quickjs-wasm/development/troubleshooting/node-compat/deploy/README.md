@@ -12,3 +12,5 @@ they describe deploy artifact and package graph status.
 - [NAPI_EXTERN WASIX linkage](016_napi_extern_wasix_linkage.md)
 - [Framework static server adapters](017_framework_static_server_adapters.md)
 - [pnpm deploy graph materialization](018_pnpm_deploy_graph_materialization.md)
+- [Wasmer N-API checkpoint import alignment](019_wasmer_napi_checkpoint_import.md)
+- [WASIX CI tail failures](020_wasix_ci_tail_failures.md)

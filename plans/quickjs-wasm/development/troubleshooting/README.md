@@ -42,6 +42,8 @@ duplicating issue details.
 | 🟠 | Medium | [016_napi_extern_wasix_linkage.md](node-compat/deploy/016_napi_extern_wasix_linkage.md) | `NAPI_EXTERN=` WASIX linkage rule |
 | 🟠 | Low | [017_framework_static_server_adapters.md](node-compat/deploy/017_framework_static_server_adapters.md) | Framework static and ad hoc server adapters |
 | 🟠 | Medium | [018_pnpm_deploy_graph_materialization.md](node-compat/deploy/018_pnpm_deploy_graph_materialization.md) | pnpm deploy graph materialization |
+| 🟢 | High | [019_wasmer_napi_checkpoint_import.md](node-compat/deploy/019_wasmer_napi_checkpoint_import.md) | Wasmer N-API checkpoint import alignment |
+| 🟢 | High | [020_wasix_ci_tail_failures.md](node-compat/deploy/020_wasix_ci_tail_failures.md) | WASIX CI tail failures |
 
 ## Node Test
 

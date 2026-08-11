@@ -146,6 +146,11 @@ WASIX_SKIP_UNIX_SOCKET_TESTS := \
   parallel/test-tls-net-connect-prefer-path.js \
   parallel/test-tls-wrap-econnreset-pipe.js \
   parallel/test-http-client-response-domain.js
+# Cluster cannot transfer a bound UDP descriptor to a child under WASI because
+# the platform has no descriptor-passing/SCM_RIGHTS contract. The positive
+# shared-port test is already excluded below; its known_issues counterpart must
+# also be excluded because it waits for that transfer and times out instead of
+# reaching an expected negative result.
 WASIX_SKIP_CLUSTER_FORK_TESTS := \
   parallel/test-dgram-bind-socket-close-before-cluster-reply.js \
   parallel/test-dgram-cluster-close-during-bind.js \
@@ -163,7 +168,8 @@ WASIX_SKIP_CLUSTER_FORK_TESTS := \
   parallel/test-crypto-secure-heap.js \
   parallel/test-domain-top-level-error-handler-throw.js \
   parallel/test-domain-uncaught-exception.js \
-  sequential/test-dgram-bind-shared-ports.js
+  sequential/test-dgram-bind-shared-ports.js \
+  known_issues/test-dgram-bind-shared-ports-after-port-0.js
 WASIX_SKIP_SUBPROCESS_SHELL_TESTS := \
   parallel/test-stream-pipeline-process.js \
   parallel/test-domain-abort-on-uncaught.js \
