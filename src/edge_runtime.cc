@@ -1395,6 +1395,25 @@ napi_status DrainProcessTickCallback(napi_env env) {
   return napi_call_function(env, process, tick_cb, 0, nullptr, &ignored);
 }
 
+// The provider checkpoint owns engine microtasks and, for a host-JavaScript
+// provider, the JSPI suspension which lets host tasks run. Node's nextTick and
+// rejection queues remain Edge logic, so drain them only when the provider's
+// checkpoint made that task-queue state runnable. This avoids a second engine
+// checkpoint in the same outer-loop turn.
+napi_status CompleteProviderEventLoopCheckpoint(napi_env env, bool has_runnable_work) {
+  napi_status status =
+      unofficial_napi_yield_to_host_event_loop(env, has_runnable_work);
+  if (status != napi_ok) return status;
+
+  bool has_tick_scheduled = false;
+  bool has_rejection_to_warn = false;
+  if (!EdgeGetTaskQueueFlags(env, &has_tick_scheduled, &has_rejection_to_warn) ||
+      (!has_tick_scheduled && !has_rejection_to_warn)) {
+    return napi_ok;
+  }
+  return DrainProcessTickCallback(env);
+}
+
 bool IsPromisePending(napi_env env, napi_value promise) {
   if (env == nullptr || promise == nullptr) return false;
   int32_t state = 0;
@@ -1640,16 +1659,14 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     if (async_status >= 0) {
       return async_status;
     }
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-    if (unofficial_napi_yield_to_host_event_loop(env, true) != napi_ok) {
+    const bool has_runnable_work =
+        loop != nullptr && uv_backend_timeout(loop) == 0;
+    if (CompleteProviderEventLoopCheckpoint(env, has_runnable_work) != napi_ok) {
       if (error_out != nullptr) {
-        *error_out = "Failed to yield while waiting for the top-level Promise";
+        *error_out = "Failed to complete the provider checkpoint while waiting for the top-level Promise";
       }
       return 1;
     }
-#else
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-#endif
   }
 
   int32_t state = 0;
@@ -1873,28 +1890,12 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
         return 1;
       }
     }
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-    // The host-JavaScript provider must return to JSPI regularly. A blocking
-    // libuv poll would prevent browser Promise, timer, and worker tasks from
-    // reaching the guest.
-    const bool use_polling_loop = true;
-#else
-    const bool use_polling_loop = loop_timeout_ms > 0;
-#endif
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
     uv_metrics_t metrics_before{};
     (void)uv_metrics_info(loop, &metrics_before);
-#endif
-    if (use_polling_loop) {
-      uv_run(loop, UV_RUN_NOWAIT);
-#if !defined(__wasi__) || defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-      if (uv_loop_alive(loop) != 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-#endif
-    } else {
-      uv_run(loop, UV_RUN_DEFAULT);
-    }
+    // Every provider uses the same nonblocking libuv turn. Waiting belongs to
+    // the provider checkpoint below: embedded providers wait synchronously,
+    // while host JavaScript suspends through JSPI.
+    uv_run(loop, UV_RUN_NOWAIT);
     if (IsEnvironmentExitRequested(env)) {
       break;
     }
@@ -1904,50 +1905,13 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     // Match Node's embedder loop shape: libuv callbacks and callback scopes
     // own nextTick draining; the loop turn itself only drains platform tasks.
     (void)EdgeRuntimePlatformDrainTasks(env);
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
     uv_metrics_t metrics_after{};
     (void)uv_metrics_info(loop, &metrics_after);
     const bool has_runnable_work =
         metrics_after.events != metrics_before.events || uv_backend_timeout(loop) == 0;
-    if (unofficial_napi_yield_to_host_event_loop(env, has_runnable_work) != napi_ok) {
+    if (CompleteProviderEventLoopCheckpoint(env, has_runnable_work) != napi_ok) {
       if (error_out != nullptr) {
-        *error_out = "Failed to yield to the host event loop";
-      }
-      return 1;
-    }
-    // Host Promise continuations can reenter imported N-API while the guest is
-    // suspended. The provider drains those deferred native callbacks as part
-    // of the yield, and those callbacks may enqueue process.nextTick work (for
-    // example fs callback completion). Give that work the same checkpoint a
-    // normal native callback scope receives before deciding the loop is idle.
-    if (EdgeRunCallbackScopeCheckpoint(env) != napi_ok) {
-      if (error_out != nullptr) {
-        *error_out = "Failed to run the host callback checkpoint";
-      }
-      return 1;
-    }
-#endif
-    // Some cross-thread V8 async wakeups, notably Atomics.waitAsync() used by
-    // worker messaging, can resolve Promises without a JS callback entering the
-    // isolate on that turn. Run a plain microtask checkpoint here so those
-    // promises settle without waiting for an unrelated timer or I/O callback.
-    napi_status microtask_status = napi_ok;
-#if defined(__wasi__) && !defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-    // The host yield above already drains Promise microtasks and the callback
-    // checkpoint. Avoid a second provider scheduling primitive on this turn.
-#else
-    {
-      edge::HandleScope scope(env);
-      if (!scope.is_open()) {
-        microtask_status = scope.status();
-      } else {
-        microtask_status = unofficial_napi_process_microtasks(env);
-      }
-    }
-#endif
-    if (microtask_status != napi_ok) {
-      if (error_out != nullptr) {
-        *error_out = "Failed to process microtasks";
+        *error_out = "Failed to complete the provider event-loop checkpoint";
       }
       return 1;
     }
@@ -1976,6 +1940,12 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     if (idle_drain_turns < 8) {
       idle_drain_turns++;
       (void)EdgeRuntimePlatformDrainTasks(env);
+      if (CompleteProviderEventLoopCheckpoint(env, false) != napi_ok) {
+        if (error_out != nullptr) {
+          *error_out = "Failed to complete the idle provider checkpoint";
+        }
+        return 1;
+      }
       async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
       if (async_status >= 0) {
         return async_status;
@@ -1984,7 +1954,6 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
           internal_binding::ModuleWrapHasPendingDynamicImports(env)) {
         idle_drain_turns = 0;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
     }
     idle_drain_turns = 0;
