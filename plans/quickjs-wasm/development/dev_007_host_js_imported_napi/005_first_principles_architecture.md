@@ -94,6 +94,10 @@ Files under `lib/` must remain unchanged.
   stops later at the WASIX process layer with `spawnSync /bin/node EINVAL`, so
   that runtime capability remains a Wasmer acceptance-matrix item rather than
   an Edge memory workaround.
+- [x] Migrated ICU streaming decode and `buffer.transcode` input to scoped read
+  leases. The lease ends immediately after ICU consumes the bytes, before the
+  JavaScript result is created; native and host-JavaScript tests cover exact
+  UTF-8 subviews and UTF-16LE transcoding.
 - [ ] Convert every remaining Edge raw-pointer consumer to the lease API,
   continuing with retained crypto/TLS state and the remaining BufferSource
   consumers in process, spawn, HTTP, module loading, messaging, ICU, UDP, and

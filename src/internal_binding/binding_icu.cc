@@ -18,17 +18,13 @@
 #include <unicode/utf16.h>
 #include <unicode/utypes.h>
 
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "internal_binding/helpers.h"
 
 namespace internal_binding {
 
 namespace {
-
-const char* ZeroLengthByteSentinel() {
-  static const char sentinel = 0;
-  return &sentinel;
-}
 
 constexpr uint32_t kConverterFlagsFlush = 0x1;
 constexpr uint32_t kConverterFlagsFatal = 0x2;
@@ -102,94 +98,6 @@ bool ReadUtf16(napi_env env, napi_value value, std::vector<char16_t>* out) {
   buffer.resize(written);
   *out = std::move(buffer);
   return true;
-}
-
-bool ReadByteSpan(napi_env env, napi_value value, const char** data, size_t* length) {
-  if (value == nullptr || data == nullptr || length == nullptr) return false;
-
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* raw = nullptr;
-    if (napi_get_buffer_info(env, value, &raw, length) != napi_ok) return false;
-    if (*length > 0 && raw == nullptr) return false;
-    *data = static_cast<const char*>(raw);
-    return true;
-  }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t element_length = 0;
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(
-            env, value, &type, &element_length, &raw, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-
-    size_t element_size = 1;
-    switch (type) {
-      case napi_int16_array:
-      case napi_uint16_array:
-      case napi_float16_array:
-        element_size = 2;
-        break;
-      case napi_int32_array:
-      case napi_uint32_array:
-      case napi_float32_array:
-        element_size = 4;
-        break;
-      case napi_float64_array:
-      case napi_bigint64_array:
-      case napi_biguint64_array:
-        element_size = 8;
-        break;
-      default:
-        element_size = 1;
-        break;
-    }
-
-    *length = element_length * element_size;
-    if (*length > 0 && raw == nullptr) return false;
-    *data = static_cast<const char*>(raw);
-    return true;
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, length, &raw, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-    if (*length > 0 && raw == nullptr) return false;
-    *data = static_cast<const char*>(raw);
-    return true;
-  }
-
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    void* raw = nullptr;
-    if (napi_get_arraybuffer_info(env, value, &raw, length) != napi_ok) return false;
-    if (*length > 0 && raw == nullptr) return false;
-    *data = raw != nullptr ? static_cast<const char*>(raw) : ZeroLengthByteSentinel();
-    return true;
-  }
-
-  {
-    void* raw = nullptr;
-    size_t byte_length = 0;
-    if (napi_get_arraybuffer_info(env, value, &raw, &byte_length) == napi_ok) {
-      if (byte_length > 0 && raw == nullptr) return false;
-      *data = raw != nullptr ? static_cast<const char*>(raw) : ZeroLengthByteSentinel();
-      *length = byte_length;
-      return true;
-    }
-  }
-
-  return false;
 }
 
 bool CreateBufferCopy(napi_env env, const char* data, size_t length, napi_value* out) {
@@ -338,9 +246,8 @@ napi_value TranscodeCallback(napi_env env, napi_callback_info info) {
     return Undefined(env);
   }
 
-  const char* source = nullptr;
-  size_t source_length = 0;
-  if (!ReadByteSpan(env, argv[0], &source, &source_length)) {
+  EdgeBufferLease source;
+  if (!source.Acquire(env, argv[0], unofficial_napi_buffer_access_read)) {
     napi_throw_type_error(env,
                           "ERR_INVALID_ARG_TYPE",
                           "The \"source\" argument must be an instance of Buffer or Uint8Array.");
@@ -364,7 +271,8 @@ napi_value TranscodeCallback(napi_env env, napi_callback_info info) {
     return status != nullptr ? status : Undefined(env);
   }
 
-  if (source_length == 0) {
+  if (source.size() == 0) {
+    if (!source.Release(false)) return Undefined(env);
     napi_value empty = nullptr;
     CreateBufferCopy(env, nullptr, 0, &empty);
     return empty != nullptr ? empty : Undefined(env);
@@ -400,20 +308,22 @@ napi_value TranscodeCallback(napi_env env, napi_callback_info info) {
   }
 
   const int max_char_size = std::max<int>(static_cast<int>(ucnv_getMaxCharSize(to_converter)), 1);
-  size_t capacity = std::max<size_t>(source_length * static_cast<size_t>(max_char_size), 32);
+  size_t capacity =
+      std::max<size_t>(source.size() * static_cast<size_t>(max_char_size), 32);
   std::vector<char> output(capacity);
   int32_t written = 0;
 
   for (;;) {
     status = U_ZERO_ERROR;
-    const char* source_cursor = source;
+    const char* source_start = reinterpret_cast<const char*>(source.data());
+    const char* source_cursor = source_start;
     char* target = output.data();
     ucnv_convertEx(to_converter,
                    from_converter,
                    &target,
                    target + output.size(),
                    &source_cursor,
-                   source + source_length,
+                   source_start + source.size(),
                    nullptr,
                    nullptr,
                    nullptr,
@@ -427,6 +337,11 @@ napi_value TranscodeCallback(napi_env env, napi_callback_info info) {
     output.resize(capacity);
   }
 
+  if (!source.Release(false)) {
+    ucnv_close(from_converter);
+    ucnv_close(to_converter);
+    return Undefined(env);
+  }
   ucnv_close(from_converter);
   ucnv_close(to_converter);
 
@@ -530,9 +445,8 @@ napi_value DecodeCallback(napi_env env, napi_callback_info info) {
     return nullptr;
   }
 
-  const char* input = nullptr;
-  size_t input_length = 0;
-  if (!ReadByteSpan(env, argv[1], &input, &input_length)) {
+  EdgeBufferLease input;
+  if (!input.Acquire(env, argv[1], unofficial_napi_buffer_access_read)) {
     napi_throw_type_error(env,
                           "ERR_INVALID_ARG_TYPE",
                           "The \"input\" argument must be an instance of SharedArrayBuffer, ArrayBuffer or ArrayBufferView.");
@@ -547,22 +461,27 @@ napi_value DecodeCallback(napi_env env, napi_callback_info info) {
 
   UErrorCode status = U_ZERO_ERROR;
   const bool flush = (flags & kConverterFlagsFlush) == kConverterFlagsFlush;
-  const size_t pending = flush ? static_cast<size_t>(ucnv_toUCountPending(wrap->converter, &status)) : input_length;
+  const size_t pending = flush
+                             ? static_cast<size_t>(
+                                   ucnv_toUCountPending(wrap->converter, &status))
+                             : input.size();
   status = U_ZERO_ERROR;
   const size_t limit = 2 * static_cast<size_t>(ucnv_getMinCharSize(wrap->converter)) *
-                       (!flush ? input_length : std::max(input_length, pending));
+                       (!flush ? input.size() : std::max(input.size(), pending));
 
   std::vector<UChar> output(limit > 0 ? limit : 1);
   UChar* target = output.data();
-  const char* source = input;
+  const char* source_start = reinterpret_cast<const char*>(input.data());
+  const char* source = source_start;
   ucnv_toUnicode(wrap->converter,
                  &target,
                  output.data() + output.size(),
                  &source,
-                 input + input_length,
+                 source_start + input.size(),
                  nullptr,
                  flush,
                  &status);
+  if (!input.Release(false)) return Undefined(env);
 
   if (U_FAILURE(status)) {
     MaybeResetConverter(wrap, flush);
