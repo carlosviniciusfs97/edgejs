@@ -57,6 +57,12 @@ Files under `lib/` must remain unchanged.
   V8, QuickJS, native Wasmer imports, and the host-JavaScript JSPI provider now
   implement the same operation; Edge no longer selects microtask versus host
   yielding behavior by target.
+- [x] Replaced `unofficial_napi_process_microtasks` and
+  `unofficial_napi_yield_to_host_event_loop` with one provider checkpoint API.
+  Its semantic mode distinguishes a microtask-only checkpoint from a host-task
+  turn; this preserves Node ordering without encoding the provider or target.
+  Embedded idle policy is implemented by the embedded provider rather than
+  duplicated in the Rust adapter.
 - [x] Moved unsafe ArrayBuffer allocation policy behind N-API. Edge no longer
   chooses between an external native allocation and a host-engine allocation.
 - [x] Made stream ingress provider-neutral. Default reads transfer ownership
@@ -245,12 +251,12 @@ provider capability or an operating-system capability.
 | engine string limits | V8 and QuickJS have different engine limits | Query a provider capability or enforce the Node-compatible public limit; do not infer the engine from the compile target. |
 | environment embedder hooks | Embedded providers currently expose lifecycle hooks unavailable through imported N-API | Make lifecycle registration part of the provider contract, then call it unconditionally. Environment cleanup must release outstanding leases and callbacks. |
 
-The next implementation slice is filesystem I/O because it exercises all
-lease invariants at once: exact ranges, read/write direction, asynchronous
-retention, cancellation, vectored I/O, and teardown. Stream ownership and
-unsafe allocation follow only after their provider APIs have focused contract
-tests; changing Edge call sites before those contracts exist would merely move
-the workaround.
+The next implementation slice is the remaining raw-pointer audit. Each caller
+must be classified as a synchronous non-reentrant access, an asynchronous or
+reentrant retained access which needs a lease, or an intentionally shared
+guest-backed control block. Conversion is driven by that lifetime, not by the
+compile target. Engine string limits and lifecycle hooks then move behind
+provider capabilities before the complete browser/wasmer-sh acceptance run.
 
 ## Acceptance gates
 

@@ -1402,7 +1402,10 @@ napi_status DrainProcessTickCallback(napi_env env) {
 // checkpoint in the same outer-loop turn.
 napi_status CompleteProviderEventLoopCheckpoint(napi_env env, bool has_runnable_work) {
   napi_status status =
-      unofficial_napi_yield_to_host_event_loop(env, has_runnable_work);
+      unofficial_napi_event_loop_checkpoint(
+          env,
+          unofficial_napi_event_loop_checkpoint_host_tasks,
+          has_runnable_work);
   if (status != napi_ok) return status;
 
   bool has_tick_scheduled = false;
@@ -3412,7 +3415,8 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
   // task-queue work appeared as a result. Before task_queue is initialized,
   // fall back to running the microtask checkpoint only.
   if (!have_task_queue_flags || (!has_tick_scheduled && !has_rejection_to_warn)) {
-    napi_status status = unofficial_napi_process_microtasks(env);
+    napi_status status = unofficial_napi_event_loop_checkpoint(
+        env, unofficial_napi_event_loop_checkpoint_microtasks, true);
     if (status != napi_ok) {
       return status;
     }
