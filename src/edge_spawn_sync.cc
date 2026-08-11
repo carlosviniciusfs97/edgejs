@@ -820,7 +820,11 @@ napi_value BuildOutputArray(napi_env env, const SpawnSyncRunner& runner) {
 
     napi_value buffer = nullptr;
     const size_t output_length = GetPipeOutputLength(pipe);
-    if (napi_create_buffer(env, output_length, nullptr, &buffer) != napi_ok || buffer == nullptr) {
+    // napi_create_buffer requires a data out-parameter even though all access
+    // after construction is intentionally routed through a scoped lease.
+    void* created_data = nullptr;
+    if (napi_create_buffer(env, output_length, &created_data, &buffer) != napi_ok ||
+        buffer == nullptr) {
       return nullptr;
     }
     EdgeBufferLease output_lease;

@@ -237,7 +237,8 @@ napi_value CreateExternalBuffer(napi_env env, char* data, size_t len) {
   if (len == 0) {
     free(data);
     napi_value buffer = nullptr;
-    if (napi_create_buffer(env, 0, nullptr, &buffer) != napi_ok) return nullptr;
+    void* created_data = nullptr;
+    if (napi_create_buffer(env, 0, &created_data, &buffer) != napi_ok) return nullptr;
     return buffer;
   }
 

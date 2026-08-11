@@ -1664,11 +1664,18 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     }
     const bool has_runnable_work =
         loop != nullptr && uv_backend_timeout(loop) == 0;
-    if (CompleteProviderEventLoopCheckpoint(env, has_runnable_work) != napi_ok) {
+    const napi_status checkpoint_status =
+        CompleteProviderEventLoopCheckpoint(env, has_runnable_work);
+    if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider checkpoint while waiting for the top-level Promise";
       }
       return 1;
+    }
+    const int checkpoint_async_status =
+        HandlePendingExceptionAfterLoopStep(env, error_out);
+    if (checkpoint_async_status >= 0) {
+      return checkpoint_async_status;
     }
   }
 
@@ -1912,7 +1919,9 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     (void)uv_metrics_info(loop, &metrics_after);
     const bool has_runnable_work =
         metrics_after.events != metrics_before.events || uv_backend_timeout(loop) == 0;
-    if (CompleteProviderEventLoopCheckpoint(env, has_runnable_work) != napi_ok) {
+    const napi_status checkpoint_status =
+        CompleteProviderEventLoopCheckpoint(env, has_runnable_work);
+    if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider event-loop checkpoint";
       }
@@ -1943,7 +1952,10 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     if (idle_drain_turns < 8) {
       idle_drain_turns++;
       (void)EdgeRuntimePlatformDrainTasks(env);
-      if (CompleteProviderEventLoopCheckpoint(env, false) != napi_ok) {
+      const napi_status idle_checkpoint_status =
+          CompleteProviderEventLoopCheckpoint(env, false);
+      if (idle_checkpoint_status != napi_ok &&
+          idle_checkpoint_status != napi_pending_exception) {
         if (error_out != nullptr) {
           *error_out = "Failed to complete the idle provider checkpoint";
         }
