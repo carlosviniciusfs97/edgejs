@@ -22,6 +22,7 @@
 #include "cares/include/ares_nameser.h"
 #include "edge_active_resource.h"
 #include "edge_async_wrap.h"
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_env_loop.h"
 #include "edge_handle_scope.h"
@@ -930,12 +931,14 @@ int ParseTlsaReply(napi_env env,
     const unsigned char* data = ares_dns_rr_get_bin(rr, ARES_RR_TLSA_DATA, &data_len);
     if (data == nullptr || data_len == 0) continue;
 
-    void* ab_data = nullptr;
     napi_value ab = nullptr;
-    if (napi_create_arraybuffer(env, data_len, &ab_data, &ab) != napi_ok || ab_data == nullptr) {
+    if (napi_create_arraybuffer(env, data_len, nullptr, &ab) != napi_ok || ab == nullptr) {
       return ARES_ENOMEM;
     }
-    memcpy(ab_data, data, data_len);
+    EdgeBufferLease output;
+    if (!output.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return ARES_ENOMEM;
+    memcpy(output.data(), data, data_len);
+    if (!output.Release(true)) return ARES_ENOMEM;
 
     napi_value obj = nullptr;
     napi_create_object(env, &obj);
@@ -2039,12 +2042,14 @@ napi_value ConvertIpv6StringToBuffer(napi_env env, napi_callback_info info) {
     return MakeNull(env);
   }
 
-  void* data = nullptr;
   napi_value ab = nullptr;
-  if (napi_create_arraybuffer(env, 16, &data, &ab) != napi_ok || data == nullptr) {
+  if (napi_create_arraybuffer(env, 16, nullptr, &ab) != napi_ok || ab == nullptr) {
     return MakeNull(env);
   }
-  memcpy(data, out, 16);
+  EdgeBufferLease output;
+  if (!output.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return MakeNull(env);
+  memcpy(output.data(), out, 16);
+  if (!output.Release(true)) return MakeNull(env);
 
   napi_value arr = nullptr;
   napi_create_typedarray(env, napi_uint8_array, 16, ab, 0, &arr);

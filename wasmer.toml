@@ -2,10 +2,13 @@
 entrypoint = "edgejs"
 name = "wasmer/edgejs"
 version = "0.1.4"
+description = "Edge.js with host-provided N-API and no embedded JavaScript engine"
 
 # [fs]
 # "/node-lib" = "./lib"
 [fs]
+"/etc" = "./quickjs-wasm/etc"
+"/pnpm" = "./quickjs-wasm/pnpm"
 "/usr/local/ssl" = "./ssl-certs"
 
 [[module]]
@@ -20,3 +23,55 @@ runner = "https://webc.org/runner/wasi"
 [command.annotations.wasi]
 atom = "edgejs"
 # env = ["EDGEJS_LIB_DIR=/node-lib"]
+
+[[command]]
+name = "edge"
+module = "edgejs"
+runner = "https://webc.org/runner/wasi"
+
+[command.annotations.wasi]
+atom = "edgejs"
+
+[[command]]
+name = "node"
+module = "edgejs"
+runner = "https://webc.org/runner/wasi"
+
+[command.annotations.wasi]
+atom = "edgejs"
+
+[[command]]
+name = "pnpm"
+module = "edgejs"
+runner = "https://webc.org/runner/wasi"
+
+[command.annotations.wasi]
+atom = "edgejs"
+main-args = ["/pnpm/edge-pnpm.cjs"]
+env = [
+  "HOME=/tmp",
+  "npm_config_network_concurrency=4",
+  "npm_config_node_linker=hoisted",
+  "npm_config_optimistic_repeat_install=true",
+  "npm_config_package_import_method=copy",
+  "npm_config_store_dir=/tmp/.pnpm-store",
+  "npm_config_update_notifier=false",
+]
+
+[[command]]
+name = "npm"
+module = "edgejs"
+runner = "https://webc.org/runner/wasi"
+
+[command.annotations.wasi]
+atom = "edgejs"
+main-args = ["/pnpm/edge-pnpm.cjs"]
+env = [
+  "HOME=/tmp",
+  "npm_config_network_concurrency=4",
+  "npm_config_node_linker=hoisted",
+  "npm_config_optimistic_repeat_install=true",
+  "npm_config_package_import_method=copy",
+  "npm_config_store_dir=/tmp/.pnpm-store",
+  "npm_config_update_notifier=false",
+]

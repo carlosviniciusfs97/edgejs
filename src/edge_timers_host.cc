@@ -5,6 +5,7 @@
 #include "edge_environment.h"
 #include "edge_handle_scope.h"
 #include "edge_runtime.h"
+#include "edge_util.h"
 #include "edge_worker_env.h"
 
 namespace {
@@ -154,44 +155,34 @@ void AttachInfoArrays(napi_env env, napi_value binding) {
   auto* environment = EdgeEnvironmentGet(env);
   if (environment == nullptr) return;
 
-  napi_value immediate_ab = nullptr;
-  void* immediate_data = nullptr;
-  if (napi_create_arraybuffer(env, 3 * sizeof(int32_t), &immediate_data, &immediate_ab) == napi_ok &&
-      immediate_ab != nullptr && immediate_data != nullptr) {
-    auto* ptr = static_cast<int32_t*>(immediate_data);
+  int32_t* immediate_data = nullptr;
+  napi_value immediate_info = EdgeCreateSharedInt32Array(env, 3, &immediate_data);
+  if (immediate_info != nullptr && immediate_data != nullptr) {
+    auto* ptr = immediate_data;
     ptr[0] = 0;
     ptr[1] = 0;
     ptr[2] = 0;
-    napi_value immediate_info = nullptr;
-    if (napi_create_typedarray(env, napi_int32_array, 3, immediate_ab, 0, &immediate_info) == napi_ok &&
-        immediate_info != nullptr) {
-      napi_set_named_property(env, binding, "immediateInfo", immediate_info);
-      environment->immediate_info()->fields = ptr;
-      if (environment->immediate_info()->ref != nullptr) {
-        napi_delete_reference(env, environment->immediate_info()->ref);
-        environment->immediate_info()->ref = nullptr;
-      }
-      napi_create_reference(env, immediate_info, 1, &environment->immediate_info()->ref);
+    napi_set_named_property(env, binding, "immediateInfo", immediate_info);
+    environment->immediate_info()->fields = ptr;
+    if (environment->immediate_info()->ref != nullptr) {
+      napi_delete_reference(env, environment->immediate_info()->ref);
+      environment->immediate_info()->ref = nullptr;
     }
+    napi_create_reference(env, immediate_info, 1, &environment->immediate_info()->ref);
   }
 
-  napi_value timeout_ab = nullptr;
-  void* timeout_data = nullptr;
-  if (napi_create_arraybuffer(env, sizeof(int32_t), &timeout_data, &timeout_ab) == napi_ok &&
-      timeout_ab != nullptr && timeout_data != nullptr) {
-    auto* ptr = static_cast<int32_t*>(timeout_data);
+  int32_t* timeout_data = nullptr;
+  napi_value timeout_info = EdgeCreateSharedInt32Array(env, 1, &timeout_data);
+  if (timeout_info != nullptr && timeout_data != nullptr) {
+    auto* ptr = timeout_data;
     ptr[0] = 0;
-    napi_value timeout_info = nullptr;
-    if (napi_create_typedarray(env, napi_int32_array, 1, timeout_ab, 0, &timeout_info) == napi_ok &&
-        timeout_info != nullptr) {
-      napi_set_named_property(env, binding, "timeoutInfo", timeout_info);
-      environment->timeout_info()->fields = ptr;
-      if (environment->timeout_info()->ref != nullptr) {
-        napi_delete_reference(env, environment->timeout_info()->ref);
-        environment->timeout_info()->ref = nullptr;
-      }
-      napi_create_reference(env, timeout_info, 1, &environment->timeout_info()->ref);
+    napi_set_named_property(env, binding, "timeoutInfo", timeout_info);
+    environment->timeout_info()->fields = ptr;
+    if (environment->timeout_info()->ref != nullptr) {
+      napi_delete_reference(env, environment->timeout_info()->ref);
+      environment->timeout_info()->ref = nullptr;
     }
+    napi_create_reference(env, timeout_info, 1, &environment->timeout_info()->ref);
   }
 }
 

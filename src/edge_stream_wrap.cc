@@ -4,6 +4,7 @@
 
 #include "edge_async_wrap.h"
 #include "edge_environment.h"
+#include "edge_util.h"
 
 namespace {
 
@@ -245,25 +246,11 @@ napi_value EdgeInstallStreamWrapBinding(napi_env env) {
   }
   if (!DefineReqPrototypeMethods(env, shutdown_wrap_ctor)) return nullptr;
 
-  void* state_data = nullptr;
-  napi_value state_ab = nullptr;
-  if (napi_create_arraybuffer(env, sizeof(int32_t) * kEdgeStreamStateLength, &state_data, &state_ab) != napi_ok ||
-      state_ab == nullptr || state_data == nullptr) {
-    return nullptr;
-  }
-  int32_t* stream_state_data = static_cast<int32_t*>(state_data);
+  int32_t* stream_state_data = nullptr;
+  napi_value stream_state =
+      EdgeCreateSharedInt32Array(env, kEdgeStreamStateLength, &stream_state_data);
+  if (stream_state == nullptr || stream_state_data == nullptr) return nullptr;
   for (int i = 0; i < kEdgeStreamStateLength; i++) stream_state_data[i] = 0;
-
-  napi_value stream_state = nullptr;
-  if (napi_create_typedarray(env,
-                             napi_int32_array,
-                             kEdgeStreamStateLength,
-                             state_ab,
-                             0,
-                             &stream_state) != napi_ok ||
-      stream_state == nullptr) {
-    return nullptr;
-  }
 
   napi_set_named_property(env, binding, "WriteWrap", write_wrap_ctor);
   napi_set_named_property(env, binding, "ShutdownWrap", shutdown_wrap_ctor);

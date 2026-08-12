@@ -149,9 +149,8 @@ napi_value BuildWriteArray(napi_env env, const std::vector<std::vector<uint8_t>>
   if (napi_create_array_with_length(env, chunks.size(), &array) != napi_ok || array == nullptr) return nullptr;
   for (size_t i = 0; i < chunks.size(); ++i) {
     napi_value buffer = nullptr;
-    void* out = nullptr;
     const auto& chunk = chunks[i];
-    if (napi_create_buffer_copy(env, chunk.size(), chunk.data(), &out, &buffer) != napi_ok || buffer == nullptr) {
+    if (napi_create_buffer_copy(env, chunk.size(), chunk.data(), nullptr, &buffer) != napi_ok || buffer == nullptr) {
       return nullptr;
     }
     napi_set_element(env, array, static_cast<uint32_t>(i), buffer);
@@ -271,9 +270,12 @@ napi_value JsStreamWriteBuffer(napi_env env, napi_callback_info info) {
   }
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  EdgeBufferLease lease;
   std::string temp_utf8;
-  EdgeStreamBaseExtractByteSpan(env, argv[1], &data, &len, &refable, &temp_utf8);
+  if (!EdgeStreamBaseExtractByteSpan(
+          env, argv[1], &lease, &data, &len, &temp_utf8)) {
+    return EdgeStreamBaseMakeInt32(env, UV_EINVAL);
+  }
   std::vector<std::vector<uint8_t>> chunks;
   chunks.emplace_back(data, data + len);
   return CallOnWrite(env, wrap, self, argv[0], chunks, len);
@@ -326,9 +328,12 @@ napi_value JsStreamWritev(napi_env env, napi_callback_info info) {
     napi_get_element(env, argv[1], all_buffers ? i : (i * 2), &chunk);
     const uint8_t* data = nullptr;
     size_t len = 0;
-    bool refable = false;
+    EdgeBufferLease lease;
     std::string temp_utf8;
-    EdgeStreamBaseExtractByteSpan(env, chunk, &data, &len, &refable, &temp_utf8);
+    if (!EdgeStreamBaseExtractByteSpan(
+            env, chunk, &lease, &data, &len, &temp_utf8)) {
+      return EdgeStreamBaseMakeInt32(env, UV_EINVAL);
+    }
     chunks.emplace_back(data, data + len);
     total += len;
   }
@@ -355,9 +360,12 @@ napi_value JsStreamReadBuffer(napi_env env, napi_callback_info info) {
 
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  EdgeBufferLease lease;
   std::string temp_utf8;
-  EdgeStreamBaseExtractByteSpan(env, argv[0], &data, &len, &refable, &temp_utf8);
+  if (!EdgeStreamBaseExtractByteSpan(
+          env, argv[0], &lease, &data, &len, &temp_utf8)) {
+    return EdgeStreamBaseUndefined(env);
+  }
 
   while (len != 0) {
     uv_buf_t buf = uv_buf_init(nullptr, 0);
@@ -538,9 +546,12 @@ int EdgeJsStreamWriteBuffer(EdgeStreamBase* base,
 
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  EdgeBufferLease lease;
   std::string temp_utf8;
-  EdgeStreamBaseExtractByteSpan(base->env, payload, &data, &len, &refable, &temp_utf8);
+  if (!EdgeStreamBaseExtractByteSpan(
+          base->env, payload, &lease, &data, &len, &temp_utf8)) {
+    return UV_EINVAL;
+  }
 
   std::vector<std::vector<uint8_t>> chunks;
   chunks.emplace_back(data, data + len);

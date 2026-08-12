@@ -71,6 +71,7 @@
 #include "edge_timers_host.h"
 #include "edge_spawn_sync.h"
 #include "internal_binding/helpers.h"
+#include "internal_binding/binding_initializers.h"
 
 #if defined(EDGE_NAPI_QUICKJS) && defined(EDGE_QUICKJS_WEBASSEMBLY)
 #include "webassembly/edge_wasm.h"
@@ -1394,6 +1395,43 @@ napi_status DrainProcessTickCallback(napi_env env) {
   return napi_call_function(env, process, tick_cb, 0, nullptr, &ignored);
 }
 
+// The provider checkpoint owns engine microtasks and, for a host-JavaScript
+// provider, the JSPI suspension which lets host tasks run. Node's nextTick and
+// rejection queues remain Edge logic, so drain them only when the provider's
+// checkpoint made that task-queue state runnable. This avoids a second engine
+// checkpoint in the same outer-loop turn.
+napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
+                                                bool has_runnable_work,
+                                                bool* has_pending_provider_work = nullptr,
+                                                bool* host_tasks_admitted = nullptr) {
+  uint32_t checkpoint_state = unofficial_napi_event_loop_checkpoint_state_none;
+  napi_status status =
+      unofficial_napi_event_loop_checkpoint(
+          env,
+          unofficial_napi_event_loop_checkpoint_host_tasks,
+          has_runnable_work,
+          &checkpoint_state);
+  if (status != napi_ok) return status;
+  if (has_pending_provider_work != nullptr) {
+    *has_pending_provider_work =
+        (checkpoint_state &
+         unofficial_napi_event_loop_checkpoint_state_pending_provider_work) != 0;
+  }
+  if (host_tasks_admitted != nullptr) {
+    *host_tasks_admitted =
+        (checkpoint_state &
+         unofficial_napi_event_loop_checkpoint_state_host_tasks_admitted) != 0;
+  }
+
+  bool has_tick_scheduled = false;
+  bool has_rejection_to_warn = false;
+  if (!EdgeGetTaskQueueFlags(env, &has_tick_scheduled, &has_rejection_to_warn) ||
+      (!has_tick_scheduled && !has_rejection_to_warn)) {
+    return napi_ok;
+  }
+  return DrainProcessTickCallback(env);
+}
+
 bool IsPromisePending(napi_env env, napi_value promise) {
   if (env == nullptr || promise == nullptr) return false;
   int32_t state = 0;
@@ -1615,15 +1653,57 @@ bool ApplyUnsettledTopLevelAwaitExitCodeIfNeeded(napi_env env) {
   return SetProcessExitCodeIfNeeded(env, kExitCodeUnsettledTopLevelAwait, true);
 }
 
+void EdgeLoopWakeTimer(uv_timer_t* /*timer*/) {}
+
+int RunUvOnceWithDeadline(uv_loop_t* loop, int64_t max_wait_ms) {
+  if (loop == nullptr) return UV_EINVAL;
+  if (max_wait_ms <= 0) return uv_run(loop, UV_RUN_ONCE);
+
+  uv_timer_t wake_timer{};
+  int status = uv_timer_init(loop, &wake_timer);
+  if (status != 0) return status;
+  status = uv_timer_start(&wake_timer,
+                          EdgeLoopWakeTimer,
+                          static_cast<uint64_t>(max_wait_ms),
+                          0);
+  if (status == 0) {
+    (void)uv_run(loop, UV_RUN_ONCE);
+  }
+  (void)uv_timer_stop(&wake_timer);
+  uv_close(reinterpret_cast<uv_handle_t*>(&wake_timer), nullptr);
+  (void)uv_run(loop, UV_RUN_NOWAIT);
+  return status;
+}
+
 int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* error_out) {
   if (!IsPromisePending(env, value)) return -1;
 
   uv_loop_t* loop = EdgeGetEnvLoop(env);
+  int64_t loop_timeout_ms = 0;
+  if (const char* timeout_env = std::getenv("EDGE_LOOP_TIMEOUT_MS")) {
+    char* end = nullptr;
+    const long long parsed = std::strtoll(timeout_env, &end, 10);
+    if (end != timeout_env && parsed > 0) loop_timeout_ms = parsed;
+  }
+  const auto loop_start = std::chrono::steady_clock::now();
   while (true) {
     // Per-turn scope: each wait iteration mints promise-inspection values that
     // must not accumulate in the caller's scope for the life of the wait.
     edge::HandleScope turn_scope(env);
     if (!turn_scope.is_open() || !IsPromisePending(env, value)) break;
+    int64_t remaining_ms = 0;
+    if (loop_timeout_ms > 0) {
+      const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - loop_start)
+                                  .count();
+      if (elapsed_ms >= loop_timeout_ms) {
+        if (error_out != nullptr) {
+          *error_out = "EDGE loop timeout while waiting for the top-level Promise";
+        }
+        return 1;
+      }
+      remaining_ms = std::max<int64_t>(1, loop_timeout_ms - elapsed_ms);
+    }
     if (loop != nullptr) {
       (void)uv_run(loop, UV_RUN_NOWAIT);
     }
@@ -1639,7 +1719,44 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     if (async_status >= 0) {
       return async_status;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool has_runnable_work =
+        loop != nullptr && uv_backend_timeout(loop) == 0;
+    bool has_pending_provider_work = false;
+    bool host_tasks_admitted = false;
+    const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
+        env,
+        has_runnable_work,
+        &has_pending_provider_work,
+        &host_tasks_admitted);
+    if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
+      if (error_out != nullptr) {
+        *error_out = "Failed to complete the provider checkpoint while waiting for the top-level Promise";
+      }
+      return 1;
+    }
+    const int checkpoint_async_status =
+        HandlePendingExceptionAfterLoopStep(env, error_out);
+    if (checkpoint_async_status >= 0) {
+      return checkpoint_async_status;
+    }
+    const bool loop_alive = loop != nullptr && uv_loop_alive(loop) != 0;
+    if (!loop_alive && !has_pending_provider_work) {
+      // A pending top-level Promise with no event-loop or provider work is an
+      // unsettled TLA, not work that can make progress by spinning here.
+      break;
+    }
+    if (!loop_alive && has_pending_provider_work && !host_tasks_admitted) {
+      if (error_out != nullptr) {
+        *error_out = "Provider reported pending work without admitting a host task";
+      }
+      return 1;
+    }
+    if (!host_tasks_admitted &&
+        !has_runnable_work &&
+        !has_pending_provider_work &&
+        loop_alive) {
+      (void)RunUvOnceWithDeadline(loop, remaining_ms);
+    }
   }
 
   int32_t state = 0;
@@ -1689,37 +1806,6 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     if (end != timeout_env && parsed > 0) loop_timeout_ms = parsed;
   }
   const auto loop_start = std::chrono::steady_clock::now();
-
-  struct TimeoutCleanupState {
-    int killed_processes = 0;
-    int closed_handles = 0;
-  };
-  auto cleanup_handles_on_timeout = [&](TimeoutCleanupState* state) {
-    if (state == nullptr) return;
-    uv_walk(
-        loop,
-        [](uv_handle_t* h, void* arg) {
-          if (h == nullptr || arg == nullptr) return;
-          auto* st = static_cast<TimeoutCleanupState*>(arg);
-          if (uv_handle_get_type(h) == UV_PROCESS) {
-            auto* p = reinterpret_cast<uv_process_t*>(h);
-            if (p->pid > 0) {
-              (void)uv_process_kill(p, SIGKILL);
-            }
-            st->killed_processes += 1;
-          }
-          if (!uv_is_closing(h)) {
-            uv_close(h, [](uv_handle_t* /*handle*/) {});
-            st->closed_handles += 1;
-          }
-        },
-        state);
-    // Best effort drain to allow close callbacks/process exits to run.
-    for (int i = 0; i < 8; i++) {
-      if (uv_run(loop, UV_RUN_NOWAIT) == 0) break;
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-  };
 
   auto active_handles_summary = [&](std::string* out) {
     if (out == nullptr) return;
@@ -1848,30 +1934,20 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       if (elapsed_ms >= loop_timeout_ms) {
         std::string handles;
         active_handles_summary(&handles);
-        TimeoutCleanupState cleanup_state;
-        cleanup_handles_on_timeout(&cleanup_state);
         if (error_out != nullptr) {
           *error_out = "EDGE loop timeout after " + std::to_string(elapsed_ms) + "ms";
           if (!handles.empty()) *error_out += "; active handles: " + handles;
-          if (cleanup_state.killed_processes > 0 || cleanup_state.closed_handles > 0) {
-            *error_out += "; timeout cleanup: killed_processes=" +
-                          std::to_string(cleanup_state.killed_processes) +
-                          ", closed_handles=" + std::to_string(cleanup_state.closed_handles);
-          }
         }
         uv_stop(loop);
         return 1;
       }
     }
-    const bool use_polling_loop = loop_timeout_ms > 0;
-    if (use_polling_loop) {
-      uv_run(loop, UV_RUN_NOWAIT);
-      if (uv_loop_alive(loop) != 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-    } else {
-      uv_run(loop, UV_RUN_DEFAULT);
-    }
+    uv_metrics_t metrics_before{};
+    (void)uv_metrics_info(loop, &metrics_before);
+    // Start every turn nonblocking. The checkpoint reports whether it admitted
+    // an asynchronous host task turn; otherwise Edge waits on libuv's native
+    // event source below instead of polling it with scheduler sleeps.
+    uv_run(loop, UV_RUN_NOWAIT);
     if (IsEnvironmentExitRequested(env)) {
       break;
     }
@@ -1881,22 +1957,20 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     // Match Node's embedder loop shape: libuv callbacks and callback scopes
     // own nextTick draining; the loop turn itself only drains platform tasks.
     (void)EdgeRuntimePlatformDrainTasks(env);
-    // Some cross-thread V8 async wakeups, notably Atomics.waitAsync() used by
-    // worker messaging, can resolve Promises without a JS callback entering the
-    // isolate on that turn. Run a plain microtask checkpoint here so those
-    // promises settle without waiting for an unrelated timer or I/O callback.
-    napi_status microtask_status = napi_ok;
-    {
-      edge::HandleScope scope(env);
-      if (!scope.is_open()) {
-        microtask_status = scope.status();
-      } else {
-        microtask_status = unofficial_napi_process_microtasks(env);
-      }
-    }
-    if (microtask_status != napi_ok) {
+    uv_metrics_t metrics_after{};
+    (void)uv_metrics_info(loop, &metrics_after);
+    const bool has_runnable_work =
+        metrics_after.events != metrics_before.events || uv_backend_timeout(loop) == 0;
+    bool has_pending_provider_work = false;
+    bool host_tasks_admitted = false;
+    const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
+        env,
+        has_runnable_work,
+        &has_pending_provider_work,
+        &host_tasks_admitted);
+    if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
-        *error_out = "Failed to process microtasks";
+        *error_out = "Failed to complete the provider event-loop checkpoint";
       }
       return 1;
     }
@@ -1913,9 +1987,27 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       break;
     }
 
-    bool more = uv_loop_alive(loop) != 0;
+    bool more = uv_loop_alive(loop) != 0 || has_pending_provider_work;
     if (more) {
       idle_drain_turns = 0;
+      if (!host_tasks_admitted &&
+          !has_runnable_work) {
+        if (uv_loop_alive(loop) != 0) {
+          int64_t remaining_ms = 0;
+          if (loop_timeout_ms > 0) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - loop_start)
+                                        .count();
+            remaining_ms = std::max<int64_t>(1, loop_timeout_ms - elapsed_ms);
+          }
+          (void)RunUvOnceWithDeadline(loop, remaining_ms);
+        } else if (has_pending_provider_work) {
+          if (error_out != nullptr) {
+            *error_out = "Provider reported pending work without admitting a host task";
+          }
+          return 1;
+        }
+      }
       continue;
     }
 
@@ -1924,14 +2016,33 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     if (idle_drain_turns < 8) {
       idle_drain_turns++;
       (void)EdgeRuntimePlatformDrainTasks(env);
+      bool has_pending_idle_provider_work = false;
+      bool idle_host_tasks_admitted = false;
+      const napi_status idle_checkpoint_status = CompleteProviderEventLoopCheckpoint(
+          env,
+          false,
+          &has_pending_idle_provider_work,
+          &idle_host_tasks_admitted);
+      if (idle_checkpoint_status != napi_ok &&
+          idle_checkpoint_status != napi_pending_exception) {
+        if (error_out != nullptr) {
+          *error_out = "Failed to complete the idle provider checkpoint";
+        }
+        return 1;
+      }
       async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
       if (async_status >= 0) {
         return async_status;
       }
-      if (uv_loop_alive(loop) != 0) {
+      if (!idle_host_tasks_admitted) {
+        // Native providers do not own a host task queue. Pace the grace
+        // window with libuv itself so background platform work gets a real
+        // scheduling interval without a CPU polling loop.
+        (void)RunUvOnceWithDeadline(loop, 1);
+      }
+      if (uv_loop_alive(loop) != 0 || has_pending_idle_provider_work) {
         idle_drain_turns = 0;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
     }
     idle_drain_turns = 0;
@@ -1940,12 +2051,25 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     EmitProcessLifecycleEvent(env, "beforeExit", before_exit_code);
     (void)EdgeRuntimePlatformDrainTasks(env);
 
+    bool has_pending_before_exit_provider_work = false;
+    const napi_status before_exit_checkpoint_status =
+        CompleteProviderEventLoopCheckpoint(
+            env, uv_backend_timeout(loop) == 0,
+            &has_pending_before_exit_provider_work);
+    if (before_exit_checkpoint_status != napi_ok &&
+        before_exit_checkpoint_status != napi_pending_exception) {
+      if (error_out != nullptr) {
+        *error_out = "Failed to complete the provider checkpoint after beforeExit";
+      }
+      return 1;
+    }
+
     async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
     if (async_status >= 0) {
       return async_status;
     }
 
-    more = uv_loop_alive(loop) != 0;
+    more = uv_loop_alive(loop) != 0 || has_pending_before_exit_provider_work;
     if (!more) {
       break;
     }
@@ -3093,8 +3217,18 @@ int RunScriptWithGlobals(napi_env env,
       }
     }
 
-    // Node semantics: flush the task queues once after top-level script eval.
-    (void)DrainProcessTickCallback(env);
+    // Close the successful entry execution like Node's outermost callback
+    // scope: checkpoint engine microtasks before entering the JavaScript tick
+    // callback when no tick is already scheduled. This keeps indirect eval's
+    // referrer tied to its actual script/realm rather than a task-queue frame.
+    const napi_status entry_checkpoint_status = EdgeRunCallbackScopeCheckpoint(env);
+    if (entry_checkpoint_status != napi_ok &&
+        entry_checkpoint_status != napi_pending_exception) {
+      if (error_out != nullptr) {
+        *error_out = "Failed to complete the callback-scope checkpoint after top-level script eval";
+      }
+      return 1;
+    }
     const int post_script_status = HandlePendingExceptionAfterLoopStep(env, error_out);
     if (post_script_status >= 0) {
       return post_script_status;
@@ -3388,8 +3522,9 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
   // work is pending, run a microtask checkpoint first and return early if no
   // task-queue work appeared as a result. Before task_queue is initialized,
   // fall back to running the microtask checkpoint only.
-  if (!have_task_queue_flags || (!has_tick_scheduled && !has_rejection_to_warn)) {
-    napi_status status = unofficial_napi_process_microtasks(env);
+  if (!have_task_queue_flags || !has_tick_scheduled) {
+    napi_status status = unofficial_napi_event_loop_checkpoint(
+        env, unofficial_napi_event_loop_checkpoint_microtasks, true, nullptr);
     if (status != napi_ok) {
       return status;
     }

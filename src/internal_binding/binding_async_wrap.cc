@@ -1,4 +1,5 @@
 #include "internal_binding/binding_initializers.h"
+#include "edge_util.h"
 #include "internal_binding/binding_async_wrap.h"
 
 #include <array>
@@ -180,6 +181,9 @@ bool GetTypedArrayView(napi_env env,
                        size_t min_length,
                        void** data,
                        size_t* length) {
+  // These arrays are created by EdgeCreateSharedTypedArray. Their defining
+  // contract is stable guest-backed aliasing between native async-hook code and
+  // JavaScript, so a copied lease would be the wrong ownership model here.
   if (data == nullptr || length == nullptr) return false;
   *data = nullptr;
   *length = 0;
@@ -529,27 +533,9 @@ void SetNamedMethod(napi_env env, napi_value obj, const char* key, napi_callback
 }
 
 napi_value CreateTypedArray(napi_env env, napi_typedarray_type type, size_t length, void** out_data = nullptr) {
-  napi_value arraybuffer = nullptr;
   void* data = nullptr;
-  size_t byte_length = 0;
-  switch (type) {
-    case napi_uint32_array:
-      byte_length = sizeof(uint32_t) * length;
-      break;
-    case napi_float64_array:
-      byte_length = sizeof(double) * length;
-      break;
-    default:
-      return nullptr;
-  }
-  if (napi_create_arraybuffer(env, byte_length, &data, &arraybuffer) != napi_ok || arraybuffer == nullptr ||
-      data == nullptr) {
-    return nullptr;
-  }
-  napi_value typed_array = nullptr;
-  if (napi_create_typedarray(env, type, length, arraybuffer, 0, &typed_array) != napi_ok || typed_array == nullptr) {
-    return nullptr;
-  }
+  napi_value typed_array = EdgeCreateSharedTypedArray(env, type, length, &data);
+  if (typed_array == nullptr || data == nullptr) return nullptr;
   if (out_data != nullptr) *out_data = data;
   return typed_array;
 }

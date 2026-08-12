@@ -515,57 +515,6 @@ bool IsFunction(napi_env env, napi_value value) {
   return value != nullptr && napi_typeof(env, value, &type) == napi_ok && type == napi_function;
 }
 
-bool GetArrayBufferViewSpan(napi_env env, napi_value value, const uint8_t** data, size_t* len) {
-  static uint8_t kEmptySentinel = 0;
-  if (env == nullptr || value == nullptr || data == nullptr || len == nullptr) return false;
-
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* raw = nullptr;
-    size_t byte_len = 0;
-    if (napi_get_buffer_info(env, value, &raw, &byte_len) != napi_ok) return false;
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<const uint8_t*>(raw) : &kEmptySentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type ta_type = napi_uint8_array;
-    size_t element_len = 0;
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(
-            env, value, &ta_type, &element_len, &raw, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-    const size_t byte_len = element_len * EdgeTypedArrayElementSize(ta_type);
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<const uint8_t*>(raw) : &kEmptySentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    size_t byte_len = 0;
-    void* raw = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_dataview_info(env, value, &byte_len, &raw, &arraybuffer, &byte_offset) != napi_ok) {
-      return false;
-    }
-    if (raw == nullptr && byte_len != 0) return false;
-    *data = raw != nullptr ? static_cast<const uint8_t*>(raw) : &kEmptySentinel;
-    *len = byte_len;
-    return true;
-  }
-
-  return false;
-}
-
 std::string ValueToUtf8(napi_env env, napi_value value) {
   if (value == nullptr) return "";
   size_t len = 0;
@@ -1092,44 +1041,6 @@ void InvokeQueued(TlsWrap* wrap, int status, const char* error_string = nullptr)
   CompleteDetachedReq(wrap, req_ref, status, error_string);
 }
 
-bool GetArrayBufferBytes(napi_env env,
-                         napi_value value,
-                         const uint8_t** data,
-                         size_t* len,
-                         size_t* offset_out) {
-  if (data == nullptr || len == nullptr || offset_out == nullptr) return false;
-  *data = nullptr;
-  *len = 0;
-  *offset_out = 0;
-  if (value == nullptr) return false;
-  bool is_ab = false;
-  if (napi_is_arraybuffer(env, value, &is_ab) == napi_ok && is_ab) {
-    void* raw = nullptr;
-    size_t byte_len = 0;
-    if (napi_get_arraybuffer_info(env, value, &raw, &byte_len) != napi_ok || raw == nullptr) return false;
-    *data = static_cast<const uint8_t*>(raw);
-    *len = byte_len;
-    return true;
-  }
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t element_len = 0;
-    void* raw = nullptr;
-    napi_value ab = nullptr;
-    size_t byte_offset = 0;
-    if (napi_get_typedarray_info(env, value, &type, &element_len, &raw, &ab, &byte_offset) != napi_ok ||
-        raw == nullptr) {
-      return false;
-    }
-    *data = static_cast<const uint8_t*>(raw);
-    *len = element_len * EdgeTypedArrayElementSize(type);
-    *offset_out = byte_offset;
-    return true;
-  }
-  return false;
-}
-
 int32_t CallParentMethodInt(TlsWrap* wrap, const char* method, size_t argc, napi_value* argv, napi_value* result_out) {
   if (wrap == nullptr || wrap->env == nullptr || method == nullptr) return UV_EINVAL;
   edge::HandleScope scope(wrap->env);
@@ -1414,13 +1325,14 @@ unsigned int PskServerCallback(SSL* ssl,
     return 0;
   }
 
-  const uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!GetArrayBufferViewSpan(wrap->env, out, &data, &len) || data == nullptr || len > max_psk_len) {
+  EdgeBufferLease psk_lease;
+  if (!psk_lease.Acquire(
+          wrap->env, out, unofficial_napi_buffer_access_read) ||
+      psk_lease.size() > max_psk_len) {
     return 0;
   }
-  std::memcpy(psk, data, len);
-  return static_cast<unsigned int>(len);
+  std::memcpy(psk, psk_lease.data(), psk_lease.size());
+  return static_cast<unsigned int>(psk_lease.size());
 }
 
 unsigned int PskClientCallback(SSL* ssl,
@@ -1467,10 +1379,10 @@ unsigned int PskClientCallback(SSL* ssl,
   const std::string identity_str = ValueToUtf8(wrap->env, identity_v);
   if (identity_str.size() > max_identity_len) return 0;
 
-  const uint8_t* psk_data = nullptr;
-  size_t psk_len = 0;
-  if (!GetArrayBufferViewSpan(wrap->env, psk_v, &psk_data, &psk_len) || psk_data == nullptr ||
-      psk_len > max_psk_len) {
+  EdgeBufferLease psk_lease;
+  if (!psk_lease.Acquire(
+          wrap->env, psk_v, unofficial_napi_buffer_access_read) ||
+      psk_lease.size() > max_psk_len) {
     return 0;
   }
 
@@ -1478,8 +1390,8 @@ unsigned int PskClientCallback(SSL* ssl,
   if (identity_str.size() < max_identity_len) {
     identity[identity_str.size()] = '\0';
   }
-  std::memcpy(psk, psk_data, psk_len);
-  return static_cast<unsigned int>(psk_len);
+  std::memcpy(psk, psk_lease.data(), psk_lease.size());
+  return static_cast<unsigned int>(psk_lease.size());
 }
 
 int CertCallback(SSL* ssl, void* arg) {
@@ -2550,9 +2462,9 @@ int TlsWrapStreamBaseWriteBuffer(EdgeStreamBase* base,
 
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  EdgeBufferLease lease;
   std::string temp_utf8;
-  if (!EdgeStreamBaseExtractByteSpan(base->env, payload, &data, &len, &refable, &temp_utf8) ||
+  if (!EdgeStreamBaseExtractByteSpan(base->env, payload, &lease, &data, &len, &temp_utf8) ||
       (len > 0 && data == nullptr)) {
     return UV_EINVAL;
   }
@@ -2569,9 +2481,9 @@ napi_value TlsWrapWriteBuffer(napi_env env, napi_callback_info info) {
   if (wrap == nullptr || argc < 2) return MakeInt32(env, UV_EINVAL);
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  EdgeBufferLease lease;
   std::string temp_utf8;
-  if (!EdgeStreamBaseExtractByteSpan(env, argv[1], &data, &len, &refable, &temp_utf8) || data == nullptr) {
+  if (!EdgeStreamBaseExtractByteSpan(env, argv[1], &lease, &data, &len, &temp_utf8) || data == nullptr) {
     return MakeInt32(env, UV_EINVAL);
   }
   return MakeInt32(env, DoAppWrite(wrap, argv[0], data, len));
@@ -2591,9 +2503,9 @@ napi_value TlsWrapWriteString(napi_env env, napi_callback_info info, const char*
   }
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  EdgeBufferLease lease;
   std::string temp_utf8;
-  if (!EdgeStreamBaseExtractByteSpan(env, payload, &data, &len, &refable, &temp_utf8) || data == nullptr) {
+  if (!EdgeStreamBaseExtractByteSpan(env, payload, &lease, &data, &len, &temp_utf8) || data == nullptr) {
     return MakeInt32(env, UV_EINVAL);
   }
   return MakeInt32(env, DoAppWrite(wrap, argv[0], data, len));
@@ -2631,9 +2543,9 @@ napi_value TlsWrapWritev(napi_env env, napi_callback_info info) {
     napi_get_element(env, argv[1], all_buffers ? i : (i * 2), &chunk);
     const uint8_t* data = nullptr;
     size_t len = 0;
-    bool refable = false;
+    EdgeBufferLease lease;
     std::string temp_utf8;
-    if (!EdgeStreamBaseExtractByteSpan(env, chunk, &data, &len, &refable, &temp_utf8) || data == nullptr) {
+    if (!EdgeStreamBaseExtractByteSpan(env, chunk, &lease, &data, &len, &temp_utf8) || data == nullptr) {
       return MakeInt32(env, UV_EINVAL);
     }
     combined.insert(combined.end(), data, data + len);
@@ -2872,9 +2784,9 @@ napi_value TlsWrapSetALPNProtocols(napi_env env, napi_callback_info info) {
   if (wrap == nullptr || wrap->ssl == nullptr || argc < 1) return Undefined(env);
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  EdgeBufferLease lease;
   std::string temp_utf8;
-  if (!EdgeStreamBaseExtractByteSpan(env, argv[0], &data, &len, &refable, &temp_utf8) || data == nullptr) {
+  if (!EdgeStreamBaseExtractByteSpan(env, argv[0], &lease, &data, &len, &temp_utf8) || data == nullptr) {
     napi_throw_type_error(env, nullptr, "Must give a Buffer as first argument");
     return nullptr;
   }
@@ -2967,9 +2879,9 @@ napi_value TlsWrapSetSession(napi_env env, napi_callback_info info) {
   if (wrap == nullptr || argc < 1) return Undefined(env);
   const uint8_t* data = nullptr;
   size_t len = 0;
-  bool refable = false;
+  EdgeBufferLease lease;
   std::string temp_utf8;
-  if (EdgeStreamBaseExtractByteSpan(env, argv[0], &data, &len, &refable, &temp_utf8) && data != nullptr) {
+  if (EdgeStreamBaseExtractByteSpan(env, argv[0], &lease, &data, &len, &temp_utf8) && data != nullptr) {
     wrap->pending_session.assign(data, data + len);
     if (wrap->is_server) {
       const unsigned char* ptr = wrap->pending_session.data();
@@ -3013,9 +2925,9 @@ napi_value TlsWrapExportKeyingMaterial(napi_env env, napi_callback_info info) {
   const uint8_t* context_data = nullptr;
   size_t context_len = 0;
   if (argc >= 3 && argv[2] != nullptr) {
-    bool refable = false;
+    EdgeBufferLease lease;
     std::string temp_utf8;
-    if (EdgeStreamBaseExtractByteSpan(env, argv[2], &context_data, &context_len, &refable, &temp_utf8) &&
+    if (EdgeStreamBaseExtractByteSpan(env, argv[2], &lease, &context_data, &context_len, &temp_utf8) &&
         context_data != nullptr) {
       context_bytes.assign(context_data, context_data + context_len);
       context_data = context_bytes.data();
@@ -3623,13 +3535,14 @@ napi_value TlsWrapSetOCSPResponse(napi_env env, napi_callback_info info) {
   napi_value argv[1] = {nullptr};
   TlsWrap* wrap = UnwrapThis(env, info, &argc, argv, nullptr);
   if (wrap == nullptr || argc < 1 || argv[0] == nullptr) return Undefined(env);
-  const uint8_t* data = nullptr;
-  size_t len = 0;
-  if (!GetArrayBufferViewSpan(env, argv[0], &data, &len) || data == nullptr) {
+  EdgeBufferLease response;
+  if (!response.Acquire(
+          env, argv[0], unofficial_napi_buffer_access_read)) {
     napi_throw_type_error(env, nullptr, "OCSP response must be a Buffer");
     return nullptr;
   }
-  wrap->ocsp_response.assign(data, data + len);
+  wrap->ocsp_response.assign(
+      response.data(), response.data() + response.size());
   return Undefined(env);
 }
 
@@ -3689,11 +3602,11 @@ napi_value TlsWrapReceive(napi_env env, napi_callback_info info) {
   napi_value argv[1] = {nullptr};
   TlsWrap* wrap = UnwrapThis(env, info, &argc, argv, nullptr);
   if (wrap == nullptr || wrap->ssl == nullptr || argc < 1) return Undefined(env);
-  const uint8_t* data = nullptr;
-  size_t len = 0;
-  size_t offset = 0;
-  if (!GetArrayBufferBytes(env, argv[0], &data, &len, &offset) || data == nullptr) return Undefined(env);
-  InjectParentStreamBytes(wrap, data + offset, len - offset);
+  EdgeBufferLease input;
+  if (!input.Acquire(env, argv[0], unofficial_napi_buffer_access_read)) {
+    return Undefined(env);
+  }
+  InjectParentStreamBytes(wrap, input.data(), input.size());
   return Undefined(env);
 }
 

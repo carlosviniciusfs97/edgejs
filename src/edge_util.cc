@@ -5,6 +5,7 @@
 #include "edge_util.h"
 
 #include "unofficial_napi.h"
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_module_loader.h"
 
@@ -16,6 +17,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <map>
+#include <limits>
 #include <memory>
 #include <unordered_set>
 #include <string>
@@ -1239,11 +1241,13 @@ bool InstallConstants(napi_env env, napi_value binding) {
 
 bool InstallShouldAbortToggle(napi_env env, napi_value binding) {
   napi_value ab = nullptr;
-  void* data = nullptr;
-  if (napi_create_arraybuffer(env, sizeof(uint32_t), &data, &ab) != napi_ok || ab == nullptr || data == nullptr) {
+  if (napi_create_arraybuffer(env, sizeof(uint32_t), nullptr, &ab) != napi_ok || ab == nullptr) {
     return false;
   }
-  static_cast<uint32_t*>(data)[0] = 1;
+  EdgeBufferLease toggle;
+  if (!toggle.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return false;
+  static_cast<uint32_t*>(static_cast<void*>(toggle.data()))[0] = 1;
+  if (!toggle.Release(true)) return false;
 
   napi_value out = nullptr;
   if (napi_create_typedarray(env, napi_uint32_array, 1, ab, 0, &out) != napi_ok || out == nullptr) return false;
@@ -1430,6 +1434,77 @@ bool InstallTypesBinding(napi_env env) {
 }
 
 }  // namespace
+
+napi_value EdgeCreateSharedTypedArray(napi_env env,
+                                      napi_typedarray_type type,
+                                      size_t length,
+                                      void** data_out) {
+  if (env == nullptr || data_out == nullptr) return nullptr;
+  *data_out = nullptr;
+
+  napi_value direct = nullptr;
+  if (unofficial_napi_create_guest_backed_typedarray(
+          env, type, length, data_out, &direct) == napi_ok &&
+      direct != nullptr && (length == 0 || *data_out != nullptr)) {
+    return direct;
+  }
+
+  // The extension is an optimization for providers that can expose guest
+  // memory directly. Standard N-API remains the provider-neutral fallback;
+  // providers with copied ArrayBuffers keep that persistent mapping coherent
+  // at their event-loop checkpoint.
+  *data_out = nullptr;
+  size_t element_size = 0;
+  switch (type) {
+    case napi_int8_array:
+    case napi_uint8_array:
+    case napi_uint8_clamped_array:
+      element_size = 1;
+      break;
+    case napi_int16_array:
+    case napi_uint16_array:
+    case napi_float16_array:
+      element_size = 2;
+      break;
+    case napi_int32_array:
+    case napi_uint32_array:
+    case napi_float32_array:
+      element_size = 4;
+      break;
+    case napi_float64_array:
+    case napi_bigint64_array:
+    case napi_biguint64_array:
+      element_size = 8;
+      break;
+    default:
+      return nullptr;
+  }
+  if (length > std::numeric_limits<size_t>::max() / element_size) return nullptr;
+
+  napi_value arraybuffer = nullptr;
+  if (napi_create_arraybuffer(
+          env, length * element_size, data_out, &arraybuffer) != napi_ok ||
+      arraybuffer == nullptr || (length != 0 && *data_out == nullptr)) {
+    *data_out = nullptr;
+    return nullptr;
+  }
+
+  napi_value array = nullptr;
+  if (napi_create_typedarray(
+          env, type, length, arraybuffer, 0, &array) != napi_ok ||
+      array == nullptr) {
+    *data_out = nullptr;
+    return nullptr;
+  }
+  return array;
+}
+
+napi_value EdgeCreateSharedInt32Array(napi_env env,
+                                      size_t length,
+                                      int32_t** data_out) {
+  return EdgeCreateSharedTypedArray(
+      env, napi_int32_array, length, reinterpret_cast<void**>(data_out));
+}
 
 napi_value EdgeCreatePrivateSymbolsObject(napi_env env) {
   return CreatePrivateSymbolsObject(env);

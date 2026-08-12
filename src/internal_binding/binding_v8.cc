@@ -4,6 +4,7 @@
 #include <string>
 
 #include "edge_environment.h"
+#include "edge_buffer_lease.h"
 #include "internal_binding/helpers.h"
 #include "unofficial_napi.h"
 
@@ -74,7 +75,10 @@ V8BindingState& EnsureV8BindingState(napi_env env) {
       env, kEdgeEnvironmentSlotV8BindingState);
 }
 
-double* GetFloat64ArrayData(napi_env env, napi_ref ref, size_t minimum_length) {
+double* GetFloat64ArrayData(napi_env env,
+                            napi_ref ref,
+                            size_t minimum_length,
+                            EdgeBufferLease* lease) {
   if (env == nullptr || ref == nullptr) return nullptr;
   napi_value typed_array = nullptr;
   if (napi_get_reference_value(env, ref, &typed_array) != napi_ok || typed_array == nullptr) {
@@ -87,29 +91,27 @@ double* GetFloat64ArrayData(napi_env env, napi_ref ref, size_t minimum_length) {
 
   napi_typedarray_type type = napi_int8_array;
   size_t length = 0;
-  void* data = nullptr;
-  napi_value arraybuffer = nullptr;
-  size_t byte_offset = 0;
   if (napi_get_typedarray_info(
-          env, typed_array, &type, &length, &data, &arraybuffer, &byte_offset) != napi_ok ||
+          env, typed_array, &type, &length, nullptr, nullptr, nullptr) != napi_ok ||
       type != napi_float64_array ||
       length < minimum_length ||
-      data == nullptr) {
+      lease == nullptr ||
+      !lease->Acquire(env, typed_array, unofficial_napi_buffer_access_readwrite)) {
     return nullptr;
   }
 
-  return static_cast<double*>(data);
+  return static_cast<double*>(static_cast<void*>(lease->data()));
 }
 
 napi_value CreateFloat64Array(napi_env env, size_t length) {
   napi_value ab = nullptr;
-  void* data = nullptr;
-  if (napi_create_arraybuffer(env, length * sizeof(double), &data, &ab) != napi_ok || ab == nullptr) {
+  if (napi_create_arraybuffer(env, length * sizeof(double), nullptr, &ab) != napi_ok || ab == nullptr) {
     return nullptr;
   }
-  if (data != nullptr) {
-    std::memset(data, 0, length * sizeof(double));
-  }
+  EdgeBufferLease output;
+  if (!output.Acquire(env, ab, unofficial_napi_buffer_access_readwrite)) return nullptr;
+  std::memset(output.data(), 0, length * sizeof(double));
+  if (!output.Release(true)) return nullptr;
   napi_value arr = nullptr;
   if (napi_create_typedarray(env, napi_float64_array, length, ab, 0, &arr) != napi_ok) return nullptr;
   return arr;
@@ -173,8 +175,9 @@ napi_value V8UpdateHeapStatisticsBuffer(napi_env env, napi_callback_info /*info*
   V8BindingState* state = GetV8BindingState(env);
   if (state == nullptr) return MakeUndefined(env);
 
-  double* buffer =
-      GetFloat64ArrayData(env, state->heap_statistics_buffer_ref, kHeapStatisticsPropertiesCount);
+  EdgeBufferLease output;
+  double* buffer = GetFloat64ArrayData(
+      env, state->heap_statistics_buffer_ref, kHeapStatisticsPropertiesCount, &output);
   if (buffer == nullptr) return MakeUndefined(env);
 
   unofficial_napi_heap_statistics stats{};
@@ -196,6 +199,7 @@ napi_value V8UpdateHeapStatisticsBuffer(napi_env env, napi_callback_info /*info*
   buffer[11] = static_cast<double>(stats.total_global_handles_size);
   buffer[12] = static_cast<double>(stats.used_global_handles_size);
   buffer[13] = static_cast<double>(stats.external_memory);
+  if (!output.Release(true)) return MakeUndefined(env);
   return MakeUndefined(env);
 }
 
@@ -211,8 +215,9 @@ napi_value V8UpdateHeapSpaceStatisticsBuffer(napi_env env, napi_callback_info in
     return MakeUndefined(env);
   }
 
+  EdgeBufferLease output;
   double* buffer = GetFloat64ArrayData(
-      env, state->heap_space_statistics_buffer_ref, kHeapSpaceStatisticsPropertiesCount);
+      env, state->heap_space_statistics_buffer_ref, kHeapSpaceStatisticsPropertiesCount, &output);
   if (buffer == nullptr) return MakeUndefined(env);
 
   unofficial_napi_heap_space_statistics stats{};
@@ -224,6 +229,7 @@ napi_value V8UpdateHeapSpaceStatisticsBuffer(napi_env env, napi_callback_info in
   buffer[1] = static_cast<double>(stats.space_used_size);
   buffer[2] = static_cast<double>(stats.space_available_size);
   buffer[3] = static_cast<double>(stats.physical_space_size);
+  if (!output.Release(true)) return MakeUndefined(env);
   return MakeUndefined(env);
 }
 
@@ -231,8 +237,9 @@ napi_value V8UpdateHeapCodeStatisticsBuffer(napi_env env, napi_callback_info /*i
   V8BindingState* state = GetV8BindingState(env);
   if (state == nullptr) return MakeUndefined(env);
 
-  double* buffer =
-      GetFloat64ArrayData(env, state->heap_code_statistics_buffer_ref, kHeapCodeStatisticsPropertiesCount);
+  EdgeBufferLease output;
+  double* buffer = GetFloat64ArrayData(
+      env, state->heap_code_statistics_buffer_ref, kHeapCodeStatisticsPropertiesCount, &output);
   if (buffer == nullptr) return MakeUndefined(env);
 
   unofficial_napi_heap_code_statistics stats{};
@@ -244,6 +251,7 @@ napi_value V8UpdateHeapCodeStatisticsBuffer(napi_env env, napi_callback_info /*i
   buffer[1] = static_cast<double>(stats.bytecode_and_metadata_size);
   buffer[2] = static_cast<double>(stats.external_script_source_size);
   buffer[3] = static_cast<double>(stats.cpu_profiler_metadata_size);
+  if (!output.Release(true)) return MakeUndefined(env);
   return MakeUndefined(env);
 }
 

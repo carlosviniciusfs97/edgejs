@@ -6,8 +6,15 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD_DIR="${PROJECT_ROOT}/build-wasix"
 TOOLCHAIN_FILE="${PROJECT_ROOT}/wasix/wasix-toolchain.cmake"
 OPENSSL_WASIX_DIR="${PROJECT_ROOT}/deps/openssl-wasix"
+OPENSSL_EXCEPTION_MODE_FILE="${BUILD_DIR}/.openssl-build-abi"
+OPENSSL_BUILD_ABI="${WASIXCC_WASM_EXCEPTIONS:-exnref}-no-wide-arithmetic"
+VALIDATE_WASM="${PROJECT_ROOT}/wasix/validate-imported-napi-wasm.py"
+BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}"
 
-export WASIXCC_WASM_EXCEPTIONS="${WASIXCC_WASM_EXCEPTIONS:-yes}"
+# Chrome and current Node support the standardized exnref exception-handling
+# proposal, so build the guest and every static dependency with that ABI.
+export WASIXCC_WASM_EXCEPTIONS="${WASIXCC_WASM_EXCEPTIONS:-exnref}"
+export WASIXCC_RUN_WASM_OPT="${WASIXCC_RUN_WASM_OPT:-no}"
 
 if ! command -v wasixcc >/dev/null 2>&1 && [[ -x "${HOME}/.wasixcc/bin/wasixcc" ]]; then
   export PATH="${HOME}/.wasixcc/bin:${PATH}"
@@ -33,7 +40,7 @@ optimize_wasm() {
   local input="$1"
   local output="$2"
   if command -v wasm-opt >/dev/null 2>&1; then
-    wasm-opt --emit-exnref -o "${output}" "${input}"
+    wasm-opt -O2 --emit-exnref -o "${output}" "${input}"
     return
   fi
   echo "warning: wasm-opt not found in PATH; copying ${input} to ${output}" >&2
@@ -41,6 +48,7 @@ optimize_wasm() {
 }
 
 "${PROJECT_ROOT}/wasix/setup-wasix-deps.sh"
+mkdir -p "${BUILD_DIR}"
 
 if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
   rm -f "${BUILD_DIR}/CMakeCache.txt"
@@ -56,7 +64,8 @@ openssl_wasix_ready() {
     [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/comp.h" ]] &&
     [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/e_ostime.h" ]] &&
     [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/lhash.h" ]] &&
-    [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/opensslv.h" ]]
+    [[ -f "${OPENSSL_WASIX_DIR}/include/openssl/opensslv.h" ]] &&
+    [[ "$(cat "${OPENSSL_EXCEPTION_MODE_FILE}" 2>/dev/null || true)" == "${OPENSSL_BUILD_ABI}" ]]
 }
 
 if ! openssl_wasix_ready; then
@@ -70,13 +79,14 @@ if ! openssl_wasix_ready; then
     RANLIB=wasixranlib \
     NM=wasixnm \
     LD=wasixld \
-    CFLAGS="--target=wasm32-wasix -matomics -mbulk-memory -mmutable-globals -pthread -mthread-model posix -ftls-model=local-exec -fno-trapping-math -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -DUSE_TIMEGM -DOPENSSL_NO_SECURE_MEMORY -DOPENSSL_NO_DGRAM -DOPENSSL_THREADS -O2" \
+    CFLAGS="--target=wasm32-wasix -matomics -mbulk-memory -mmutable-globals -mno-wide-arithmetic -pthread -mthread-model posix -ftls-model=local-exec -fno-trapping-math -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -DUSE_TIMEGM -DOPENSSL_NO_SECURE_MEMORY -DOPENSSL_NO_DGRAM -DOPENSSL_THREADS -O2" \
     LDFLAGS="-Wl,--allow-undefined" \
     ./Configure linux-generic32 -static no-shared no-pic no-asm no-dso no-tests no-apps no-afalgeng -DUSE_TIMEGM -DOPENSSL_NO_SECURE_MEMORY -DOPENSSL_NO_DGRAM -DOPENSSL_THREADS
     make build_generated
     make -j4 libcrypto.a libssl.a
     wasixranlib libcrypto.a || true
     wasixranlib libssl.a || true
+    printf '%s\n' "${OPENSSL_BUILD_ABI}" > "${OPENSSL_EXCEPTION_MODE_FILE}"
   )
 fi
 
@@ -88,10 +98,18 @@ cmake \
   -U CMAKE_EXE_LINKER_FLAGS \
   -U CMAKE_SHARED_LINKER_FLAGS \
   -U CMAKE_MODULE_LINKER_FLAGS \
+  -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
   -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
   -DEDGE_NAPI_PROVIDER=imports \
   -DEDGE_BUILD_CLI=ON \
   -DBUILD_TESTING=OFF
+
+# This artifact deliberately leaves N-API unresolved. The host supplies these
+# imports and therefore owns the JavaScript engine used by EdgeJS.
+grep -Fxq 'EDGE_NAPI_PROVIDER:STRING=imports' "${BUILD_DIR}/CMakeCache.txt" || {
+  echo "error: WASIX build did not configure EDGE_NAPI_PROVIDER=imports" >&2
+  exit 1
+}
 
 cmake --build "${BUILD_DIR}" -j4
 
@@ -105,5 +123,9 @@ else
   echo "error: expected ${BUILD_DIR}/edge or ${BUILD_DIR}/ubi after build" >&2
   exit 1
 fi
+
+python3 "${VALIDATE_WASM}" \
+  --cmake-cache "${BUILD_DIR}/CMakeCache.txt" \
+  "${BUILD_DIR}/edgejs.wasm"
 
 echo "Built WASIX targets at ${BUILD_DIR}/edge.wasm and ${BUILD_DIR}/edgejs.wasm"

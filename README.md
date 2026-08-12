@@ -81,6 +81,31 @@ NODE_TEST_RUNNER="$(pwd)/build-edge/edge" \
 ./test/nodejs_test_harness --category=node:assert
 ```
 
+### Host-JavaScript WASIX package
+
+The root [`wasmer.toml`](./wasmer.toml) describes the engine-free
+`syrusakbary/edgejs` package. Its WebAssembly module imports the standard N-API
+surface from `napi` and the EdgeJS extension surface from
+`napi_extension_wasmer_v0`; it does not embed QuickJS or V8. A compatible host
+provides those imports using its own JavaScript engine.
+
+```bash
+make build-wasix
+make validate-wasix-imports
+wasmer package build --check .
+```
+
+The build runs the import/engine validation automatically. The embedded
+QuickJS package remains separately available under `quickjs-wasm/`.
+
+This host-engine mode is experimental. The buffer ownership and synchronization
+contract is documented in
+[`004_buffer_ownership.md`](./plans/quickjs-wasm/development/dev_007_host_js_imported_napi/004_buffer_ownership.md),
+and deferred security work is recorded in
+[`SECURITY-HOST-JS-NAPI.md`](./SECURITY-HOST-JS-NAPI.md). The browser regression
+gate covers package installation, timers, promises, workers, networking, HTTP,
+and a rendered Next.js development preview.
+
 ## Contribute 🤗
 
 We have created a [public ROADMAP](https://github.com/wasmerio/edgejs/issues/8), so you can contribute into the project easily!

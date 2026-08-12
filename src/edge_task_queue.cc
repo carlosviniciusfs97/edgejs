@@ -2,6 +2,7 @@
 
 #include "edge_environment.h"
 #include "edge_handle_scope.h"
+#include "edge_util.h"
 #include "internal_binding/helpers.h"
 #include "unofficial_napi.h"
 
@@ -66,7 +67,8 @@ static napi_value TaskQueueEnqueueMicrotask(napi_env env, napi_callback_info inf
 }
 
 static napi_value TaskQueueRunMicrotasks(napi_env env, napi_callback_info /*info*/) {
-  (void)unofficial_napi_process_microtasks(env);
+  (void)unofficial_napi_event_loop_checkpoint(
+      env, unofficial_napi_event_loop_checkpoint_microtasks, true, nullptr);
   return internal_binding::Undefined(env);
 }
 
@@ -141,14 +143,9 @@ napi_value EdgeGetOrCreateTaskQueueBinding(napi_env env) {
     return nullptr;
   }
 
-  napi_value tick_ab = nullptr;
-  void* tick_data = nullptr;
-  if (napi_create_arraybuffer(env, 2 * sizeof(int32_t), &tick_data, &tick_ab) != napi_ok ||
-      tick_ab == nullptr || tick_data == nullptr) {
-    return nullptr;
-  }
-
-  auto* fields = static_cast<int32_t*>(tick_data);
+  int32_t* fields = nullptr;
+  napi_value tick_info = EdgeCreateSharedInt32Array(env, 2, &fields);
+  if (tick_info == nullptr || fields == nullptr) return nullptr;
   fields[0] = 0;
   fields[1] = 0;
   st.tick_info_fields = fields;
@@ -156,10 +153,6 @@ napi_value EdgeGetOrCreateTaskQueueBinding(napi_env env) {
     environment->tick_info()->fields = fields;
   }
 
-  napi_value tick_info = nullptr;
-  if (napi_create_typedarray(env, napi_int32_array, 2, tick_ab, 0, &tick_info) != napi_ok || tick_info == nullptr) {
-    return nullptr;
-  }
   if (napi_set_named_property(env, binding, "tickInfo", tick_info) != napi_ok) return nullptr;
   if (auto* environment = EdgeEnvironmentGet(env); environment != nullptr) {
     DeleteRefIfAny(env, &environment->tick_info()->ref);

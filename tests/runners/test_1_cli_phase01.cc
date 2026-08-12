@@ -3,6 +3,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if !defined(_WIN32)
@@ -118,7 +119,8 @@ struct CommandResult {
 
 CommandResult RunBuiltBinaryAndCapture(const std::filesystem::path& binary,
                                        const std::vector<std::string>& args,
-                                       const std::string& stem) {
+                                       const std::string& stem,
+                                       const std::vector<std::pair<std::string, std::string>>& env = {}) {
   namespace fs = std::filesystem;
   std::string unique_key = binary.string();
   for (const auto& arg : args) {
@@ -135,7 +137,11 @@ CommandResult RunBuiltBinaryAndCapture(const std::filesystem::path& binary,
   fs::remove_all(temp_root, ec);
   fs::create_directories(temp_root, ec);
 
-  std::string cmd = ShellSingleQuoted(binary.string());
+  std::string cmd;
+  for (const auto& [name, value] : env) {
+    cmd += name + "=" + ShellSingleQuoted(value) + " ";
+  }
+  cmd += ShellSingleQuoted(binary.string());
   for (const auto& arg : args) {
     cmd.push_back(' ');
     cmd += ShellSingleQuoted(arg);
@@ -1024,6 +1030,146 @@ TEST_F(Test1CliPhase01, FsPromisesWritevUsesTypedArrayByteLength) {
   EXPECT_EQ(WEXITSTATUS(result.status), 0) << "stderr=" << result.stderr_output;
   EXPECT_TRUE(result.stderr_output.empty()) << "stderr=" << result.stderr_output;
   EXPECT_NE(result.stdout_output.find("written:4:4"), std::string::npos) << result.stdout_output;
+#endif
+}
+
+TEST_F(Test1CliPhase01, InternalFsIoClampsRangesAndCoercesBuffers) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "internal fs I/O subprocess parity check is POSIX-only";
+#else
+  namespace fs = std::filesystem;
+  const auto edge_path = ResolveBuiltEdgeBinary();
+  ASSERT_FALSE(edge_path.empty()) << "Failed to resolve built edge binary";
+
+  const fs::path file_path =
+      fs::temp_directory_path() /
+      ("edge_phase01_internal_fs_io_" + std::to_string(::getpid()) + ".bin");
+  const std::string script_path = WriteTempScript(
+      "edge_phase01_internal_fs_io",
+      "const assert = require('assert');\n"
+      "const fs = require('fs');\n"
+      "const binding = process.binding('fs');\n"
+      "const file = " + JsSingleQuoted(file_path.string()) + ";\n"
+      "fs.writeFileSync(file, 'abcdef');\n"
+      "const fd = fs.openSync(file, 'r+');\n"
+      "try {\n"
+      "  const target = new Uint8Array(4);\n"
+      "  assert.strictEqual(binding.read(fd, target, 2, 99, 0), 2);\n"
+      "  assert.deepStrictEqual(Array.from(target), [0, 0, 97, 98]);\n"
+      "  assert.strictEqual(binding.writeBuffer(fd, new Uint8Array([88, 89]), 1, 99, 0), 1);\n"
+      "  assert.strictEqual(binding.writeBuffer(fd, 'hi', 0, 99, 0), 2);\n"
+      "} finally {\n"
+      "  fs.closeSync(fd);\n"
+      "}\n"
+      "console.log('internal-fs-io:ok');\n");
+
+  const CommandResult result =
+      RunBuiltBinaryAndCapture(edge_path, {script_path}, "edge_phase01_internal_fs_io_run");
+  RemoveTempScript(script_path);
+  std::error_code ec;
+  fs::remove(file_path, ec);
+
+  ASSERT_NE(result.status, -1);
+  ASSERT_TRUE(WIFEXITED(result.status)) << "status=" << result.status;
+  EXPECT_EQ(WEXITSTATUS(result.status), 0) << "stderr=" << result.stderr_output;
+  EXPECT_TRUE(result.stderr_output.empty()) << "stderr=" << result.stderr_output;
+  EXPECT_NE(result.stdout_output.find("internal-fs-io:ok"), std::string::npos)
+      << result.stdout_output;
+#endif
+}
+
+TEST_F(Test1CliPhase01, ZlibSyncSnapshotKeepsSourceIdentityAndOutputTail) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "zlib snapshot subprocess parity check is POSIX-only";
+#else
+  const auto edge_path = ResolveBuiltEdgeBinary();
+  ASSERT_FALSE(edge_path.empty()) << "Failed to resolve built edge binary";
+
+  const CommandResult result = RunBuiltBinaryAndCapture(
+      edge_path,
+      {"-e",
+       "const assert = require('assert');"
+       "const zlib = require('zlib');"
+       "const binding = process.binding('zlib');"
+       "const constants = process.binding('constants').zlib;"
+       "const handle = new binding.Zlib(constants.DEFLATE);"
+       "const state = new Uint32Array(2);"
+       "handle.init(15, -1, 8, 0, state, () => {}, undefined);"
+       "const first = Buffer.alloc(32, 0x41);"
+       "const second = Buffer.alloc(32, 0x42);"
+       "const head = Buffer.alloc(1, 0x7a);"
+       "handle.writeSync(constants.Z_NO_FLUSH, first, 0, first.length, head, 0, head.length);"
+       "assert.strictEqual(state[0], 0);"
+       "const offset = first.length - state[1];"
+       "const tail = Buffer.alloc(256, 0x7a);"
+       "handle.writeSync(constants.Z_FINISH, second, offset, state[1], tail, 0, tail.length);"
+       "const written = tail.length - state[0];"
+       "handle.close();"
+       "assert.strictEqual(tail[written], 0x7a);"
+       "const compressed = Buffer.concat([head, tail.subarray(0, written)]);"
+       "assert.deepStrictEqual(zlib.inflateSync(compressed), second);"
+       "console.log('zlib-snapshot:ok');"},
+      "edge_phase01_zlib_sync_snapshot");
+
+  ASSERT_NE(result.status, -1);
+  ASSERT_TRUE(WIFEXITED(result.status)) << "status=" << result.status;
+  EXPECT_EQ(WEXITSTATUS(result.status), 0) << "stderr=" << result.stderr_output;
+  EXPECT_TRUE(result.stderr_output.empty()) << "stderr=" << result.stderr_output;
+  EXPECT_NE(result.stdout_output.find("zlib-snapshot:ok"), std::string::npos)
+      << result.stdout_output;
+#endif
+}
+
+TEST_F(Test1CliPhase01, CryptoBufferSourcesAcceptSharedArrayBuffer) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "crypto SharedArrayBuffer subprocess parity check is POSIX-only";
+#else
+  const auto edge_path = ResolveBuiltEdgeBinary();
+  ASSERT_FALSE(edge_path.empty()) << "Failed to resolve built edge binary";
+
+  const CommandResult result = RunBuiltBinaryAndCapture(
+      edge_path,
+      {"-e",
+       "const assert = require('assert');"
+       "const crypto = require('crypto');"
+       "const ecdh = crypto.createECDH('prime256v1');"
+       "ecdh.generateKeys();"
+       "const publicKey = ecdh.getPublicKey();"
+       "const shared = new SharedArrayBuffer(publicKey.length);"
+       "new Uint8Array(shared).set(publicKey);"
+       "assert.strictEqual(crypto.ECDH.convertKey(shared, 'prime256v1', undefined, undefined, 'compressed').length, 33);"
+       "console.log('crypto-sab:ok');"},
+      "edge_phase01_crypto_sab");
+
+  ASSERT_NE(result.status, -1);
+  ASSERT_TRUE(WIFEXITED(result.status)) << "status=" << result.status;
+  EXPECT_EQ(WEXITSTATUS(result.status), 0) << "stderr=" << result.stderr_output;
+  EXPECT_TRUE(result.stderr_output.empty()) << "stderr=" << result.stderr_output;
+  EXPECT_NE(result.stdout_output.find("crypto-sab:ok"), std::string::npos)
+      << result.stdout_output;
+#endif
+}
+
+TEST_F(Test1CliPhase01, LoopTimeoutWakesLibuvAndPreservesProviderTeardown) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "loop timeout subprocess parity check is POSIX-only";
+#else
+  const auto edge_path = ResolveBuiltEdgeBinary();
+  ASSERT_FALSE(edge_path.empty()) << "Failed to resolve built edge binary";
+
+  const CommandResult result = RunBuiltBinaryAndCapture(
+      edge_path,
+      {"-e", "require('net').createServer().listen(0)"},
+      "edge_phase01_loop_timeout",
+      {{"EDGE_LOOP_TIMEOUT_MS", "100"}});
+
+  ASSERT_NE(result.status, -1);
+  ASSERT_TRUE(WIFEXITED(result.status)) << "status=" << result.status;
+  EXPECT_EQ(WEXITSTATUS(result.status), 1) << "stderr=" << result.stderr_output;
+  EXPECT_NE(result.stderr_output.find("EDGE loop timeout"), std::string::npos)
+      << result.stderr_output;
+  EXPECT_NE(result.stderr_output.find("Server"), std::string::npos)
+      << result.stderr_output;
 #endif
 }
 

@@ -19,6 +19,7 @@
 
 #include "node_api.h"
 #include "uv.h"
+#include "edge_buffer_lease.h"
 
 namespace {
 
@@ -69,30 +70,26 @@ std::string PathFromValue(napi_env env, napi_value value) {
 
   bool is_buffer = false;
   if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* data = nullptr;
-    size_t length = 0;
-    if (napi_get_buffer_info(env, value, &data, &length) != napi_ok || data == nullptr) {
+    EdgeBufferLease path;
+    if (!path.Acquire(env, value, unofficial_napi_buffer_access_read)) {
       ThrowInvalidArgType(env, "path", "string or Buffer");
       return "";
     }
-    return std::string(static_cast<const char*>(data), length);
+    std::string out(reinterpret_cast<const char*>(path.data()), path.size());
+    (void)path.Release(false);
+    return out;
   }
 
   bool is_typedarray = false;
   if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
     napi_typedarray_type ta_type = napi_uint8_array;
-    size_t length = 0;
-    void* data = nullptr;
-    napi_value arraybuffer = nullptr;
-    size_t byte_offset = 0;
     if (napi_get_typedarray_info(env,
                                  value,
                                  &ta_type,
-                                 &length,
-                                 &data,
-                                 &arraybuffer,
-                                 &byte_offset) != napi_ok ||
-        data == nullptr) {
+                                 nullptr,
+                                 nullptr,
+                                 nullptr,
+                                 nullptr) != napi_ok) {
       ThrowInvalidArgType(env, "path", "string or Buffer");
       return "";
     }
@@ -100,7 +97,14 @@ std::string PathFromValue(napi_env env, napi_value value) {
       ThrowInvalidArgType(env, "path", "string or Buffer");
       return "";
     }
-    return std::string(static_cast<const char*>(data), length);
+    EdgeBufferLease path;
+    if (!path.Acquire(env, value, unofficial_napi_buffer_access_read)) {
+      ThrowInvalidArgType(env, "path", "string or Buffer");
+      return "";
+    }
+    std::string out(reinterpret_cast<const char*>(path.data()), path.size());
+    (void)path.Release(false);
+    return out;
   }
 
   ThrowInvalidArgType(env, "path", "string or Buffer");
@@ -1018,45 +1022,6 @@ napi_value BindingClose(napi_env env, napi_callback_info info) {
   return nullptr;
 }
 
-// Get pointer and byte length from a Buffer or TypedArray (e.g. Uint8Array).
-// Returns true on success; *data and *byte_length are set.
-static bool BufferFromValue(napi_env env, napi_value value, void** data,
-                            size_t* byte_length) {
-  if (value == nullptr || data == nullptr || byte_length == nullptr) {
-    return false;
-  }
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) != napi_ok) return false;
-  if (is_buffer) {
-    size_t len = 0;
-    if (napi_get_buffer_info(env, value, data, &len) != napi_ok) return false;
-    *byte_length = len;
-    return true;
-  }
-  bool is_ta = false;
-  if (napi_is_typedarray(env, value, &is_ta) != napi_ok || !is_ta) {
-    return false;
-  }
-  napi_typedarray_type type = napi_uint8_array;
-  size_t element_length = 0;
-  void* ptr = nullptr;
-  size_t byte_offset = 0;
-  if (napi_get_typedarray_info(env, value, &type, &element_length, &ptr,
-                               nullptr, &byte_offset) != napi_ok) {
-    return false;
-  }
-  static const size_t kBytesPerElement[] = {
-      1, 1, 2, 2, 4, 4, 4, 8, 8, 8, 8, 8, 8, 2, 2, 4, 4, 8, 8,
-  };
-  const size_t kNumTypes = sizeof(kBytesPerElement) / sizeof(kBytesPerElement[0]);
-  const size_t el_size = (static_cast<size_t>(type) < kNumTypes)
-                             ? kBytesPerElement[static_cast<size_t>(type)]
-                             : 1;
-  *data = ptr;
-  *byte_length = element_length * el_size;
-  return true;
-}
-
 static bool IsNullOrUndefined(napi_env env, napi_value value) {
   if (value == nullptr) return true;
   napi_valuetype type = napi_undefined;
@@ -1073,9 +1038,8 @@ napi_value BindingReadSync(napi_env env, napi_callback_info info) {
   }
   int32_t fd = 0;
   if (napi_get_value_int32(env, argv[0], &fd) != napi_ok) return nullptr;
-  void* buf_data = nullptr;
   size_t buf_byte_length = 0;
-  if (!BufferFromValue(env, argv[1], &buf_data, &buf_byte_length)) {
+  if (!EdgeGetBinaryByteLength(env, argv[1], &buf_byte_length)) {
     return nullptr;
   }
   size_t offset = 0;
@@ -1104,15 +1068,25 @@ napi_value BindingReadSync(napi_env env, napi_callback_info info) {
     if (napi_create_int32(env, 0, &zero) != napi_ok) return nullptr;
     return zero;
   }
-  uv_buf_t uv_buf =
-      uv_buf_init(static_cast<char*>(buf_data) + offset, static_cast<unsigned int>(length));
+  EdgeBufferLease buffer;
+  if (!buffer.Acquire(env,
+                      argv[1],
+                      offset,
+                      length,
+                      unofficial_napi_buffer_access_readwrite)) {
+    return nullptr;
+  }
+  uv_buf_t uv_buf = uv_buf_init(reinterpret_cast<char*>(buffer.data()),
+                                static_cast<unsigned int>(length));
   uv_fs_t req;
   int r = uv_fs_read(nullptr, &req, fd, &uv_buf, 1, position, nullptr);
   uv_fs_req_cleanup(&req);
   if (r < 0) {
+    (void)buffer.Release(false);
     ThrowUVException(env, r, "read", nullptr);
     return nullptr;
   }
+  if (!buffer.Release(true)) return nullptr;
   napi_value result = nullptr;
   if (napi_create_int32(env, static_cast<int32_t>(r), &result) != napi_ok) {
     return nullptr;
@@ -1129,9 +1103,8 @@ napi_value BindingWriteSync(napi_env env, napi_callback_info info) {
   }
   int32_t fd = 0;
   if (napi_get_value_int32(env, argv[0], &fd) != napi_ok) return nullptr;
-  void* buf_data = nullptr;
   size_t buf_byte_length = 0;
-  if (!BufferFromValue(env, argv[1], &buf_data, &buf_byte_length)) {
+  if (!EdgeGetBinaryByteLength(env, argv[1], &buf_byte_length)) {
     return nullptr;
   }
   int64_t offset_i = 0;
@@ -1161,11 +1134,20 @@ napi_value BindingWriteSync(napi_env env, napi_callback_info info) {
     if (napi_create_int32(env, 0, &zero) != napi_ok) return nullptr;
     return zero;
   }
-  uv_buf_t uv_buf = uv_buf_init(static_cast<char*>(buf_data) + offset,
-                                 static_cast<unsigned int>(length));
+  EdgeBufferLease buffer;
+  if (!buffer.Acquire(env,
+                      argv[1],
+                      offset,
+                      length,
+                      unofficial_napi_buffer_access_read)) {
+    return nullptr;
+  }
+  uv_buf_t uv_buf = uv_buf_init(reinterpret_cast<char*>(buffer.data()),
+                                static_cast<unsigned int>(length));
   uv_fs_t req;
   int r = uv_fs_write(nullptr, &req, fd, &uv_buf, 1, position, nullptr);
   uv_fs_req_cleanup(&req);
+  if (!buffer.Release(false)) return nullptr;
   if (r < 0) {
     ThrowUVException(env, r, "write", nullptr);
     return nullptr;
@@ -1226,9 +1208,8 @@ napi_value BindingWriteBuffer(napi_env env, napi_callback_info info) {
   }
   int32_t fd = 0;
   if (napi_get_value_int32(env, argv[0], &fd) != napi_ok) return nullptr;
-  void* buf_data = nullptr;
   size_t buf_byte_length = 0;
-  if (!BufferFromValue(env, argv[1], &buf_data, &buf_byte_length)) {
+  if (!EdgeGetBinaryByteLength(env, argv[1], &buf_byte_length)) {
     return nullptr;
   }
   int64_t offset_i = 0;
@@ -1260,11 +1241,20 @@ napi_value BindingWriteBuffer(napi_env env, napi_callback_info info) {
   }
   size_t offset = static_cast<size_t>(offset_i);
   size_t length = static_cast<size_t>(length_i);
-  uv_buf_t uv_buf = uv_buf_init(static_cast<char*>(buf_data) + offset,
+  EdgeBufferLease buffer;
+  if (!buffer.Acquire(env,
+                      argv[1],
+                      offset,
+                      length,
+                      unofficial_napi_buffer_access_read)) {
+    return nullptr;
+  }
+  uv_buf_t uv_buf = uv_buf_init(reinterpret_cast<char*>(buffer.data()),
                                 static_cast<unsigned int>(length));
   uv_fs_t req;
   int r = uv_fs_write(nullptr, &req, fd, &uv_buf, 1, position, nullptr);
   uv_fs_req_cleanup(&req);
+  if (!buffer.Release(false)) return nullptr;
   if (r < 0) {
     SetContextUVError(env, ctx, r, "write");
     napi_value undefined = nullptr;

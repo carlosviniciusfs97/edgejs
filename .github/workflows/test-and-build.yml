@@ -305,7 +305,9 @@ jobs:
       # See the quickjs-linux job for how Wasmer provisioning modes work. The
       # V8 WASIX lane runs the edgejs wasm through the wasmer CLI's
       # experimental N-API runtime, so the CLI must be built with the napi-v8
-      # feature (EDGE_WASMER_NAPI=1) in addition to LLVM.
+      # feature (EDGE_WASMER_NAPI=1) in addition to LLVM. Use the same
+      # repository-level Wasmer revision as every other lane so provider and
+      # guest compatibility cannot drift behind a second hidden pin.
       - name: Resolve Wasmer provisioning
         id: wasmer-provision
         shell: bash

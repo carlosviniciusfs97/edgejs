@@ -33,13 +33,17 @@ duplicating issue details.
 | ▶️ | Medium | [011_quickjs_wasix_atomics_patch.md](node-compat/napi/011_quickjs_wasix_atomics_patch.md) | QuickJS WASIX atomics guard patch |
 | 🟠 | Medium | [013_v8_shaped_callsite_methods.md](node-compat/napi/013_v8_shaped_callsite_methods.md) | V8-shaped CallSite methods |
 | 🟠 | Medium | [014_lifetime_tracing.md](node-compat/napi/014_lifetime_tracing.md) | QuickJS N-API lifetime tracing |
+| 🟢 | High | [020_imported_napi_browser_pnpm_terminal_loss.md](node-compat/napi/020_imported_napi_browser_pnpm_terminal_loss.md) | Browser pnpm terminal loss |
 | 🟠 | Medium | [003_minimal_intl_fallback.md](node-compat/edgejs/003_minimal_intl_fallback.md) | Minimal `Intl.DateTimeFormat` fallback |
 | 🟠 | Medium | [004_native_inspector_stub.md](node-compat/edgejs/004_native_inspector_stub.md) | Native unavailable `inspector` stub |
 | 🟠 | High | [010_stream_wrapper_unwrap_fallback.md](node-compat/edgejs/010_stream_wrapper_unwrap_fallback.md) | Stream wrapper unwrap fallback |
 | 🟠 | Medium | [012_v8_ctest_environment_attach.md](node-compat/edgejs/012_v8_ctest_environment_attach.md) | V8 CTest runtime fixture environment attachment |
+| ▶️ | High | [013_native_buffer_lease_regressions.md](node-compat/edgejs/013_native_buffer_lease_regressions.md) | Native buffer lease regressions |
 | 🟠 | Medium | [016_napi_extern_wasix_linkage.md](node-compat/deploy/016_napi_extern_wasix_linkage.md) | `NAPI_EXTERN=` WASIX linkage rule |
 | 🟠 | Low | [017_framework_static_server_adapters.md](node-compat/deploy/017_framework_static_server_adapters.md) | Framework static and ad hoc server adapters |
 | 🟠 | Medium | [018_pnpm_deploy_graph_materialization.md](node-compat/deploy/018_pnpm_deploy_graph_materialization.md) | pnpm deploy graph materialization |
+| 🟢 | High | [019_wasmer_napi_checkpoint_import.md](node-compat/deploy/019_wasmer_napi_checkpoint_import.md) | Wasmer N-API checkpoint import alignment |
+| 🟢 | High | [020_wasix_ci_tail_failures.md](node-compat/deploy/020_wasix_ci_tail_failures.md) | WASIX CI tail failures |
 
 ## Node Test
 

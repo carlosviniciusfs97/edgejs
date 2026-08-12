@@ -1090,10 +1090,9 @@ napi_value CreateBlobHandleFromCloneData(napi_env env, napi_value blob_data) {
   if (!IsFunction(env, create_blob)) return nullptr;
 
   size_t byte_length = 0;
-  void* raw = nullptr;
   bool is_arraybuffer = false;
   if (napi_is_arraybuffer(env, blob_data, &is_arraybuffer) != napi_ok || !is_arraybuffer ||
-      napi_get_arraybuffer_info(env, blob_data, &raw, &byte_length) != napi_ok) {
+      napi_get_arraybuffer_info(env, blob_data, nullptr, &byte_length) != napi_ok) {
     return nullptr;
   }
 
@@ -1857,11 +1856,8 @@ bool ValueUsesTransferArrayBuffer(napi_env env,
 
   bool is_buffer = false;
   if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    void* ignored_data = nullptr;
-    size_t ignored_len = 0;
     napi_value buffer_ab = nullptr;
-    if (napi_get_buffer_info(env, value, &ignored_data, &ignored_len) == napi_ok &&
-        napi_get_named_property(env, value, "buffer", &buffer_ab) == napi_ok &&
+    if (napi_get_named_property(env, value, "buffer", &buffer_ab) == napi_ok &&
         buffer_ab != nullptr) {
       bool same = false;
       if (napi_strict_equals(env, buffer_ab, target_arraybuffer, &same) == napi_ok && same) {
@@ -1873,12 +1869,9 @@ bool ValueUsesTransferArrayBuffer(napi_env env,
   bool is_typed_array = false;
   if (napi_is_typedarray(env, value, &is_typed_array) == napi_ok && is_typed_array) {
     napi_typedarray_type ignored_type = napi_int8_array;
-    size_t ignored_length = 0;
-    void* ignored_data = nullptr;
     napi_value view_ab = nullptr;
-    size_t ignored_offset = 0;
     if (napi_get_typedarray_info(
-            env, value, &ignored_type, &ignored_length, &ignored_data, &view_ab, &ignored_offset) == napi_ok &&
+            env, value, &ignored_type, nullptr, nullptr, &view_ab, nullptr) == napi_ok &&
         view_ab != nullptr) {
       bool same = false;
       if (napi_strict_equals(env, view_ab, target_arraybuffer, &same) == napi_ok && same) {
@@ -1889,11 +1882,8 @@ bool ValueUsesTransferArrayBuffer(napi_env env,
 
   bool is_dataview = false;
   if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    void* ignored_data = nullptr;
-    size_t ignored_length = 0;
     napi_value view_ab = nullptr;
-    size_t ignored_offset = 0;
-    if (napi_get_dataview_info(env, value, &ignored_length, &ignored_data, &view_ab, &ignored_offset) == napi_ok &&
+    if (napi_get_dataview_info(env, value, nullptr, nullptr, &view_ab, nullptr) == napi_ok &&
         view_ab != nullptr) {
       bool same = false;
       if (napi_strict_equals(env, view_ab, target_arraybuffer, &same) == napi_ok && same) {

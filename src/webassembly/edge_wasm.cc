@@ -1,5 +1,6 @@
 #include "webassembly/edge_wasm.h"
 
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "internal_binding/helpers.h"
 
@@ -341,71 +342,48 @@ void RejectDeferredWithWasmError(napi_env env, napi_deferred deferred,
   napi_reject_deferred(env, deferred, error);
 }
 
-bool ReadBufferSource(napi_env env, napi_value value, const wasm_byte_t **data,
-                      size_t *length) {
-  if (data == nullptr || length == nullptr)
-    return false;
-  *data = nullptr;
-  *length = 0;
+bool AcquireBufferSource(napi_env env, napi_value value,
+                         EdgeBufferLease *lease) {
+  if (lease == nullptr) return false;
 
   bool is_typed_array = false;
   if (napi_is_typedarray(env, value, &is_typed_array) == napi_ok &&
       is_typed_array) {
     napi_typedarray_type type = napi_uint8_array;
-    size_t element_count = 0;
-    void *raw = nullptr;
-    if (napi_get_typedarray_info(env, value, &type, &element_count, &raw,
+    if (napi_get_typedarray_info(env, value, &type, nullptr, nullptr,
                                  nullptr, nullptr) != napi_ok) {
       return false;
     }
-    size_t element_size = 1;
     switch (type) {
     case napi_int8_array:
     case napi_uint8_array:
     case napi_uint8_clamped_array:
-      element_size = 1;
       break;
     case napi_int16_array:
     case napi_uint16_array:
     case napi_float16_array:
-      element_size = 2;
       break;
     case napi_int32_array:
     case napi_uint32_array:
     case napi_float32_array:
-      element_size = 4;
       break;
     case napi_float64_array:
     case napi_bigint64_array:
     case napi_biguint64_array:
-      element_size = 8;
       break;
     }
-    *data = static_cast<const wasm_byte_t *>(raw);
-    *length = element_count * element_size;
-    return true;
+    return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
   bool is_data_view = false;
   if (napi_is_dataview(env, value, &is_data_view) == napi_ok && is_data_view) {
-    void *raw = nullptr;
-    if (napi_get_dataview_info(env, value, length, &raw, nullptr, nullptr) !=
-        napi_ok) {
-      return false;
-    }
-    *data = static_cast<const wasm_byte_t *>(raw);
-    return true;
+    return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
   bool is_array_buffer = false;
   if (napi_is_arraybuffer(env, value, &is_array_buffer) == napi_ok &&
       is_array_buffer) {
-    void *raw = nullptr;
-    if (napi_get_arraybuffer_info(env, value, &raw, length) != napi_ok) {
-      return false;
-    }
-    *data = static_cast<const wasm_byte_t *>(raw);
-    return true;
+    return lease->Acquire(env, value, unofficial_napi_buffer_access_read);
   }
 
   return false;
@@ -1215,15 +1193,16 @@ napi_value ModuleConstructor(napi_env env, napi_callback_info info) {
     return nullptr;
   }
 
-  const wasm_byte_t *data = nullptr;
-  size_t length = 0;
-  if (!ReadBufferSource(env, argv[0], &data, &length)) {
+  EdgeBufferLease source;
+  if (!AcquireBufferSource(env, argv[0], &source)) {
     napi_throw_type_error(env, nullptr,
                           "WebAssembly.Module expects a BufferSource");
     return nullptr;
   }
-  wasm_byte_vec_t bytes = BorrowedByteVec(data, length);
+  wasm_byte_vec_t bytes = BorrowedByteVec(
+      reinterpret_cast<const wasm_byte_t *>(source.data()), source.size());
   wasm_module_t *module = wasm_module_new(state->store, &bytes);
+  if (!source.Release(false)) return nullptr;
   if (module == nullptr) {
     ThrowWasmError(env, "CompileError",
                    "WebAssembly.Module compilation failed");
@@ -2044,15 +2023,16 @@ napi_value ValidateCallback(napi_env env, napi_callback_info info) {
                           "WebAssembly.validate expects a BufferSource");
     return nullptr;
   }
-  const wasm_byte_t *data = nullptr;
-  size_t length = 0;
-  if (!ReadBufferSource(env, argv[0], &data, &length)) {
+  EdgeBufferLease source;
+  if (!AcquireBufferSource(env, argv[0], &source)) {
     napi_throw_type_error(env, nullptr,
                           "WebAssembly.validate expects a BufferSource");
     return nullptr;
   }
-  wasm_byte_vec_t bytes = BorrowedByteVec(data, length);
+  wasm_byte_vec_t bytes = BorrowedByteVec(
+      reinterpret_cast<const wasm_byte_t *>(source.data()), source.size());
   bool valid = wasm_module_validate(state->store, &bytes);
+  if (!source.Release(false)) return nullptr;
   napi_value out = nullptr;
   napi_get_boolean(env, valid, &out);
   return out;

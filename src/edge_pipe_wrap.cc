@@ -306,7 +306,8 @@ napi_value PipeCtor(napi_env env, napi_callback_info info) {
   wrap->socket_type = socket_type;
   wrap->ipc = socket_type == kPipeIPC;
   uv_loop_t* loop = EdgeGetEnvLoop(env);
-  if (loop == nullptr || uv_pipe_init(loop, &wrap->handle, wrap->ipc ? 1 : 0) != 0) {
+  if (loop == nullptr ||
+      uv_pipe_init(loop, &wrap->handle, wrap->ipc ? 1 : 0) != 0) {
     delete wrap;
     return EdgeStreamBaseUndefined(env);
   }

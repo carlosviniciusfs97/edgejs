@@ -1,4 +1,4 @@
-.PHONY: build build-edge build-edge-quickjs-cli build-wasix build-quickjs-wasix build-napi build-napi-quickjs build-native-v8 build-native-quickjs build-wasix-napi build-wasix-napi-quickjs build-napi-wasmer-cli test-wasix-napi test-wasix-napi-quickjs test-wasix-napi-cli test-wasix-safe-mode test-wasix-quickjs-only test-quickjs-intl test-quickjs-lang test-wasix-quickjs-intl test-intl test-lang test-wasix-v8-only test-wasix-v8-intl test-wasix-v8-lang framework-test-v8-wasix standalone-build-test-v8-wasix test test-only check-portability clean clean-napi-quickjs clean-edge-quickjs-cli clean-dist dist dist-only framework-test framework-test-quickjs-native framework-test-quickjs-wasix framework-test-run framework-test-reset standalone-build-test standalone-build-test-run standalone-build-test-quickjs-native standalone-build-test-quickjs-wasix
+.PHONY: build build-edge build-edge-quickjs-cli build-wasix validate-wasix-imports test-wasix-import-validator build-quickjs-wasix build-napi build-napi-quickjs build-native-v8 build-native-quickjs build-wasix-napi build-wasix-napi-quickjs build-napi-wasmer-cli test-wasix-napi test-wasix-napi-quickjs test-wasix-napi-cli test-wasix-safe-mode test-wasix-quickjs-only test-quickjs-intl test-quickjs-lang test-wasix-quickjs-intl test-intl test-lang test-wasix-v8-only test-wasix-v8-intl test-wasix-v8-lang framework-test-v8-wasix standalone-build-test-v8-wasix test test-only check-portability clean clean-napi-quickjs clean-edge-quickjs-cli clean-dist dist dist-only framework-test framework-test-quickjs-native framework-test-quickjs-wasix framework-test-run framework-test-reset standalone-build-test standalone-build-test-run standalone-build-test-quickjs-native standalone-build-test-quickjs-wasix
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -146,6 +146,11 @@ WASIX_SKIP_UNIX_SOCKET_TESTS := \
   parallel/test-tls-net-connect-prefer-path.js \
   parallel/test-tls-wrap-econnreset-pipe.js \
   parallel/test-http-client-response-domain.js
+# Cluster cannot transfer a bound UDP descriptor to a child under WASI because
+# the platform has no descriptor-passing/SCM_RIGHTS contract. The positive
+# shared-port test is already excluded below; its known_issues counterpart must
+# also be excluded because it waits for that transfer and times out instead of
+# reaching an expected negative result.
 WASIX_SKIP_CLUSTER_FORK_TESTS := \
   parallel/test-dgram-bind-socket-close-before-cluster-reply.js \
   parallel/test-dgram-cluster-close-during-bind.js \
@@ -163,7 +168,8 @@ WASIX_SKIP_CLUSTER_FORK_TESTS := \
   parallel/test-crypto-secure-heap.js \
   parallel/test-domain-top-level-error-handler-throw.js \
   parallel/test-domain-uncaught-exception.js \
-  sequential/test-dgram-bind-shared-ports.js
+  sequential/test-dgram-bind-shared-ports.js \
+  known_issues/test-dgram-bind-shared-ports-after-port-0.js
 WASIX_SKIP_SUBPROCESS_SHELL_TESTS := \
   parallel/test-stream-pipeline-process.js \
   parallel/test-domain-abort-on-uncaught.js \
@@ -338,6 +344,12 @@ build-edge-quickjs-cli:
 
 build-wasix:
 	./wasix/build-wasix.sh
+
+validate-wasix-imports:
+	python3 ./wasix/validate-imported-napi-wasm.py --cmake-cache ./build-wasix/CMakeCache.txt "$(WASIX_EDGEJS_WASM)"
+
+test-wasix-import-validator:
+	python3 ./wasix/test_validate_imported_napi_wasm.py
 
 build-quickjs-wasix:
 	./quickjs-wasm/build.sh

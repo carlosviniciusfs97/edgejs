@@ -416,16 +416,13 @@ napi_value EdgeInstallUrlBinding(napi_env env) {
   }
 
   napi_value components = nullptr;
-  void* components_data = nullptr;
   napi_value components_ab = nullptr;
   if (napi_create_arraybuffer(
-          env, sizeof(uint32_t) * kUrlComponentsLength, &components_data, &components_ab) == napi_ok &&
-      components_data != nullptr && components_ab != nullptr &&
+          env, sizeof(uint32_t) * kUrlComponentsLength, nullptr, &components_ab) == napi_ok &&
+      components_ab != nullptr &&
       napi_create_typedarray(
           env, napi_uint32_array, kUrlComponentsLength, components_ab, 0, &components) == napi_ok &&
       components != nullptr) {
-    auto* values = static_cast<uint32_t*>(components_data);
-    for (uint32_t i = 0; i < kUrlComponentsLength; ++i) values[i] = 0;
     napi_set_named_property(env, binding, "urlComponents", components);
     napi_create_reference(env, components, 1, &state->url_components_ref);
   }

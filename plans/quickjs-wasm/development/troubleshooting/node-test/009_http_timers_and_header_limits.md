@@ -2,7 +2,7 @@
 
 | | | Remarks |
 | --- | --- | --- |
-| **Status** | ▶️ | Planned investigation. |
+| **Status** | 🟢 | Resolved by provider-neutral event-loop checkpoint admission. |
 | **Severity** | Medium | Affects HTTP edge-case tests around timers, warnings, and CLI option propagation. |
 
 Affected tests:
@@ -12,7 +12,7 @@ Affected tests:
 - `parallel/test-http-timeout-client-warning`
 - `parallel/test-set-http-max-http-headers`
 
-## What Is The Issue
+## What Was The Issue
 
 The log shows a mix of HTTP timing and validation failures:
 
@@ -23,24 +23,33 @@ The log shows a mix of HTTP timing and validation failures:
 - The keep-alive timeout race and invalid-character proxy request tests do not
   complete normally in the log.
 
-These failures likely share event-loop/timer and option propagation surfaces
-rather than parser bugs alone.
+The `test-set-http-max-http-headers` failure was not a parser or CLI option
+propagation bug. Edge always used a nonblocking libuv turn and then relied on
+the provider checkpoint to make progress. Embedded V8 and QuickJS implemented
+the host-task checkpoint with a one-millisecond sleep even though no host event
+loop was admitted. Socket callbacks therefore progressed through polling, and
+the many short child/socket phases in this test accumulated roughly 21 seconds
+of latency.
 
-## How Should We Fix It
+## Resolution
 
-Investigate in this order:
+The common checkpoint result now distinguishes two facts:
 
-1. Reproduce `test-http-timeout-client-warning` alone and inspect the emitted
-   warning object's `name`, `code`, message, and stack. Normalize timer overflow
-   warning construction to Node's shape.
-2. Reproduce `test-set-http-max-http-headers` with child process stdio captured.
-   Verify `--max-http-header-size` and `NODE_OPTIONS` propagation through
-   `src/edge_cli.cc` into the HTTP parser configuration.
-3. Reproduce the timeout/hang cases with `EDGE_TRACE_NET=1` and timer tracing.
-   Confirm server close, socket timeout, keep-alive cleanup, and proxy request
-   rejection all schedule and drain their callbacks.
+- the provider still owns runnable work;
+- the provider actually admitted a host-task turn.
 
-Targeted verification:
+The host-JavaScript provider sets the admission bit after its JSPI suspension.
+Embedded providers perform their JavaScript checkpoint synchronously and leave
+the bit clear. When there is no immediate Edge/provider work and no host turn
+was admitted, Edge waits on the existing libuv event source with
+`uv_run(UV_RUN_ONCE)`. The wait is selected from runtime state, not from
+`__wasi__` or a JavaScript-engine conditional.
+
+The HTTP header-limit test was removed from the WASIX slow-test list. The full
+maintained native and serial WASIX compatibility selections pass for both V8
+and QuickJS, including all four tests listed above.
+
+Verification:
 
 ```sh
 build-edge-quickjs-cli/edge test/parallel/test-http-timeout-client-warning.js
@@ -48,3 +57,11 @@ build-edge-quickjs-cli/edge --test-reporter=test/common/test-error-reporter.js -
 build-edge-quickjs-cli/edge test/parallel/test-http-keep-alive-timeout-race-condition.js
 build-edge-quickjs-cli/edge test/client-proxy/test-http-proxy-request-invalid-char-in-url.mjs
 ```
+
+Full acceptance on 2026-08-12:
+
+- native V8: 1,749/1,749;
+- native QuickJS: 1,741/1,741;
+- serial WASIX V8: 1,676/1,676;
+- serial WASIX QuickJS: 1,675/1,675;
+- wasmer-sh browser smoke and Next.js install/dev/preview: passed.

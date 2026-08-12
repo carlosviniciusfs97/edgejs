@@ -14,6 +14,7 @@
 #include <uv.h>
 
 #include "edge_async_wrap.h"
+#include "edge_buffer_lease.h"
 #include "edge_environment.h"
 #include "edge_handle_scope.h"
 #include "edge_runtime.h"
@@ -987,38 +988,16 @@ napi_value ParserExecute(napi_env env, napi_callback_info info) {
     return zero;
   }
   bool is_typed_array = false;
+  bool is_buffer = false;
   napi_is_typedarray(env, argv[0], &is_typed_array);
-  if (!is_typed_array) {
-    bool is_buffer = false;
-    napi_is_buffer(env, argv[0], &is_buffer);
-    if (is_buffer) {
-      void* data = nullptr;
-      size_t total_len = 0;
-      napi_get_buffer_info(env, argv[0], &data, &total_len);
-      uint32_t start = 0;
-      uint32_t len = static_cast<uint32_t>(total_len);
-      if (argc >= 2 && argv[1] != nullptr) napi_get_value_uint32(env, argv[1], &start);
-      if (argc >= 3 && argv[2] != nullptr) napi_get_value_uint32(env, argv[2], &len);
-      if (start > total_len) start = static_cast<uint32_t>(total_len);
-      size_t available = total_len - start;
-      if (len > available) len = static_cast<uint32_t>(available);
-      const char* ptr = static_cast<const char*>(data) + start;
-      const bool restore = p->propagate_callback_exceptions;
-      p->propagate_callback_exceptions = true;
-      napi_value result = ParserExecuteCommon(p, ptr, len);
-      p->propagate_callback_exceptions = restore;
-      return result;
-    }
+  napi_is_buffer(env, argv[0], &is_buffer);
+  if (!is_typed_array && !is_buffer) {
     napi_value zero = nullptr;
     napi_create_uint32(env, 0, &zero);
     return zero;
   }
-  napi_typedarray_type type;
   size_t length = 0;
-  void* data = nullptr;
-  napi_value ab = nullptr;
-  size_t offset = 0;
-  napi_get_typedarray_info(env, argv[0], &type, &length, &data, &ab, &offset);
+  if (!EdgeGetBinaryByteLength(env, argv[0], &length)) return nullptr;
   uint32_t start = 0;
   uint32_t len = static_cast<uint32_t>(length);
   if (argc >= 2 && argv[1] != nullptr) napi_get_value_uint32(env, argv[1], &start);
@@ -1026,11 +1005,20 @@ napi_value ParserExecute(napi_env env, napi_callback_info info) {
   if (start > length) start = static_cast<uint32_t>(length);
   size_t available = length - start;
   if (len > available) len = static_cast<uint32_t>(available);
-  const char* ptr = static_cast<const char*>(data) + start;
+  EdgeBufferLease input;
+  if (!input.Acquire(env,
+                     argv[0],
+                     start,
+                     len,
+                     unofficial_napi_buffer_access_read)) {
+    return nullptr;
+  }
+  const char* ptr = reinterpret_cast<const char*>(input.data());
   const bool restore = p->propagate_callback_exceptions;
   p->propagate_callback_exceptions = true;
   napi_value result = ParserExecuteCommon(p, ptr, len);
   p->propagate_callback_exceptions = restore;
+  if (!input.Release(false)) return nullptr;
   return result;
 }
 

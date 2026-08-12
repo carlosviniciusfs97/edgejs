@@ -55,6 +55,7 @@ canonical home for known incompatibilities once a troubleshooting page exists.
 | [dev_004_v8_napi_lifetime_refactor](dev_004_v8_napi_lifetime_refactor/) | 🟢 | V8 N-API lifetime, handle-scope, reference, wrap, and finalizer refactor implemented and verified against shared V8/QuickJS N-API suites. |
 | [dev_005_build_registry_modularization](dev_005_build_registry_modularization/) | 🟠 | Build modularization and internal binding registry implementation with provider-specific verification still pending. |
 | [dev_006_pnpm_bundle_command](dev_006_pnpm_bundle_command/) | 🟠 | Bundled pnpm 10 command works under QuickJS WASIX with scoped filesystem adaptations; pnpm 11 and external command delegation remain follow-ups. |
+| [dev_007_host_js_imported_napi](dev_007_host_js_imported_napi/) | 🟠 | Engine-free `syrusakbary/edgejs` package contract and artifact validation for a host-JavaScript N-API backend; host integration remains active. |
 
 ## Status Icons
 

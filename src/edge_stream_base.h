@@ -3,11 +3,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include <uv.h>
 
 #include "node_api.h"
+#include "edge_buffer_lease.h"
 #include "edge_stream_listener.h"
 
 struct EdgeStreamBase;
@@ -32,6 +34,7 @@ struct EdgeStreamBase {
   napi_ref wrapper_ref = nullptr;
   napi_ref onread_ref = nullptr;
   napi_ref user_read_buffer_ref = nullptr;
+  std::unique_ptr<EdgeBufferLease> user_read_buffer_lease;
   EdgeStreamListenerState listener_state{};
   EdgeStreamListener default_listener{};
   EdgeStreamListener user_buffer_listener{};
@@ -134,12 +137,11 @@ int EdgeStreamBaseWritevDirect(EdgeStreamBase* base,
                               napi_value chunks,
                               bool* async_out);
 
-size_t EdgeTypedArrayElementSize(napi_typedarray_type type);
 bool EdgeStreamBaseExtractByteSpan(napi_env env,
                                   napi_value value,
+                                  EdgeBufferLease* lease,
                                   const uint8_t** data,
                                   size_t* len,
-                                  bool* refable,
                                   std::string* temp_utf8);
 napi_value EdgeStreamBufferFromWithEncoding(napi_env env,
                                           napi_value value,
