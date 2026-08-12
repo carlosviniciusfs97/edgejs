@@ -22,6 +22,12 @@ JavaScript engine through its WebAssembly/wasm-bindgen integration.
   results, and remaining runtime blockers.
 - [004_buffer_ownership.md](004_buffer_ownership.md): the persistent-control,
   scoped-bulk-data, and synchronous-compression ownership contract.
+- [005_first_principles_architecture.md](005_first_principles_architecture.md):
+  the provider-neutral architecture, implemented stages, and remaining layer
+  boundaries.
+- [006_unofficial_napi_surface_audit.md](006_unofficial_napi_surface_audit.md):
+  the reduction of the unofficial extension surface into typed, stronger
+  provider capabilities.
 - [`SECURITY-HOST-JS-NAPI.md`](../../../../SECURITY-HOST-JS-NAPI.md): deliberately
   deferred security concerns and later exit criteria.
 
