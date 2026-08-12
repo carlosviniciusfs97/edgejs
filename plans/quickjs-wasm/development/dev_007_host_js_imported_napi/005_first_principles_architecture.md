@@ -18,7 +18,7 @@ engine and memory-topology differences belong behind N-API provider contracts.
 
 Files under `lib/` must remain unchanged.
 
-## Implementation status (2026-08-11)
+## Implementation status (2026-08-12)
 
 - [x] Rebased the clean N-API architecture branch on current `main` while
   preserving the host-JavaScript backend on top.
@@ -161,6 +161,16 @@ Files under `lib/` must remain unchanged.
   Node's microtasks-before-ticks rule; no provider-specific scheduling branch
   or promise registry was needed. Provider and upstream Node regressions cover
   both the absent-ID rejection and explicit default-loader success paths.
+- [x] Made the event-loop checkpoint result say whether the provider actually
+  admitted a host-task turn. Host-JavaScript reports that admission after its
+  JSPI suspension; embedded V8 and QuickJS do not manufacture progress with a
+  one-millisecond sleep. When neither JavaScript nor the provider has immediate
+  work, Edge now waits on libuv's native event source with `UV_RUN_ONCE`. This
+  removes the polling latency behind the HTTP header-limit regression without
+  adding a target or provider branch to Edge. Acceptance passed with 69/69 V8
+  and 71/71 QuickJS N-API tests; 1,749/1,749 V8 and 1,741/1,741 QuickJS native
+  Edge tests; 1,676/1,676 V8 and 1,675/1,675 QuickJS serial WASIX tests; the
+  wasmer-sh browser smoke; and the browser Next.js install/dev/preview flow.
 
 ## Architectural boundaries
 

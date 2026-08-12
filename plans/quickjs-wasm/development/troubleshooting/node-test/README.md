@@ -26,7 +26,7 @@ limitations on the individual page for each problem.
 | 🟢 | Low | [006_eventemitter_asyncresource_private_fields.md](006_eventemitter_asyncresource_private_fields.md) | EventEmitterAsyncResource private-field errors |
 | ▶️ | High | [007_fetch_response_body_and_proxy_env.md](007_fetch_response_body_and_proxy_env.md) | Fetch Response body and HTTP proxy env |
 | 🟠 | High | [008_https_proxy_tunnel_errors.md](008_https_proxy_tunnel_errors.md) | HTTPS proxy tunnel errors |
-| ▶️ | Medium | [009_http_timers_and_header_limits.md](009_http_timers_and_header_limits.md) | HTTP timers and header limits |
+| 🟢 | Medium | [009_http_timers_and_header_limits.md](009_http_timers_and_header_limits.md) | HTTP timers and header limits |
 | ▶️ | Low | [010_os_constants_and_userinfo.md](010_os_constants_and_userinfo.md) | OS constants and userInfo errors |
 | ▶️ | Medium | [011_fastutf8stream_sync_wait.md](011_fastutf8stream_sync_wait.md) | FastUtf8Stream synchronous wait |
 | ▶️ | High | [012_explicit_resource_management_syntax.md](012_explicit_resource_management_syntax.md) | Explicit resource management syntax |
