@@ -312,7 +312,7 @@ jobs:
         id: wasmer-provision
         shell: bash
         env:
-          WASMER_SOURCE_REF: ${{ vars.WASMER_V8_SOURCE_REF || '85187a3d8f4a9e937e5e549f87f39b9028484247' }}
+          WASMER_SOURCE_REF: ${{ vars.WASMER_V8_SOURCE_REF || '8510487c45b3ea27de25cd564e07399b585ddb42' }}
           WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
           WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
           EDGE_WASMER_NAPI: "1"
@@ -329,7 +329,7 @@ jobs:
       - name: Provision Wasmer
         shell: bash
         env:
-          WASMER_SOURCE_REF: ${{ vars.WASMER_V8_SOURCE_REF || '85187a3d8f4a9e937e5e549f87f39b9028484247' }}
+          WASMER_SOURCE_REF: ${{ vars.WASMER_V8_SOURCE_REF || '8510487c45b3ea27de25cd564e07399b585ddb42' }}
           WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
           WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
           WASMER_RELEASE_VERSION: ${{ vars.WASMER_RELEASE_VERSION }}
