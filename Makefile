@@ -262,10 +262,13 @@ WASIX_SLOW_WEBCRYPTO_TESTS := \
   parallel/test-webcrypto-webidl.js \
   parallel/test-webcrypto-wrap-unwrap.js
 # CI-only harness timeouts under parallel WASIX load (default harness timeout is 10s).
+# test-set-http-max-http-headers launches four nested Edge processes, so its
+# correct completion exceeds that x86_64 deadline in both WASIX providers.
 WASIX_SLOW_TESTS := \
   parallel/test-crypto-oneshot-hash-xof.js \
   parallel/test-fastutf8stream-flush-sync.js \
   parallel/test-http2-respond-file-with-pipe.js \
+  parallel/test-set-http-max-http-headers.js \
   parallel/test-stringbytes-external.js \
   parallel/test-url-parse-invalid-input.js \
   $(WASIX_SLOW_WEBCRYPTO_TESTS)
