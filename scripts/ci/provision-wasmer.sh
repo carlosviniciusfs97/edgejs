@@ -106,11 +106,18 @@ fetch_source() {
   git -C "$SRC_DIR" remote add origin "https://github.com/${WASMER_SOURCE_REPO}.git"
   git -C "$SRC_DIR" fetch --depth 1 origin "$sha"
   git -C "$SRC_DIR" checkout -q FETCH_HEAD
-  # lib/napi is a workspace member, so cargo needs it present even when the
-  # build does not enable its feature. Wild is now the crates.io `libwild`
-  # dependency rather than a Wasmer submodule. The test-suite submodules are
-  # not needed.
-  git -C "$SRC_DIR" -c protocol.version=2 submodule update --init --depth 1 lib/napi
+
+  # These libraries are workspace members in the Wasmer revisions which carry
+  # them as submodules. Newer revisions resolve Wild from crates.io instead, so
+  # use the checked-out revision's metadata rather than assuming either layout.
+  local submodule_path
+  for submodule_path in lib/napi lib/wild; do
+    if git -C "$SRC_DIR" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null |
+        awk '{print $2}' | grep -Fqx -- "$submodule_path"; then
+      git -C "$SRC_DIR" -c protocol.version=2 submodule update \
+        --init --recursive --depth 1 "$submodule_path"
+    fi
+  done
 }
 
 # Setup mirrored from wasmer's own Builds workflow (.github/workflows/build.yml
