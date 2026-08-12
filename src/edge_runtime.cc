@@ -1402,14 +1402,26 @@ napi_status DrainProcessTickCallback(napi_env env) {
 // checkpoint in the same outer-loop turn.
 napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
                                                 bool has_runnable_work,
-                                                bool* has_pending_provider_work = nullptr) {
+                                                bool* has_pending_provider_work = nullptr,
+                                                bool* host_tasks_admitted = nullptr) {
+  uint32_t checkpoint_state = unofficial_napi_event_loop_checkpoint_state_none;
   napi_status status =
       unofficial_napi_event_loop_checkpoint(
           env,
           unofficial_napi_event_loop_checkpoint_host_tasks,
           has_runnable_work,
-          has_pending_provider_work);
+          &checkpoint_state);
   if (status != napi_ok) return status;
+  if (has_pending_provider_work != nullptr) {
+    *has_pending_provider_work =
+        (checkpoint_state &
+         unofficial_napi_event_loop_checkpoint_state_pending_provider_work) != 0;
+  }
+  if (host_tasks_admitted != nullptr) {
+    *host_tasks_admitted =
+        (checkpoint_state &
+         unofficial_napi_event_loop_checkpoint_state_host_tasks_admitted) != 0;
+  }
 
   bool has_tick_scheduled = false;
   bool has_rejection_to_warn = false;
@@ -1667,8 +1679,13 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     }
     const bool has_runnable_work =
         loop != nullptr && uv_backend_timeout(loop) == 0;
-    const napi_status checkpoint_status =
-        CompleteProviderEventLoopCheckpoint(env, has_runnable_work, nullptr);
+    bool has_pending_provider_work = false;
+    bool host_tasks_admitted = false;
+    const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
+        env,
+        has_runnable_work,
+        &has_pending_provider_work,
+        &host_tasks_admitted);
     if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider checkpoint while waiting for the top-level Promise";
@@ -1679,6 +1696,13 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
         HandlePendingExceptionAfterLoopStep(env, error_out);
     if (checkpoint_async_status >= 0) {
       return checkpoint_async_status;
+    }
+    if (!host_tasks_admitted &&
+        !has_runnable_work &&
+        !has_pending_provider_work &&
+        loop != nullptr &&
+        uv_loop_alive(loop) != 0) {
+      (void)uv_run(loop, UV_RUN_ONCE);
     }
   }
 
@@ -1905,9 +1929,9 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     }
     uv_metrics_t metrics_before{};
     (void)uv_metrics_info(loop, &metrics_before);
-    // Every provider uses the same nonblocking libuv turn. Waiting belongs to
-    // the provider checkpoint below: embedded providers wait synchronously,
-    // while host JavaScript suspends through JSPI.
+    // Start every turn nonblocking. The checkpoint reports whether it admitted
+    // an asynchronous host task turn; otherwise Edge waits on libuv's native
+    // event source below instead of polling it with scheduler sleeps.
     uv_run(loop, UV_RUN_NOWAIT);
     if (IsEnvironmentExitRequested(env)) {
       break;
@@ -1923,8 +1947,12 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     const bool has_runnable_work =
         metrics_after.events != metrics_before.events || uv_backend_timeout(loop) == 0;
     bool has_pending_provider_work = false;
+    bool host_tasks_admitted = false;
     const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
-        env, has_runnable_work, &has_pending_provider_work);
+        env,
+        has_runnable_work,
+        &has_pending_provider_work,
+        &host_tasks_admitted);
     if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider event-loop checkpoint";
@@ -1947,6 +1975,12 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     bool more = uv_loop_alive(loop) != 0 || has_pending_provider_work;
     if (more) {
       idle_drain_turns = 0;
+      if (!host_tasks_admitted &&
+          !has_runnable_work &&
+          !has_pending_provider_work &&
+          uv_loop_alive(loop) != 0) {
+        (void)uv_run(loop, UV_RUN_ONCE);
+      }
       continue;
     }
 
