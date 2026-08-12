@@ -3303,6 +3303,7 @@ napi_value CryptoCipherTransformAead(napi_env env, napi_callback_info info) {
   CryptoByteSpan input;
   CryptoByteSpan aad;
   CryptoByteSpan auth_tag;
+  bool auth_tag_provided = false;
   if (!key.Acquire(env, argv[1]) ||
       !iv.Acquire(env, argv[2]) ||
       !input.Acquire(env, argv[3]) ||
@@ -3320,6 +3321,7 @@ napi_value CryptoCipherTransformAead(napi_env env, napi_callback_info info) {
         ThrowError(env, "ERR_INVALID_ARG_TYPE", "auth tag must be a Buffer");
         return nullptr;
       }
+      auth_tag_provided = true;
     }
   }
   int32_t requested_tag_len = 16;
@@ -3344,7 +3346,7 @@ napi_value CryptoCipherTransformAead(napi_env env, napi_callback_info info) {
   int ok = EVP_CipherInit_ex(ctx, cipher, nullptr, nullptr, nullptr, decrypt ? 0 : 1);
   if (ok == 1) ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, static_cast<int>(iv.size()), nullptr);
   if (ok == 1 && (is_ccm || is_ocb) && requested_tag_len > 0) {
-    void* tag_ptr = (is_ccm && decrypt && auth_tag.size() != 0)
+    void* tag_ptr = (is_ccm && decrypt && auth_tag_provided)
                         ? const_cast<uint8_t*>(auth_tag.data())
                         : nullptr;
     ok = EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, requested_tag_len, tag_ptr);
@@ -3355,7 +3357,7 @@ napi_value CryptoCipherTransformAead(napi_env env, napi_callback_info info) {
   if (ok == 1 && aad.size() > 0) {
     ok = EVP_CipherUpdate(ctx, nullptr, &tmp_len, aad.data(), static_cast<int>(aad.size()));
   }
-  if (ok == 1 && decrypt && auth_tag.size() != 0 && !is_ccm) {
+  if (ok == 1 && decrypt && auth_tag_provided && !is_ccm) {
     ok = EVP_CIPHER_CTX_ctrl(ctx,
                              EVP_CTRL_AEAD_SET_TAG,
                              static_cast<int>(auth_tag.size()),

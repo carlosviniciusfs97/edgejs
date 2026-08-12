@@ -1448,8 +1448,55 @@ napi_value EdgeCreateSharedTypedArray(napi_env env,
       direct != nullptr && (length == 0 || *data_out != nullptr)) {
     return direct;
   }
+
+  // The extension is an optimization for providers that can expose guest
+  // memory directly. Standard N-API remains the provider-neutral fallback;
+  // providers with copied ArrayBuffers keep that persistent mapping coherent
+  // at their event-loop checkpoint.
   *data_out = nullptr;
-  return nullptr;
+  size_t element_size = 0;
+  switch (type) {
+    case napi_int8_array:
+    case napi_uint8_array:
+    case napi_uint8_clamped_array:
+      element_size = 1;
+      break;
+    case napi_int16_array:
+    case napi_uint16_array:
+    case napi_float16_array:
+      element_size = 2;
+      break;
+    case napi_int32_array:
+    case napi_uint32_array:
+    case napi_float32_array:
+      element_size = 4;
+      break;
+    case napi_float64_array:
+    case napi_bigint64_array:
+    case napi_biguint64_array:
+      element_size = 8;
+      break;
+    default:
+      return nullptr;
+  }
+  if (length > std::numeric_limits<size_t>::max() / element_size) return nullptr;
+
+  napi_value arraybuffer = nullptr;
+  if (napi_create_arraybuffer(
+          env, length * element_size, data_out, &arraybuffer) != napi_ok ||
+      arraybuffer == nullptr || (length != 0 && *data_out == nullptr)) {
+    *data_out = nullptr;
+    return nullptr;
+  }
+
+  napi_value array = nullptr;
+  if (napi_create_typedarray(
+          env, type, length, arraybuffer, 0, &array) != napi_ok ||
+      array == nullptr) {
+    *data_out = nullptr;
+    return nullptr;
+  }
+  return array;
 }
 
 napi_value EdgeCreateSharedInt32Array(napi_env env,

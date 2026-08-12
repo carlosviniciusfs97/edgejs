@@ -172,6 +172,75 @@ Files under `lib/` must remain unchanged.
   Edge tests; 1,676/1,676 V8 and 1,675/1,675 QuickJS serial WASIX tests; the
   wasmer-sh browser smoke; and the browser Next.js install/dev/preview flow.
 
+## PR review closure plan (2026-08-12)
+
+The technical review of Edge.js PR #146 and N-API PR #56 exposed two missing
+invariants which the existing happy-path suites did not exercise:
+
+1. Host-JavaScript values which grant guest pointer access need an explicit
+   lifetime owner. Callback-frame snapshots, persistent ArrayBuffer backing,
+   buffer leases, and guest finalizers are different lifetime classes and must
+   not share stack-offset bookkeeping.
+2. Work may keep Edge alive only when it owns an event source capable of waking
+   the loop. A provider's pending-work bit is not permission to spin, and a
+   blocking libuv turn must remain bounded by the configured watchdog.
+
+Implementation order:
+
+- [x] Give host-JS callback mappings stable frame identities so overlapping
+  JSPI completions release only their own allocations.
+- [x] Implement deferred guest finalizer dispatch for every N-API operation
+  which accepts a finalizer, and tie persistent guest allocations to the host
+  value or environment which owns them.
+- [x] Centralize host-JS guest-range validation and typed-array byte sizing;
+  fix external-buffer ABI order and `napi_external` classification.
+- [x] Make Edge idle waiting event-driven: unresolved top-level await with no
+  wake source reaches Node's unsettled-await handling, the loop watchdog owns a
+  real wake event, and provider work without a wake source cannot busy-spin.
+- [x] Preserve stream error delivery, zlib source identity and output-tail
+  contents, filesystem range/coercion semantics, SharedArrayBuffer crypto
+  support, and explicit zero-length auth-tag presence.
+- [x] Keep the guest-backed control-block extension as the direct-memory fast
+  path, with standard ArrayBuffer/TypedArray creation as the provider-neutral
+  fallback. The host-JS provider gives fallback buffers persistent guest
+  mappings and refreshes/publishes them only at explicit checkpoints, so Edge
+  does not need a provider branch or an incoherent transient pointer.
+
+Closure validation:
+
+- Native V8 focused regressions pass for filesystem range/coercion, zlib
+  source identity/output tails, SharedArrayBuffer crypto, and the event-loop
+  watchdog. The complete N-API V8 suite passes 70/71; the one failure is the
+  pre-existing deep-freeze enumerability baseline, while the bytecode host-ID
+  regression which previously failed CI passes.
+- The rebuilt host-JS N-API contract suite passes the new external-buffer ABI,
+  typed-array sizing, outermost escaped-scope, guest-length rejection,
+  deferred finalizer, environment-isolation, and lease cases.
+- The engine-free Edge WASIX artifact builds with exnref and passes its import
+  audit (110 N-API imports and 91 extensions). Through the local Wasmer SDK
+  branch, `node --version`, the HTTP maximum-header regression, and the guest
+  finalizer memory stress test pass; the warmed HTTP test completes in about
+  0.26 seconds. The complete four-worker V8-WASIX selection passed 1,674 tests
+  and exposed two contention failures (one UDP timeout and one HTTP server
+  startup race); both passed immediately in isolated reruns.
+- The supported native Node compatibility harness passes 1,749/1,749 tests.
+- wasmer-sh builds against the rebuilt local SDK and passes its browser smoke
+  suite with the local Edge WEBC. The dedicated untouched Next.js regression
+  completes `pnpm install`, reaches the development server, receives HTTP 200,
+  and renders the preview in 47.4 seconds total (20.8 seconds install, 2.0
+  seconds dev-ready). A combined optional Next + general-preview run exposed a
+  later Node-preview lifecycle flake after the Next and PHP servers had both
+  succeeded; the ordinary browser suite and dedicated Next suite each pass in
+  isolation, so this is not an Edge execution failure.
+- Edge CI keeps one repository-level `WASMER_SOURCE_REF`; the V8 lane no longer
+  carries an independently drifting hardcoded Wasmer revision. Personal Wasmer
+  publication remains outside the mergeable package metadata.
+
+The personal registry publication remains separate from mergeable package
+metadata: repository metadata stays organization-owned, while experimental
+publishing uses the Wasmer CLI namespace/name/version overrides. The `edge`,
+`node`, and `edgejs` command aliases remain package functionality.
+
 ## Architectural boundaries
 
 There are three independent concerns. They must not be represented by one

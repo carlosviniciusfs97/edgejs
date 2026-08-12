@@ -1653,15 +1653,57 @@ bool ApplyUnsettledTopLevelAwaitExitCodeIfNeeded(napi_env env) {
   return SetProcessExitCodeIfNeeded(env, kExitCodeUnsettledTopLevelAwait, true);
 }
 
+void EdgeLoopWakeTimer(uv_timer_t* /*timer*/) {}
+
+int RunUvOnceWithDeadline(uv_loop_t* loop, int64_t max_wait_ms) {
+  if (loop == nullptr) return UV_EINVAL;
+  if (max_wait_ms <= 0) return uv_run(loop, UV_RUN_ONCE);
+
+  uv_timer_t wake_timer{};
+  int status = uv_timer_init(loop, &wake_timer);
+  if (status != 0) return status;
+  status = uv_timer_start(&wake_timer,
+                          EdgeLoopWakeTimer,
+                          static_cast<uint64_t>(max_wait_ms),
+                          0);
+  if (status == 0) {
+    (void)uv_run(loop, UV_RUN_ONCE);
+  }
+  (void)uv_timer_stop(&wake_timer);
+  uv_close(reinterpret_cast<uv_handle_t*>(&wake_timer), nullptr);
+  (void)uv_run(loop, UV_RUN_NOWAIT);
+  return status;
+}
+
 int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* error_out) {
   if (!IsPromisePending(env, value)) return -1;
 
   uv_loop_t* loop = EdgeGetEnvLoop(env);
+  int64_t loop_timeout_ms = 0;
+  if (const char* timeout_env = std::getenv("EDGE_LOOP_TIMEOUT_MS")) {
+    char* end = nullptr;
+    const long long parsed = std::strtoll(timeout_env, &end, 10);
+    if (end != timeout_env && parsed > 0) loop_timeout_ms = parsed;
+  }
+  const auto loop_start = std::chrono::steady_clock::now();
   while (true) {
     // Per-turn scope: each wait iteration mints promise-inspection values that
     // must not accumulate in the caller's scope for the life of the wait.
     edge::HandleScope turn_scope(env);
     if (!turn_scope.is_open() || !IsPromisePending(env, value)) break;
+    int64_t remaining_ms = 0;
+    if (loop_timeout_ms > 0) {
+      const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - loop_start)
+                                  .count();
+      if (elapsed_ms >= loop_timeout_ms) {
+        if (error_out != nullptr) {
+          *error_out = "EDGE loop timeout while waiting for the top-level Promise";
+        }
+        return 1;
+      }
+      remaining_ms = std::max<int64_t>(1, loop_timeout_ms - elapsed_ms);
+    }
     if (loop != nullptr) {
       (void)uv_run(loop, UV_RUN_NOWAIT);
     }
@@ -1697,12 +1739,23 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     if (checkpoint_async_status >= 0) {
       return checkpoint_async_status;
     }
+    const bool loop_alive = loop != nullptr && uv_loop_alive(loop) != 0;
+    if (!loop_alive && !has_pending_provider_work) {
+      // A pending top-level Promise with no event-loop or provider work is an
+      // unsettled TLA, not work that can make progress by spinning here.
+      break;
+    }
+    if (!loop_alive && has_pending_provider_work && !host_tasks_admitted) {
+      if (error_out != nullptr) {
+        *error_out = "Provider reported pending work without admitting a host task";
+      }
+      return 1;
+    }
     if (!host_tasks_admitted &&
         !has_runnable_work &&
         !has_pending_provider_work &&
-        loop != nullptr &&
-        uv_loop_alive(loop) != 0) {
-      (void)uv_run(loop, UV_RUN_ONCE);
+        loop_alive) {
+      (void)RunUvOnceWithDeadline(loop, remaining_ms);
     }
   }
 
@@ -1753,37 +1806,6 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     if (end != timeout_env && parsed > 0) loop_timeout_ms = parsed;
   }
   const auto loop_start = std::chrono::steady_clock::now();
-
-  struct TimeoutCleanupState {
-    int killed_processes = 0;
-    int closed_handles = 0;
-  };
-  auto cleanup_handles_on_timeout = [&](TimeoutCleanupState* state) {
-    if (state == nullptr) return;
-    uv_walk(
-        loop,
-        [](uv_handle_t* h, void* arg) {
-          if (h == nullptr || arg == nullptr) return;
-          auto* st = static_cast<TimeoutCleanupState*>(arg);
-          if (uv_handle_get_type(h) == UV_PROCESS) {
-            auto* p = reinterpret_cast<uv_process_t*>(h);
-            if (p->pid > 0) {
-              (void)uv_process_kill(p, SIGKILL);
-            }
-            st->killed_processes += 1;
-          }
-          if (!uv_is_closing(h)) {
-            uv_close(h, [](uv_handle_t* /*handle*/) {});
-            st->closed_handles += 1;
-          }
-        },
-        state);
-    // Best effort drain to allow close callbacks/process exits to run.
-    for (int i = 0; i < 8; i++) {
-      if (uv_run(loop, UV_RUN_NOWAIT) == 0) break;
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-  };
 
   auto active_handles_summary = [&](std::string* out) {
     if (out == nullptr) return;
@@ -1912,16 +1934,9 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       if (elapsed_ms >= loop_timeout_ms) {
         std::string handles;
         active_handles_summary(&handles);
-        TimeoutCleanupState cleanup_state;
-        cleanup_handles_on_timeout(&cleanup_state);
         if (error_out != nullptr) {
           *error_out = "EDGE loop timeout after " + std::to_string(elapsed_ms) + "ms";
           if (!handles.empty()) *error_out += "; active handles: " + handles;
-          if (cleanup_state.killed_processes > 0 || cleanup_state.closed_handles > 0) {
-            *error_out += "; timeout cleanup: killed_processes=" +
-                          std::to_string(cleanup_state.killed_processes) +
-                          ", closed_handles=" + std::to_string(cleanup_state.closed_handles);
-          }
         }
         uv_stop(loop);
         return 1;
@@ -1976,10 +1991,22 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     if (more) {
       idle_drain_turns = 0;
       if (!host_tasks_admitted &&
-          !has_runnable_work &&
-          !has_pending_provider_work &&
-          uv_loop_alive(loop) != 0) {
-        (void)uv_run(loop, UV_RUN_ONCE);
+          !has_runnable_work) {
+        if (uv_loop_alive(loop) != 0) {
+          int64_t remaining_ms = 0;
+          if (loop_timeout_ms > 0) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - loop_start)
+                                        .count();
+            remaining_ms = std::max<int64_t>(1, loop_timeout_ms - elapsed_ms);
+          }
+          (void)RunUvOnceWithDeadline(loop, remaining_ms);
+        } else if (has_pending_provider_work) {
+          if (error_out != nullptr) {
+            *error_out = "Provider reported pending work without admitting a host task";
+          }
+          return 1;
+        }
       }
       continue;
     }
@@ -1990,8 +2017,12 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       idle_drain_turns++;
       (void)EdgeRuntimePlatformDrainTasks(env);
       bool has_pending_idle_provider_work = false;
+      bool idle_host_tasks_admitted = false;
       const napi_status idle_checkpoint_status = CompleteProviderEventLoopCheckpoint(
-          env, false, &has_pending_idle_provider_work);
+          env,
+          false,
+          &has_pending_idle_provider_work,
+          &idle_host_tasks_admitted);
       if (idle_checkpoint_status != napi_ok &&
           idle_checkpoint_status != napi_pending_exception) {
         if (error_out != nullptr) {
@@ -2002,6 +2033,12 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
       if (async_status >= 0) {
         return async_status;
+      }
+      if (!idle_host_tasks_admitted) {
+        // Native providers do not own a host task queue. Pace the grace
+        // window with libuv itself so background platform work gets a real
+        // scheduling interval without a CPU polling loop.
+        (void)RunUvOnceWithDeadline(loop, 1);
       }
       if (uv_loop_alive(loop) != 0 || has_pending_idle_provider_work) {
         idle_drain_turns = 0;

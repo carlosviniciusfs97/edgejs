@@ -837,6 +837,7 @@ struct CompressionHandle {
   // asynchronous write, error, or close releases it.
   void* sync_input_access_data = nullptr;
   unofficial_napi_buffer_lease sync_input_lease = nullptr;
+  napi_ref sync_input_source_ref = nullptr;
   uint32_t sync_input_base_offset = 0;
   uint32_t sync_input_total_length = 0;
   uint32_t sync_input_next_offset = 0;
@@ -918,6 +919,7 @@ void ClearSyncInputSnapshot(CompressionHandle* handle) {
   }
   handle->sync_input_access_data = nullptr;
   handle->sync_input_lease = nullptr;
+  DeleteRefIfPresent(handle->env, &handle->sync_input_source_ref);
   handle->sync_input_base_offset = 0;
   handle->sync_input_total_length = 0;
   handle->sync_input_next_offset = 0;
@@ -925,14 +927,23 @@ void ClearSyncInputSnapshot(CompressionHandle* handle) {
 }
 
 bool ReuseSyncInputSnapshot(CompressionHandle* handle,
+                            napi_value input_value,
                             uint32_t input_offset,
                             uint32_t input_length,
                             ByteSpan* span) {
   if (handle == nullptr || span == nullptr ||
       handle->sync_input_access_data == nullptr ||
       handle->sync_input_lease == nullptr ||
+      handle->sync_input_source_ref == nullptr ||
       input_offset != handle->sync_input_next_offset ||
       input_length != handle->sync_input_remaining) {
+    return false;
+  }
+  napi_value retained_input = GetRefValue(handle->env, handle->sync_input_source_ref);
+  bool same_input = false;
+  if (retained_input == nullptr ||
+      napi_strict_equals(handle->env, retained_input, input_value, &same_input) != napi_ok ||
+      !same_input) {
     return false;
   }
   const uint32_t relative_offset = input_offset - handle->sync_input_base_offset;
@@ -947,17 +958,24 @@ bool ReuseSyncInputSnapshot(CompressionHandle* handle,
 }
 
 bool RetainSyncInputSnapshot(CompressionHandle* handle,
+                             napi_value input_value,
                              const ByteSpan& access,
                              uint32_t input_offset,
                              uint32_t input_length,
                              uint32_t remaining) {
-  if (handle == nullptr || access.data == nullptr ||
+  if (handle == nullptr || input_value == nullptr || access.data == nullptr ||
       access.lease == nullptr ||
       remaining == 0 || remaining > input_length) {
     return false;
   }
+  napi_ref source_ref = nullptr;
+  if (napi_create_reference(handle->env, input_value, 1, &source_ref) != napi_ok ||
+      source_ref == nullptr) {
+    return false;
+  }
   handle->sync_input_access_data = access.data;
   handle->sync_input_lease = access.lease;
+  handle->sync_input_source_ref = source_ref;
   handle->sync_input_base_offset = input_offset;
   handle->sync_input_total_length = input_length;
   handle->sync_input_next_offset = input_offset + (input_length - remaining);
@@ -1821,7 +1839,7 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
   if (!IsNullOrUndefined(env, argv[1])) {
     if (!async) {
       reused_sync_input =
-          ReuseSyncInputSnapshot(handle, in_off, in_len, &input);
+          ReuseSyncInputSnapshot(handle, argv[1], in_off, in_len, &input);
       if (!reused_sync_input) ClearSyncInputSnapshot(handle);
     } else {
       ClearSyncInputSnapshot(handle);
@@ -1835,13 +1853,17 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
                              &input)) {
       return invalid_write();
     }
+  } else {
+    // A pure flush cannot continue a prior input snapshot. Release it before
+    // acquiring output so stale source identity/ranges never remain armed.
+    ClearSyncInputSnapshot(handle);
   }
   ByteSpan output;
   if (!AcquireBufferAccess(env,
                            argv[4],
                            out_off,
                            out_len,
-                           unofficial_napi_buffer_access_write,
+                           unofficial_napi_buffer_access_readwrite,
                            &output)) {
     if (reused_sync_input) {
       ClearSyncInputSnapshot(handle);
@@ -1889,7 +1911,7 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
     } else if (!IsNullOrUndefined(env, argv[1])) {
       if (!continues_with_same_input ||
           !RetainSyncInputSnapshot(
-              handle, input, in_off, in_len, remaining_input)) {
+              handle, argv[1], input, in_off, in_len, remaining_input)) {
         (void)ReleaseBufferAccess(env, input.lease, false);
       }
     }

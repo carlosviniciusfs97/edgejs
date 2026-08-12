@@ -561,6 +561,27 @@ size_t ByteLengthOfValue(napi_env env, napi_value value) {
   return 0;
 }
 
+napi_value NormalizeIoBuffer(napi_env env,
+                             napi_value value,
+                             size_t* byte_length) {
+  if (byte_length == nullptr) return nullptr;
+  if (EdgeGetBinaryByteLength(env, value, byte_length)) return value;
+  napi_value buffer = BufferFromValue(env, value, nullptr);
+  if (buffer == nullptr || IsUndefined(env, buffer) ||
+      !EdgeGetBinaryByteLength(env, buffer, byte_length)) {
+    return nullptr;
+  }
+  return buffer;
+}
+
+bool ClampIoRange(size_t total_length,
+                  size_t offset,
+                  size_t* length) {
+  if (length == nullptr || offset > total_length) return false;
+  *length = std::min(*length, total_length - offset);
+  return true;
+}
+
 napi_value ConvertNameArrayToEncoding(napi_env env, napi_value names, napi_value encoding_value) {
   napi_valuetype encoding_type = napi_undefined;
   if (names == nullptr ||
@@ -3326,13 +3347,26 @@ napi_value FsRead(napi_env env, napi_callback_info info) {
     napi_get_value_uint32(env, argv[2], &offset_u32);
     offset = offset_u32;
   }
-  size_t length = ByteLengthOfValue(env, argc >= 2 ? argv[1] : nullptr);
+  size_t total_length = 0;
+  napi_value io_buffer = NormalizeIoBuffer(
+      env, argc >= 2 ? argv[1] : nullptr, &total_length);
+  size_t length = total_length;
   if (argc >= 4 && argv[3] != nullptr) {
     uint32_t length_u32 = 0;
     napi_get_value_uint32(env, argv[3], &length_u32);
     length = length_u32;
   } else if (length >= offset) {
     length -= offset;
+  }
+  if (io_buffer == nullptr || !ClampIoRange(total_length, offset, &length)) {
+    napi_value error = CreateUvExceptionValue(env, UV_EINVAL, "read");
+    if (req_kind == ReqKind::kPromise) return MakeRejectedPromise(env, error);
+    if (req_kind == ReqKind::kCallback) {
+      CompleteReq(env, req_kind, req, oncomplete, error, Undefined(env));
+      return Undefined(env);
+    }
+    napi_throw(env, error);
+    return nullptr;
   }
   const int64_t position = GetInt64OrDefault(env, argc >= 5 ? argv[4] : nullptr, -1);
 
@@ -3358,7 +3392,7 @@ napi_value FsRead(napi_env env, napi_callback_info info) {
       void* managed_data = nullptr;
       const bool extracted = unofficial_napi_acquire_buffer_lease(
                                  env,
-                                 argv[1],
+                                 io_buffer,
                                  offset,
                                  length,
                                  unofficial_napi_buffer_access_readwrite,
@@ -3401,7 +3435,7 @@ napi_value FsRead(napi_env env, napi_callback_info info) {
   unofficial_napi_buffer_lease lease = nullptr;
   const bool extracted = unofficial_napi_acquire_buffer_lease(
                              env,
-                             argv[1],
+                             io_buffer,
                              offset,
                              length,
                              unofficial_napi_buffer_access_readwrite,
@@ -3655,6 +3689,19 @@ napi_value FsWriteBuffer(napi_env env, napi_callback_info info) {
   napi_value ctx = argc >= 7 ? argv[6] : nullptr;
   napi_value oncomplete = nullptr;
   ReqKind req_kind = ParseReq(env, req, &oncomplete);
+  size_t total_length = 0;
+  napi_value io_buffer = NormalizeIoBuffer(
+      env, argc >= 2 ? argv[1] : nullptr, &total_length);
+  if (io_buffer == nullptr) {
+    napi_value error = CreateUvExceptionValue(env, UV_EINVAL, "write");
+    if (req_kind == ReqKind::kPromise) return MakeRejectedPromise(env, error);
+    if (req_kind == ReqKind::kCallback) {
+      CompleteReq(env, req_kind, req, oncomplete, error, Undefined(env));
+      return Undefined(env);
+    }
+    napi_throw(env, error);
+    return nullptr;
+  }
 
   if (req_kind != ReqKind::kNone) {
     int32_t fd = validated_fd;
@@ -3664,13 +3711,19 @@ napi_value FsWriteBuffer(napi_env env, napi_callback_info info) {
       napi_get_value_uint32(env, argv[2], &offset_u32);
       offset = offset_u32;
     }
-    size_t length = ByteLengthOfValue(env, argc >= 2 ? argv[1] : nullptr);
+    size_t length = total_length;
     if (argc >= 4 && argv[3] != nullptr) {
       uint32_t length_u32 = 0;
       napi_get_value_uint32(env, argv[3], &length_u32);
       length = length_u32;
     } else if (length >= offset) {
       length -= offset;
+    }
+    if (!ClampIoRange(total_length, offset, &length)) {
+      napi_value error = CreateUvExceptionValue(env, UV_EINVAL, "write");
+      if (req_kind == ReqKind::kPromise) return MakeRejectedPromise(env, error);
+      CompleteReq(env, req_kind, req, oncomplete, error, Undefined(env));
+      return Undefined(env);
     }
     const int64_t position = GetInt64OrDefault(env, argc >= 5 ? argv[4] : nullptr, -1);
     if (length == 0) {
@@ -3693,7 +3746,7 @@ napi_value FsWriteBuffer(napi_env env, napi_callback_info info) {
       void* managed_data = nullptr;
       const bool extracted = unofficial_napi_acquire_buffer_lease(
                                  env,
-                                 argv[1],
+                                 io_buffer,
                                  offset,
                                  length,
                                  unofficial_napi_buffer_access_read,
@@ -3733,13 +3786,17 @@ napi_value FsWriteBuffer(napi_env env, napi_callback_info info) {
     napi_get_value_uint32(env, argv[2], &offset_u32);
     offset = offset_u32;
   }
-  size_t length = ByteLengthOfValue(env, argc >= 2 ? argv[1] : nullptr);
+  size_t length = total_length;
   if (argc >= 4 && argv[3] != nullptr) {
     uint32_t length_u32 = 0;
     napi_get_value_uint32(env, argv[3], &length_u32);
     length = length_u32;
   } else if (length >= offset) {
     length -= offset;
+  }
+  if (!ClampIoRange(total_length, offset, &length)) {
+    napi_throw(env, CreateUvExceptionValue(env, UV_EINVAL, "write"));
+    return nullptr;
   }
   const int64_t position = GetInt64OrDefault(env, argc >= 5 ? argv[4] : nullptr, -1);
   if (length == 0) {
@@ -3751,7 +3808,7 @@ napi_value FsWriteBuffer(napi_env env, napi_callback_info info) {
   unofficial_napi_buffer_lease lease = nullptr;
   const bool extracted = unofficial_napi_acquire_buffer_lease(
                              env,
-                             argv[1],
+                             io_buffer,
                              offset,
                              length,
                              unofficial_napi_buffer_access_read,
@@ -3895,7 +3952,9 @@ napi_value FsWriteBuffers(napi_env env, napi_callback_info info) {
       all_chunks_empty = false;
       break;
     }
-    if (ByteLengthOfValue(env, chunk) != 0) {
+    size_t chunk_length = 0;
+    if (NormalizeIoBuffer(env, chunk, &chunk_length) == nullptr ||
+        chunk_length != 0) {
       all_chunks_empty = false;
       break;
     }
@@ -3940,11 +3999,16 @@ napi_value FsWriteBuffers(napi_env env, napi_callback_info info) {
           ok = false;
           break;
         }
-        const size_t byte_length = ByteLengthOfValue(env, chunk);
+        size_t byte_length = 0;
+        napi_value io_chunk = NormalizeIoBuffer(env, chunk, &byte_length);
+        if (io_chunk == nullptr) {
+          ok = false;
+          break;
+        }
         void* managed_data = nullptr;
         const bool extracted = unofficial_napi_acquire_buffer_lease(
                                    env,
-                                   chunk,
+                                   io_chunk,
                                    0,
                                    byte_length,
                                    unofficial_napi_buffer_access_read,
@@ -3988,11 +4052,19 @@ napi_value FsWriteBuffers(napi_env env, napi_callback_info info) {
       napi_throw(env, CreateUvExceptionValue(env, UV_EINVAL, "write"));
       return nullptr;
     }
-    const size_t chunk_len = ByteLengthOfValue(env, chunk);
+    size_t chunk_len = 0;
+    napi_value io_chunk = NormalizeIoBuffer(env, chunk, &chunk_len);
+    if (io_chunk == nullptr) {
+      for (uint32_t release = 0; release < i; ++release) {
+        (void)unofficial_napi_release_buffer_lease(env, leases[release], false);
+      }
+      napi_throw(env, CreateUvExceptionValue(env, UV_EINVAL, "write"));
+      return nullptr;
+    }
     void* managed_data = nullptr;
     const bool extracted = unofficial_napi_acquire_buffer_lease(
                                env,
-                               chunk,
+                               io_chunk,
                                0,
                                chunk_len,
                                unofficial_napi_buffer_access_read,

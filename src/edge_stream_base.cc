@@ -649,6 +649,10 @@ bool DefaultOnRead(EdgeStreamListener* listener, ssize_t nread, const uv_buf_t* 
     return true;
   }
   if (data != nullptr) free(const_cast<char*>(data));
+  // Never turn a provider conversion failure into a successful, empty read.
+  // Surface it through the same onread error channel used by libuv so the JS
+  // stream can stop or retry instead of waiting forever for a dropped chunk.
+  (void)CallJsOnRead(base, UV_ENOBUFS, nullptr, 0, nullptr);
   return true;
 }
 

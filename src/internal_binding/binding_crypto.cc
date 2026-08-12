@@ -232,7 +232,10 @@ bool GetBinaryByteLength(napi_env env, napi_value value, size_t* length) {
   if (napi_is_arraybuffer(env, value, &matches) == napi_ok && matches) {
     return napi_get_arraybuffer_info(env, value, nullptr, length) == napi_ok;
   }
-  return false;
+  // Standard N-API has no SharedArrayBuffer predicate. Providers expose its
+  // byte length through the ArrayBuffer-info operation, matching the common
+  // lease helper's BufferSource contract.
+  return napi_get_arraybuffer_info(env, value, nullptr, length) == napi_ok;
 }
 
 std::vector<uint8_t> ValueToBytes(napi_env env, napi_value value) {
