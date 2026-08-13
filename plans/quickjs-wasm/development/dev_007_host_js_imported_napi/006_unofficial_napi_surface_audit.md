@@ -9,8 +9,8 @@
 ## Implementation status
 
 The first implementation milestone reduced the exported header from 106 to 90
-operations. Phase 1 is complete. Six of the seven mechanical Phase 2 folds
-are also complete, reducing the current surface to 89 operations:
+operations. Phase 1 and all seven mechanical Phase 2 folds are complete,
+reducing the current surface to 88 operations:
 
 - environment creation is one operation with nullable options;
 - environment release is one indivisible operation with a nullable loop;
@@ -18,12 +18,15 @@ are also complete, reducing the current surface to 89 operations:
 - Edge implements non-index property filtering with standard Node-API; and
 - the worker stack limit is supplied only at environment creation; and
 - heap-space statistics use one capacity-bounded bulk snapshot instead of a
-  count operation followed by indexed provider calls.
+  count operation followed by indexed provider calls; and
+- profiler and heap-snapshot JSON is returned as an environment-owned
+  `napi_value`; Edge copies it into Edge-owned `std::string` storage before a
+  worker result crosses threads, so the provider-wide `free_buffer` allocator
+  API is gone.
 
-Environment-owned profiler/snapshot results and removal of `free_buffer` remain
-the final Phase 2 follow-up. They change result ownership and therefore need
-focused provider, guest-bridge, and worker-lifetime tests rather than being
-hidden in the mechanical ABI deletion.
+The profiler/snapshot migration is covered by a native V8 provider contract,
+native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
+profile, heap profile, heap snapshot, and heapdump failure tests.
 
 ## Decision
 

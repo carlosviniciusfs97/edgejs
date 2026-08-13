@@ -131,8 +131,7 @@ struct WorkerTask {
   uv_rusage_t cpu_usage{};
   unofficial_napi_heap_statistics heap_statistics{};
   uint32_t started_profile_id = 0;
-  char* json_data = nullptr;
-  size_t json_len = 0;
+  std::string json;
   unofficial_napi_heap_snapshot_options heap_snapshot_options{};
 };
 
@@ -580,13 +579,21 @@ napi_value BuildResourceLimitsArray(napi_env env, const std::array<double, 4>& l
   return typed;
 }
 
-void FreeWorkerTaskPayload(WorkerTask* task) {
-  if (task == nullptr) return;
-  if (task->json_data != nullptr) {
-    unofficial_napi_free_buffer(task->json_data);
-    task->json_data = nullptr;
-    task->json_len = 0;
+bool CopyUtf8String(napi_env env, napi_value value, std::string* output) {
+  if (env == nullptr || value == nullptr || output == nullptr) return false;
+  size_t length = 0;
+  if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok) {
+    return false;
   }
+  output->assign(length + 1, '\0');
+  size_t written = 0;
+  if (napi_get_value_string_utf8(
+          env, value, output->data(), output->size(), &written) != napi_ok) {
+    output->clear();
+    return false;
+  }
+  output->resize(written);
+  return true;
 }
 
 void DeleteWorkerTaskRef(napi_env env, WorkerTask* task) {
@@ -605,7 +612,6 @@ void ClearCompletedWorkerTasks(napi_env env, Worker* wrap) {
   for (auto& task : completed) {
     if (!task) continue;
     DeleteWorkerTaskRef(env, task.get());
-    FreeWorkerTaskPayload(task.get());
   }
 }
 
@@ -725,12 +731,12 @@ napi_value HeapSnapshotHandleReadStart(napi_env env, napi_callback_info info) {
 }
 
 napi_value CreateHeapSnapshotHandle(napi_env env, WorkerTask* task) {
-  if (env == nullptr || task == nullptr || task->json_data == nullptr) return nullptr;
+  if (env == nullptr || task == nullptr) return nullptr;
   napi_value handle = nullptr;
   if (napi_create_object(env, &handle) != napi_ok || handle == nullptr) return nullptr;
   auto* wrap = new HeapSnapshotHandleWrap();
   wrap->env = env;
-  wrap->payload.assign(task->json_data, task->json_len);
+  wrap->payload = task->json;
   if (napi_wrap(env, handle, wrap, HeapSnapshotHandleFinalize, nullptr, nullptr) != napi_ok) {
     delete wrap;
     return nullptr;
@@ -801,11 +807,14 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       break;
     }
     case WorkerTaskType::kStopCpuProfile: {
+      napi_value json = nullptr;
       if (unofficial_napi_stop_cpu_profile(
-              worker_env, task->profile_id, &task->found, &task->json_data, &task->json_len) != napi_ok) {
+              worker_env, task->profile_id, &task->found, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop CPU profile");
       } else if (!task->found) {
         SetTaskError(task, "ERR_CPU_PROFILE_NOT_STARTED", "CPU profile not started");
+      } else if (!CopyUtf8String(worker_env, json, &task->json)) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy CPU profile");
       }
       break;
     }
@@ -818,18 +827,24 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       break;
     }
     case WorkerTaskType::kStopHeapProfile: {
+      napi_value json = nullptr;
       if (unofficial_napi_stop_heap_profile(
-              worker_env, &task->found, &task->json_data, &task->json_len) != napi_ok) {
+              worker_env, &task->found, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop heap profile");
       } else if (!task->found) {
         SetTaskError(task, "ERR_HEAP_PROFILE_NOT_STARTED", "heap profile not started");
+      } else if (!CopyUtf8String(worker_env, json, &task->json)) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy heap profile");
       }
       break;
     }
     case WorkerTaskType::kTakeHeapSnapshot: {
+      napi_value json = nullptr;
       if (unofficial_napi_take_heap_snapshot(
-              worker_env, &task->heap_snapshot_options, &task->json_data, &task->json_len) != napi_ok) {
+              worker_env, &task->heap_snapshot_options, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to take heap snapshot");
+      } else if (!CopyUtf8String(worker_env, json, &task->json)) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy heap snapshot");
       } else {
         task->found = true;
       }
@@ -854,19 +869,16 @@ void OnWorkerCompletionAsync(uv_async_t* handle) {
 
   for (auto& task : completed) {
     if (!task || task->taker_ref == nullptr) {
-      if (task) FreeWorkerTaskPayload(task.get());
       continue;
     }
     napi_value taker = GetRefValue(wrap->env, task->taker_ref);
     DeleteWorkerTaskRef(wrap->env, task.get());
     if (taker == nullptr) {
-      FreeWorkerTaskPayload(task.get());
       continue;
     }
 
     napi_value ondone = GetNamed(wrap->env, taker, "ondone");
     if (!IsFunction(wrap->env, ondone)) {
-      FreeWorkerTaskPayload(task.get());
       continue;
     }
 
@@ -926,7 +938,7 @@ void OnWorkerCompletionAsync(uv_async_t* handle) {
         argv[0] = task->success ? CreateNull(wrap->env)
                                 : CreateErrorWithCode(wrap->env, task->error_code, task->error_message);
         if (task->success) {
-          napi_create_string_utf8(wrap->env, task->json_data, task->json_len, &argv[1]);
+          napi_create_string_utf8(wrap->env, task->json.data(), task->json.size(), &argv[1]);
         }
         break;
       }
@@ -946,7 +958,6 @@ void OnWorkerCompletionAsync(uv_async_t* handle) {
 
     napi_value ignored = nullptr;
     (void)EdgeMakeCallback(wrap->env, taker, ondone, argc, argv, &ignored);
-    FreeWorkerTaskPayload(task.get());
   }
 }
 
