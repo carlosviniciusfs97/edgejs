@@ -1174,6 +1174,7 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
   }
 
   unofficial_napi_env_create_options create_options{};
+  EdgeInitializeNapiEnvCreateOptions(&create_options);
   if (wrap != nullptr) {
     if (wrap->worker_config.resource_limits[0] > 0) {
       create_options.max_young_generation_size_in_bytes =
@@ -1191,7 +1192,6 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
       create_options.stack_limit = reinterpret_cast<void*>(wrap->stack_base);
     }
   }
-  EdgeInstallNapiEmbedderHooks();
   if (unofficial_napi_create_env(8, &create_options, &worker_env, &worker_scope) != napi_ok ||
       worker_env == nullptr || worker_scope == nullptr) {
     EdgeEnvironmentDestroyReleasedEventLoop(worker_loop);

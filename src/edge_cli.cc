@@ -146,6 +146,9 @@ struct RuntimeInitOptions {
   bool validate_openssl_csprng = true;
 };
 
+std::string BuildSupportedV8Flags(
+    const std::vector<std::string>& raw_exec_argv);
+
 void ResetSignalHandlersLikeNode() {
 #if !defined(_WIN32)
   struct sigaction act;
@@ -225,12 +228,18 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
     EDGE_STARTUP_TRACE(startup_trace, "cli.env.openssl.skip");
   }
 
-  EdgeInstallNapiEmbedderHooks();
-  EDGE_STARTUP_TRACE(startup_trace, "cli.env.install-napi-hooks");
+  unofficial_napi_env_create_options create_options{};
+  EdgeInitializeNapiEnvCreateOptions(&create_options);
+  const std::string engine_flags = BuildSupportedV8Flags(
+      options.raw_exec_argv != nullptr ? *options.raw_exec_argv
+                                       : std::vector<std::string>{});
+  create_options.engine_flags = engine_flags.data();
+  create_options.engine_flags_length = engine_flags.size();
 
   napi_env env = nullptr;
   void* env_scope = nullptr;
-  const napi_status create_status = unofficial_napi_create_env(8, nullptr, &env, &env_scope);
+  const napi_status create_status =
+      unofficial_napi_create_env(8, &create_options, &env, &env_scope);
   if (create_status != napi_ok || env == nullptr || env_scope == nullptr) {
     if (error_out != nullptr) {
       *error_out = "Failed to initialize runtime environment";
@@ -384,7 +393,8 @@ bool IsSupportedV8ProfilerFlag(const std::string& token) {
          token.rfind("--prof-sampling-interval=", 0) == 0;
 }
 
-void ApplySupportedV8Flags(const std::vector<std::string>& raw_exec_argv) {
+std::string BuildSupportedV8Flags(
+    const std::vector<std::string>& raw_exec_argv) {
   std::string flags;
   bool has_js_source_phase_imports = false;
   bool has_no_js_source_phase_imports = false;
@@ -408,9 +418,7 @@ void ApplySupportedV8Flags(const std::vector<std::string>& raw_exec_argv) {
     if (!flags.empty()) flags.push_back(' ');
     flags += "--harmony-import-attributes";
   }
-  if (!flags.empty()) {
-    (void)unofficial_napi_set_flags_from_string(flags.c_str(), flags.size());
-  }
+  return flags;
 }
 
 bool OptionConsumesNextToken(const std::string& token) {
@@ -1593,9 +1601,6 @@ int EdgeRunCli(int argc, const char* const* argv, std::string* error_out) {
   EDGE_STARTUP_TRACE(startup_trace, "cli.build-effective-state");
 
   EdgeSetExecArgv(raw_exec_argv);
-  ApplySupportedV8Flags(raw_exec_argv);
-  EDGE_STARTUP_TRACE(startup_trace, "cli.apply-v8-flags");
-
   // Bytecode cache defaults: builtins ON, per-file user sidecars OFF.
   //   --no-bytecode-cache / --check  -> kill switch (builtins + sidecars off)
   //   --bytecode-cache / --precompile -> opt user sidecars in

@@ -14,21 +14,17 @@ int getgroups(int size, gid_t* list) {
   return 0;
 }
 
-extern "C" uint64_t uv_get_available_memory(void) {
-  return 0;
+namespace {
+constexpr uint64_t kWasixMemoryLimit = uint64_t{1024} * 1024 * 1024;
 }
 
-extern "C" uint64_t uv_get_constrained_memory(void) {
-  return 0;
-}
+extern "C" uint64_t uv_get_available_memory(void) { return kWasixMemoryLimit; }
 
-extern "C" uint64_t uv_get_free_memory(void) {
-  return 0;
-}
+extern "C" uint64_t uv_get_constrained_memory(void) { return kWasixMemoryLimit; }
 
-extern "C" uint64_t uv_get_total_memory(void) {
-  return 0;
-}
+extern "C" uint64_t uv_get_free_memory(void) { return kWasixMemoryLimit; }
+
+extern "C" uint64_t uv_get_total_memory(void) { return kWasixMemoryLimit; }
 
 extern "C" int uv_resident_set_memory(size_t* rss) {
   if (rss != nullptr) {

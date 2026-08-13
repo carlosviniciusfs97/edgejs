@@ -10,7 +10,8 @@
 
 The first implementation milestone reduced the exported header from 106 to 90
 operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
-attachment slice are complete, reducing the current surface to 83 operations:
+environment-configuration work are complete, reducing the current surface to
+81 operations:
 
 - environment creation is one operation with nullable options;
 - environment release is one indivisible operation with a nullable loop;
@@ -26,7 +27,10 @@ attachment slice are complete, reducing the current surface to 83 operations:
 - six independently mutable environment setters are replaced by one versioned,
   immutable, exactly-once `unofficial_napi_attach_env` transition. The hook
   table carries lifecycle, context-token, foreground scheduling, fatal-error,
-  and OOM callbacks together.
+  and OOM callbacks together; and
+- process-global `set_embedder_hooks` and `set_flags_from_string` are gone.
+  Engine flags, physical/constrained memory, resource limits, stack limit, and
+  guest-heap ownership are versioned immutable environment-creation inputs.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
@@ -39,6 +43,13 @@ and invokes the attached lifecycle callbacks exactly once; the Wasmer bridge
 accepts one wasm32 hook descriptor and rejects duplicate attachment. Edge
 builds the complete table before crossing the provider boundary and does not
 select attachment behavior with `#ifdef __wasi__`.
+
+Creation configuration is covered by provider-neutral descriptor validation,
+complete V8 and QuickJS suites, native and wasm32 compilation against the SDK
+Wasmer branch, and Edge's native and WASIX compatibility gates. The obsolete
+N-API-side Edge memory-hook adapter and its unused shutdown-pump callback path
+were removed; WASIX now reports its actual runtime memory ceiling through its
+libuv platform implementation.
 
 ## Decision
 
@@ -195,8 +206,7 @@ runtime JavaScript state, not immutable embedder attachment hooks.
 
 ### Phase 3 implementation status
 
-The immutable attachment half is complete. These six public operations are
-gone:
+Phase 3 is complete. These six public operations are gone:
 
 - `unofficial_napi_set_edge_environment`;
 - `unofficial_napi_set_env_cleanup_callback`;
@@ -206,11 +216,11 @@ gone:
 - `unofficial_napi_set_fatal_error_callbacks`.
 
 They are represented by the single `unofficial_napi_attach_env` operation, a
-net reduction of five exports. The remaining Phase 3 work is pre-creation
-configuration: fold process-global `set_embedder_hooks` and
-`set_flags_from_string` into a versioned runtime/environment creation contract
-without changing initialization order or making per-environment data falsely
-global.
+net reduction of five exports. The two process-global configuration setters
+are also gone. Their required values now travel in the versioned
+`unofficial_napi_env_create_options` descriptor and are consumed synchronously
+before provider environment creation. No replacement setter or provider-kind
+branch was introduced.
 
 ## Phase 4: strengthen opaque resources
 
@@ -414,11 +424,11 @@ must not choose an implementation with `#ifdef __wasi__`.
 
 ## Expected outcome
 
-The immediate and mechanical phases reduce 106 exported functions to 88
-without a broad redesign. The later environment, snapshot, bytecode, module,
-and profiling changes can reduce it further, but their success criterion is
-not a specific number. The success criterion is that every remaining extension
-is either:
+The completed removal, mechanical, attachment, configuration, heap-space, and
+profiling-result phases reduce 106 exported functions to 81. The later message,
+bytecode, module, and snapshot changes can reduce it further, but their success
+criterion is not a specific number. The success criterion is that every
+remaining extension is either:
 
 - one provider-owned engine capability unavailable in standard Node-API; or
 - one explicit transition on a typed opaque resource whose ownership cannot be
