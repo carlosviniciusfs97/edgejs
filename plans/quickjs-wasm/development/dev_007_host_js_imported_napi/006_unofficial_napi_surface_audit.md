@@ -8,20 +8,22 @@
 
 ## Implementation status
 
-The first implementation milestone reduces the exported header from 106 to 90
-operations. Phase 1 is complete. Five of the seven mechanical Phase 2 folds
-are also complete:
+The first implementation milestone reduced the exported header from 106 to 90
+operations. Phase 1 is complete. Six of the seven mechanical Phase 2 folds
+are also complete, reducing the current surface to 89 operations:
 
 - environment creation is one operation with nullable options;
 - environment release is one indivisible operation with a nullable loop;
 - structured clone has one optional-transfer-list form;
 - Edge implements non-index property filtering with standard Node-API; and
-- the worker stack limit is supplied only at environment creation.
+- the worker stack limit is supplied only at environment creation; and
+- heap-space statistics use one capacity-bounded bulk snapshot instead of a
+  count operation followed by indexed provider calls.
 
-The heap-space bulk snapshot and environment-owned profiler/snapshot results
-remain intentionally separate follow-ups. They change result ownership and
-therefore need focused provider, guest-bridge, and worker-lifetime tests rather
-than being hidden in the mechanical ABI deletion.
+Environment-owned profiler/snapshot results and removal of `free_buffer` remain
+the final Phase 2 follow-up. They change result ownership and therefore need
+focused provider, guest-bridge, and worker-lifetime tests rather than being
+hidden in the mechanical ABI deletion.
 
 ## Decision
 
