@@ -89,6 +89,16 @@ void SetRef(napi_env env, napi_ref* ref_ptr, napi_value value, napi_valuetype re
   napi_create_reference(env, value, 1, ref_ptr);
 }
 
+void ConfigureModuleHooks(napi_env env, const ModuleWrapBindingState& state) {
+  const unofficial_napi_module_hooks hooks = {
+      sizeof(unofficial_napi_module_hooks),
+      UNOFFICIAL_NAPI_MODULE_HOOKS_VERSION,
+      GetRefValue(env, state.import_module_dynamically_ref),
+      GetRefValue(env, state.initialize_import_meta_ref),
+  };
+  (void)unofficial_napi_module_wrap_set_hooks(env, &hooks);
+}
+
 ModuleWrapInstance* UnwrapModuleWrap(napi_env env, napi_value this_arg) {
   if (this_arg == nullptr) return nullptr;
   void* data = nullptr;
@@ -868,7 +878,7 @@ napi_value ModuleWrapSetImportModuleDynamicallyCallback(napi_env env, napi_callb
   napi_value argv[1] = {nullptr};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   SetRef(env, &state->import_module_dynamically_ref, argc >= 1 ? argv[0] : nullptr, napi_function);
-  (void)unofficial_napi_module_wrap_set_import_module_dynamically_callback(env, argc >= 1 ? argv[0] : nullptr);
+  ConfigureModuleHooks(env, *state);
   return Undefined(env);
 }
 
@@ -879,7 +889,7 @@ napi_value ModuleWrapSetInitializeImportMetaObjectCallback(napi_env env, napi_ca
   napi_value argv[1] = {nullptr};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   SetRef(env, &state->initialize_import_meta_ref, argc >= 1 ? argv[0] : nullptr, napi_function);
-  (void)unofficial_napi_module_wrap_set_initialize_import_meta_object_callback(env, argc >= 1 ? argv[0] : nullptr);
+  ConfigureModuleHooks(env, *state);
   return Undefined(env);
 }
 

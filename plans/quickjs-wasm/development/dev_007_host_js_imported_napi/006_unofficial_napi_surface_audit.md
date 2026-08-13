@@ -13,7 +13,7 @@ operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
 environment-configuration work, the process-memory snapshot fold, and atomic
 source-map configuration, error-metadata snapshot, and message-resource
 ownership are complete, reducing
-the current surface to 72
+the current surface to 71
 operations:
 
 - environment creation is one operation with nullable options;
@@ -59,7 +59,11 @@ operations:
   and
 - module resources use the opaque `unofficial_napi_module` type end to end.
   Edge, provider implementations, and the Wasmer bridge can no longer
-  accidentally pass an unrelated `void*` resource into a module transition.
+  accidentally pass an unrelated `void*` resource into a module transition;
+  and
+- dynamic-import and import-meta callbacks are installed through one
+  versioned module-hooks descriptor. Updating either JavaScript-facing hook
+  sends the provider a complete, atomic view of both callbacks.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
@@ -373,6 +377,12 @@ and the Wasmer bridge without changing its pointer-sized ABI. Consolidating
 creation and hooks, and moving immutable request metadata into the creation
 result remain separate module-resource improvements.
 
+The module-hooks migration is complete. Two independently mutable callback
+setters are now one versioned configuration operation, a net reduction of one
+export. Edge retains the callbacks needed by its public binding methods and
+sends both values whenever either public setter changes, so no provider can
+observe a half-updated pair.
+
 ### Profilers
 
 CPU and heap profiling should return typed opaque session handles rather than
@@ -479,8 +489,9 @@ must not choose an implementation with `#ifdef __wasi__`.
 
 The completed removal, mechanical, attachment, configuration, heap-space,
 memory-snapshot, source-map configuration, error-metadata snapshot,
-message-resource ownership, bytecode transaction, module-state snapshot, and
-profiling-result phases reduce 106 exported functions to 72. The remaining
+message-resource ownership, bytecode transaction, module-state snapshot,
+module-hooks configuration, and profiling-result phases reduce 106 exported
+functions to 71. The remaining
 module-resource changes can reduce it further, but their success criterion is
 not a specific number. The success criterion is that every remaining extension
 is either:
