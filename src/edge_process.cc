@@ -410,9 +410,9 @@ std::string GetUndiciVersion() {
   const fs::path source_root = fs::absolute(fs::path(__FILE__).parent_path() / "..").lexically_normal();
   static const std::string version = [source_root]() {
     std::vector<fs::path> candidates = {
-        source_root / "node" / "deps" / "undici" / "src" / "package.json",
+        source_root / "deps" / "undici" / "src" / "package.json",
     };
-    AppendCwdCandidates(fs::path("node") / "deps" / "undici" / "src" / "package.json", &candidates);
+    AppendCwdCandidates(fs::path("deps") / "undici" / "src" / "package.json", &candidates);
     return ReadPackageVersionFromCandidates(candidates);
   }();
   return version;

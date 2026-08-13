@@ -13,7 +13,7 @@ operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
 environment-configuration work, the process-memory snapshot fold, and atomic
 source-map configuration, error-metadata snapshot, and message-resource
 ownership are complete, reducing
-the current surface to 76
+the current surface to 72
 operations:
 
 - environment creation is one operation with nullable options;
@@ -46,7 +46,20 @@ operations:
 - cross-environment values are represented by a typed opaque message. Edge
   holds queued messages through move-only ownership; `message_take` consumes
   the resource on success or failure, and `message_drop` is used only when an
-  unconsumed queue entry is abandoned.
+  unconsumed queue entry is abandoned; and
+- bytecode is a typed opaque resource opened through one versioned
+  transaction. The provider validates an optional cache, reports rejection,
+  and compiles the source fallback atomically. A tagged source descriptor
+  prevents text and bytecode from being confused, while Edge owns artifacts
+  with one move-only RAII wrapper; and
+- module status, evaluation error, top-level-await presence, and async-graph
+  presence are returned by one module-state snapshot. Providers observe the
+  record once, and Edge applies Node's pre-instantiation visibility rule from
+  the returned status rather than asking providers through a separate call;
+  and
+- module resources use the opaque `unofficial_napi_module` type end to end.
+  Edge, provider implementations, and the Wasmer bridge can no longer
+  accidentally pass an unrelated `void*` resource into a module transition.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
@@ -318,6 +331,14 @@ The provider atomically validates cached bytes and compiles the fallback text,
 so V8, QuickJS, and host JavaScript cannot drift in fallback policy. Serialize
 and release remain genuine independent operations.
 
+This migration is complete. The former compile and deserialize entry points
+are represented by one `unofficial_napi_bytecode_open` operation, a net
+reduction of one export. V8 and QuickJS share the same fallback contract; the
+host-JavaScript provider retains source as its opaque artifact and rejects
+cache bytes because the browser engine exposes no portable compiled-code
+serialization. Empty supplied caches are rejected while still returning a
+freshly compiled artifact, so Edge never implements a second fallback branch.
+
 ### Module wrap
 
 Keep an opaque provider-owned module resource, but type it instead of exposing
@@ -343,6 +364,14 @@ Keep an opaque provider-owned module resource, but type it instead of exposing
 Merging sync and async evaluate behind a boolean would not make the contract
 stronger: one returns a synchronous value/error contract and the other returns
 promise-driven evaluation.
+
+The module-state migration is complete. It replaces four field-at-a-time
+operations (`get_status`, `get_error`, `has_top_level_await`, and
+`has_async_graph`) with one provider-neutral snapshot, a net reduction of
+three exports. The module handle is also now typed across Edge, V8, QuickJS,
+and the Wasmer bridge without changing its pointer-sized ABI. Consolidating
+creation and hooks, and moving immutable request metadata into the creation
+result remain separate module-resource improvements.
 
 ### Profilers
 
@@ -450,10 +479,11 @@ must not choose an implementation with `#ifdef __wasi__`.
 
 The completed removal, mechanical, attachment, configuration, heap-space,
 memory-snapshot, source-map configuration, error-metadata snapshot,
-message-resource ownership, and profiling-result phases reduce 106 exported
-functions to 76. The later bytecode, module, and snapshot changes can reduce it
-further, but their success criterion is not a specific number. The success
-criterion is that every remaining extension is either:
+message-resource ownership, bytecode transaction, module-state snapshot, and
+profiling-result phases reduce 106 exported functions to 72. The remaining
+module-resource changes can reduce it further, but their success criterion is
+not a specific number. The success criterion is that every remaining extension
+is either:
 
 - one provider-owned engine capability unavailable in standard Node-API; or
 - one explicit transition on a typed opaque resource whose ownership cannot be

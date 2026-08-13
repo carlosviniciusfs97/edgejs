@@ -75,6 +75,7 @@ std::string GetGlobalUtf8(napi_env env, const char* name) {
 }
 
 constexpr const char* kZlibRoundTripScript = R"JS(
+require('internal/util/debuglog').initializeDebugEnv(process.env.NODE_DEBUG);
 const assert = require('assert');
 const zlib = require('zlib');
 

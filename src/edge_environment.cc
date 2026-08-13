@@ -9,6 +9,7 @@
 #include "edge_runtime_platform.h"
 #include "edge_handle_scope.h"
 #include "edge_process.h"
+#include "edge_runtime.h"
 #include "edge_timers_host.h"
 #include "edge_worker_env.h"
 #include "unofficial_napi.h"
@@ -1414,7 +1415,10 @@ void Environment::OnTimer(uv_timer_t* handle) {
 
   const double now_ms = env->GetNowMs();
   const double next_expiry = EdgeTimersHostCallTimersCallback(env->env(), now_ms);
-  env->ScheduleTimerFromExpiry(next_expiry, now_ms);
+  // processTimers() expresses the next deadline against libuv's clock at the
+  // start of the callback. Re-read that clock after user callbacks complete so
+  // their duration is not added to a repeating timer's interval.
+  env->ScheduleTimerFromExpiry(next_expiry, env->GetNowMs());
   if (!EdgeTimersHostRunCallbackCheckpoint(env->env())) {
     StopLoopOnJsError(env);
   }
@@ -1442,9 +1446,25 @@ void Environment::OnImmediateCheck(uv_check_t* handle) {
     return;
   }
 
-  if (env->immediate_count() != 0 && !EdgeTimersHostCallImmediateCallback(env->env())) {
-    StopLoopOnJsError(env);
-    return;
+  if (env->immediate_count() != 0) {
+    // processImmediate() preserves the unprocessed tail in outstandingQueue
+    // when a callback throws. Match Node's check-phase loop by re-entering the
+    // callback after uncaught/domain handling until that tail is consumed.
+    do {
+      if (!EdgeTimersHostCallImmediateCallback(env->env())) {
+        StopLoopOnJsError(env);
+        return;
+      }
+    } while (env->immediate_has_outstanding() && env->can_call_into_js());
+
+    // This is the callback-scope checkpoint for the complete native check
+    // callback, not for each re-entry above. It must run after a handled throw
+    // has drained outstandingQueue, but before libuv can deliver close
+    // callbacks scheduled by the final immediate.
+    if (EdgeRunCallbackScopeCheckpoint(env->env()) != napi_ok) {
+      StopLoopOnJsError(env);
+      return;
+    }
   }
 
   if (env->immediate_ref_count() == 0 &&

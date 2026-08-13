@@ -10,6 +10,7 @@
 #include <system_error>
 
 #include "edge_buffer_lease.h"
+#include "edge_bytecode.h"
 #include "edge_bytecode_cache.h"
 #include "edge_url.h"
 #include "simdjson/simdjson.h"
@@ -198,19 +199,22 @@ FileResult PrecompileFile(napi_env env,
   const int32_t bytecode_shape = shape == FileShape::kEsm
                                      ? unofficial_napi_bytecode_shape_module
                                      : unofficial_napi_bytecode_shape_cjs_function;
-  void* bytecode = nullptr;
+  EdgeBytecode bytecode;
   bool can_parse_as_module = false;
-  const napi_status status = unofficial_napi_bytecode_compile(env,
-                                                              code,
-                                                              filename,
-                                                              bytecode_shape,
-                                                              params,
-                                                              nullptr,
-                                                              0,
-                                                              0,
-                                                              &bytecode,
-                                                              &can_parse_as_module);
-  if (status != napi_ok || bytecode == nullptr) {
+  const napi_status status = bytecode.Open(env,
+                                           code,
+                                           filename,
+                                           bytecode_shape,
+                                           params,
+                                           nullptr,
+                                           0,
+                                           0,
+                                           nullptr,
+                                           0,
+                                           false,
+                                           nullptr,
+                                           &can_parse_as_module);
+  if (status != napi_ok || !bytecode) {
     const std::string compile_error = DescribePendingException(env);
     bool pending = false;
     napi_value ignored = nullptr;
@@ -227,9 +231,7 @@ FileResult PrecompileFile(napi_env env,
   }
 
   napi_value cache_buffer = nullptr;
-  const bool serialized =
-      unofficial_napi_bytecode_serialize(env, bytecode, &cache_buffer) == napi_ok && cache_buffer != nullptr;
-  (void)unofficial_napi_bytecode_release(env, bytecode);
+  const bool serialized = bytecode.Serialize(&cache_buffer) == napi_ok && cache_buffer != nullptr;
   if (!serialized) {
     *detail_out = "engine produced no cached data";
     return FileResult::kFailed;

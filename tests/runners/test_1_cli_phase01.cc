@@ -740,7 +740,8 @@ TEST_F(Test1CliPhase01, InteractiveWelcomeMessageIncludesEdgeAndNodeVersions) {
 
   EXPECT_EQ(WEXITSTATUS(status), 0) << "stderr=" << stderr_output;
   EXPECT_TRUE(stderr_output.empty()) << "stderr=" << stderr_output;
-  EXPECT_NE(stdout_output.find("Welcome to Edge.js " EDGE_VERSION_STRING " (Node.js " NODE_VERSION ")."),
+  EXPECT_NE(stdout_output.find("Welcome to Edge.js " EDGE_VERSION_STRING
+                               " (Node.js " NODE_COMPAT_VERSION ")."),
             std::string::npos)
       << stdout_output;
 #endif
@@ -1225,6 +1226,7 @@ TEST_F(Test1CliPhase01, PromiseDetailsReportSettledQuickjsPromises) {
   const std::string script_path = WriteTempScript(
       "edge_phase01_cli_promise_details",
       "const assert = require('assert');\n"
+      "const { internalBinding } = require('internal/test/binding');\n"
       "const { getPromiseDetails } = internalBinding('util');\n"
       "const pending = new Promise(() => {});\n"
       "const fulfilled = Promise.resolve('ok');\n"
@@ -1240,8 +1242,10 @@ TEST_F(Test1CliPhase01, PromiseDetailsReportSettledQuickjsPromises) {
       "assert.strictEqual(rejectedDetails[1].message, 'boom');\n"
       "console.log(JSON.stringify([pendingDetails[0], fulfilledDetails[0], rejectedDetails[0]]));\n");
 
-  const CommandResult result =
-      RunBuiltBinaryAndCapture(edge_path, {script_path}, "edge_phase01_cli_promise_details_run");
+  const CommandResult result = RunBuiltBinaryAndCapture(
+      edge_path,
+      {"--no-warnings", "--expose-internals", script_path},
+      "edge_phase01_cli_promise_details_run");
 
   RemoveTempScript(script_path);
 
@@ -2159,6 +2163,7 @@ TEST_F(Test1CliPhase01, InternalBufferBindingSentinelsAndSharedArrayBufferCopyMa
       "assert.strictEqual(binding.fill(Buffer.alloc(4), 1, 0, 4), undefined);\n"
       "assert.strictEqual(binding.fill(Buffer.alloc(4), 'zz', 0, 4, 'hex'), -1);\n"
       "assert.strictEqual(binding.fill(Buffer.alloc(4), 1, 3, 2), -2);\n"
+      "assert.throws(() => binding.fill(Buffer.alloc(4), 1, -1, 0), { code: 'ERR_OUT_OF_RANGE' });\n"
       "const toggle = binding.getZeroFillToggle();\n"
       "assert.ok(toggle instanceof Uint32Array);\n"
       "assert.strictEqual(toggle.length, 1);\n"

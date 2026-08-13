@@ -4093,24 +4093,17 @@ napi_value ExposeLazyDOMExceptionPropertyCallback(napi_env env, napi_callback_in
   napi_valuetype target_type = napi_undefined;
   if (napi_typeof(env, argv[0], &target_type) != napi_ok || target_type != napi_object) return Undefined(env);
 
+  napi_value dom_exception = ResolveDOMExceptionValue(env);
+  if (dom_exception == nullptr || IsUndefined(env, dom_exception)) return Undefined(env);
+
+  // Node exposes DOMException as an ordinary writable, non-enumerable data
+  // property by the time user code runs. Resolve it during bootstrap so the
+  // observable descriptor is provider-neutral and does not depend on whether
+  // some earlier bootstrap path happened to trigger a lazy getter.
   napi_property_descriptor desc = {};
   desc.utf8name = "DOMException";
-  desc.getter = [](napi_env env, napi_callback_info info) -> napi_value {
-    napi_value this_arg = nullptr;
-    if (napi_get_cb_info(env, info, nullptr, nullptr, &this_arg, nullptr) != napi_ok || this_arg == nullptr) {
-      return Undefined(env);
-    }
-    napi_value dom_exception = ResolveDOMExceptionValue(env);
-    if (dom_exception == nullptr || IsUndefined(env, dom_exception)) return Undefined(env);
-
-    napi_property_descriptor value_desc = {};
-    value_desc.utf8name = "DOMException";
-    value_desc.value = dom_exception;
-    value_desc.attributes = static_cast<napi_property_attributes>(napi_writable | napi_configurable);
-    (void)napi_define_properties(env, this_arg, 1, &value_desc);
-    return dom_exception;
-  };
-  desc.attributes = napi_configurable;
+  desc.value = dom_exception;
+  desc.attributes = static_cast<napi_property_attributes>(napi_writable | napi_configurable);
   napi_define_properties(env, argv[0], 1, &desc);
   return Undefined(env);
 }
@@ -4649,7 +4642,7 @@ napi_value CreateMovedMessagePortWrapperInContext(napi_env env,
   }
 
   napi_value out = nullptr;
-  const unofficial_napi_js_source run_source{source, nullptr};
+  const unofficial_napi_js_source run_source = unofficial_napi_js_source_from_text(source);
   const napi_status status = unofficial_napi_contextify_run_script(env,
                                                                    contextified_object,
                                                                    &run_source,

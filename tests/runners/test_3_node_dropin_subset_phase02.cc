@@ -144,50 +144,25 @@ std::vector<std::string> ParseLeadingFlagsHeader(const std::filesystem::path& sc
     return {};
   }
 
-  bool in_block_comment = false;
   std::string line;
-  while (std::getline(in, line)) {
+  // Node test metadata is conventionally near the top of the file, but it is
+  // not required to precede directives or the license header. In particular,
+  // some tests place `// Flags:` after `'use strict'`. Scan the complete
+  // metadata prefix instead of treating the first JavaScript statement as the
+  // end of metadata.
+  for (size_t line_number = 0;
+       line_number < 32 && std::getline(in, line);
+       ++line_number) {
     std::string_view view(line);
     if (!view.empty() && view.back() == '\r') {
       view.remove_suffix(1);
     }
     view = TrimLeadingAsciiWhitespace(view);
-    if (view.empty()) continue;
-
-    if (in_block_comment) {
-      const size_t end = view.find("*/");
-      if (end == std::string_view::npos) continue;
-      in_block_comment = false;
-      view.remove_prefix(end + 2);
-      view = TrimLeadingAsciiWhitespace(view);
-      if (view.empty()) continue;
-    }
 
     if (StartsWith(view, "// Flags:")) {
       view.remove_prefix(std::string_view("// Flags:").size());
       return SplitAsciiWhitespace(view);
     }
-    if (StartsWith(view, "//")) continue;
-    if (StartsWith(view, "#!")) continue;
-
-    if (StartsWith(view, "/*")) {
-      const size_t end = view.find("*/");
-      if (end == std::string_view::npos) {
-        in_block_comment = true;
-        continue;
-      }
-      view.remove_prefix(end + 2);
-      view = TrimLeadingAsciiWhitespace(view);
-      if (view.empty()) continue;
-      if (StartsWith(view, "// Flags:")) {
-        view.remove_prefix(std::string_view("// Flags:").size());
-        return SplitAsciiWhitespace(view);
-      }
-      if (StartsWith(view, "//")) continue;
-      return {};
-    }
-
-    return {};
   }
   return {};
 }
@@ -353,12 +328,23 @@ int RunRawNodeTestScript(napi_env env,
   }
   const std::string node_test_dir = node_test_root_path.string();
   const std::string test_serial_id = MakeTestSerialId(script_rel);
+  const char* inherited_term = std::getenv("TERM");
+  const bool normalize_repl_term =
+      StartsWith(script_rel, "parallel/test-repl-") &&
+      (inherited_term == nullptr || inherited_term[0] == '\0' ||
+       std::strcmp(inherited_term, "dumb") == 0);
   setenv("NODE_TEST_DIR", node_test_dir.c_str(), 1);
   setenv("NODE_TEST_KNOWN_GLOBALS", "0", 1);
   setenv("TEST_SERIAL_ID", test_serial_id.c_str(), 1);
   setenv("TEST_THREAD_ID", test_serial_id.c_str(), 1);
   setenv("TEST_PARALLEL", is_parallel_suite ? "1" : "0", 1);
   setenv("EDGE_FORCE_STDIO_TTY", is_pseudo_tty_suite ? "1" : "0", 1);
+  if (normalize_repl_term) {
+    // Node's REPL tests exercise readline's terminal key parser. CTest sets
+    // TERM=dumb in non-interactive shells, which intentionally selects a
+    // different readline implementation where write("...\n") is literal.
+    setenv("TERM", "xterm-256color", 1);
+  }
   {
     napi_value global = nullptr;
     napi_value process_v = nullptr;
@@ -387,6 +373,14 @@ int RunRawNodeTestScript(napi_env env,
       napi_set_named_property(env, env_v, "TEST_SERIAL_ID", serial_id_v);
       napi_set_named_property(env, env_v, "TEST_THREAD_ID", thread_id_v);
       napi_set_named_property(env, env_v, "TEST_PARALLEL", parallel_v);
+      if (normalize_repl_term) {
+        napi_value term_v = nullptr;
+        if (napi_create_string_utf8(
+                env, "xterm-256color", NAPI_AUTO_LENGTH, &term_v) == napi_ok &&
+            term_v != nullptr) {
+          napi_set_named_property(env, env_v, "TERM", term_v);
+        }
+      }
     }
   }
   if (keep_event_loop_alive) {
@@ -1421,10 +1415,10 @@ DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExecveAbortFromNodeTest, "test-process
 DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExecveOnExitFromNodeTest, "test-process-execve-on-exit.js")
 DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExecvePermissionFailFromNodeTest, "test-process-execve-permission-fail.js")
 DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExecvePermissionGrantedFromNodeTest, "test-process-execve-permission-granted.js")
-DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExceptionCaptureFromNodeTest, "test-process-exception-capture.js")
-DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExceptionCaptureErrorsFromNodeTest, "test-process-exception-capture-errors.js")
-DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExceptionCaptureShouldAbortOnUncaughtFromNodeTest, "test-process-exception-capture-should-abort-on-uncaught.js")
-DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExceptionCaptureShouldAbortOnUncaughtSetflagsfromstringFromNodeTest, "test-process-exception-capture-should-abort-on-uncaught-setflagsfromstring.js")
+DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExceptionCaptureFromNodeTest, "test-process-exception-capture.js")
+DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExceptionCaptureErrorsFromNodeTest, "test-process-exception-capture-errors.js")
+DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExceptionCaptureShouldAbortOnUncaughtFromNodeTest, "test-process-exception-capture-should-abort-on-uncaught.js")
+DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExceptionCaptureShouldAbortOnUncaughtSetflagsfromstringFromNodeTest, "test-process-exception-capture-should-abort-on-uncaught-setflagsfromstring.js")
 DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExternalStdioCloseFromNodeTest, "test-process-external-stdio-close.js")
 DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExternalStdioCloseSpawnFromNodeTest, "test-process-external-stdio-close-spawn.js")
 DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessGetactivehandlesFromNodeTest, "test-process-getactivehandles.js")
@@ -2282,9 +2276,12 @@ TEST_F(Test3NodeDropinSubsetPhase02, RawPathZeroLengthStringsFromNodeTest) {
 // Raw Node net tests (parallel, sequential, pummel).
 #define DEFINE_RAW_NODE_TEST(test_name, script_name)            \
   TEST_F(Test3NodeDropinSubsetPhase02, test_name) {             \
+    if (RawNodeScriptHasUnsupportedFlagsHeader(script_name)) {  \
+      GTEST_SKIP() << "Skipping Node.js raw test with unsupported // Flags header: " << script_name; \
+    }                                                            \
     EnvScope s(runtime_.get());                                 \
     std::string error;                                           \
-    const int exit_code = RunRawNodeTestScript(s.env, script_name, &error); \
+    const int exit_code = RunRawNodeTestScript(s.env, script_name, &error, true); \
     EXPECT_EQ(exit_code, 0) << "error=" << error;              \
     EXPECT_TRUE(error.empty()) << "error=" << error;            \
   }

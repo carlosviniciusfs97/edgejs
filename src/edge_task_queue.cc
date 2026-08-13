@@ -15,6 +15,7 @@ struct TaskQueueBindingState {
   ~TaskQueueBindingState() {
     DeleteRefIfAny(env, &binding_ref);
     DeleteRefIfAny(env, &tick_callback_ref);
+    DeleteRefIfAny(env, &tick_entry_trampoline_ref);
     DeleteRefIfAny(env, &promise_reject_callback_ref);
     tick_info_fields = nullptr;
     if (auto* environment = EdgeEnvironmentGet(env); environment != nullptr) {
@@ -26,6 +27,7 @@ struct TaskQueueBindingState {
   napi_env env = nullptr;
   napi_ref binding_ref = nullptr;
   napi_ref tick_callback_ref = nullptr;
+  napi_ref tick_entry_trampoline_ref = nullptr;
   napi_ref promise_reject_callback_ref = nullptr;
   int32_t* tick_info_fields = nullptr;
 };
@@ -83,6 +85,27 @@ static napi_value TaskQueueSetTickCallback(napi_env env, napi_callback_info info
   napi_valuetype t = napi_undefined;
   if (napi_typeof(env, argv[0], &t) == napi_ok && t == napi_function) {
     napi_create_reference(env, argv[0], 1, &st.tick_callback_ref);
+    if (st.tick_entry_trampoline_ref == nullptr) {
+      static constexpr char kTickEntrySource[] =
+          "(function processTicksAndRejections(recv, callback) {"
+          "  return Reflect.apply(callback, recv, []);"
+          "})";
+      napi_value source = nullptr;
+      napi_value trampoline = nullptr;
+      if (napi_create_string_utf8(env,
+                                  kTickEntrySource,
+                                  NAPI_AUTO_LENGTH,
+                                  &source) != napi_ok ||
+          source == nullptr ||
+          napi_run_script(env, source, &trampoline) != napi_ok ||
+          trampoline == nullptr ||
+          napi_create_reference(env,
+                                trampoline,
+                                1,
+                                &st.tick_entry_trampoline_ref) != napi_ok) {
+        return nullptr;
+      }
+    }
   }
 
   return internal_binding::Undefined(env);
@@ -215,8 +238,20 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
     process = global;
   }
 
+  napi_value trampoline = nullptr;
+  if (state->tick_entry_trampoline_ref == nullptr ||
+      napi_get_reference_value(env,
+                               state->tick_entry_trampoline_ref,
+                               &trampoline) != napi_ok ||
+      trampoline == nullptr) {
+    return napi_generic_failure;
+  }
+  // The provider API boundary consumes the trampoline frame. The registered
+  // callback remains a JavaScript frame invoked with process as its receiver,
+  // matching Node's process.processTicksAndRejections stack semantics.
+  napi_value argv[2] = {process, tick_cb};
   napi_value ignored = nullptr;
-  status = napi_call_function(env, process, tick_cb, 0, nullptr, &ignored);
+  status = napi_call_function(env, process, trampoline, 2, argv, &ignored);
   if (status == napi_ok && called != nullptr) {
     *called = true;
   }
