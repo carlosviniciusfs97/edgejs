@@ -13,7 +13,7 @@ operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
 environment-configuration work, the process-memory snapshot fold, and atomic
 source-map configuration, error-metadata snapshot, and message-resource
 ownership are complete, reducing
-the current surface to 69
+the current surface to 67
 operations:
 
 - environment creation is one operation with nullable options;
@@ -67,11 +67,19 @@ operations:
 - source-text and synthetic modules are created through one versioned, tagged
   descriptor. Providers validate the module kind and its complete payload at
   one boundary, while the Wasm guest imports one operation instead of exposing
-  one import per module kind.
+  one import per module kind; and
+- CPU and heap profilers are both opened and consumed through one typed opaque
+  session contract. Edge owns the numeric IDs exposed by its worker binding,
+  while providers own profiler lifetime and clean up any session left active
+  at environment teardown. This replaces four provider-specific start/stop
+  operations, CPU IDs, and heap `found` flags with two ownership transitions.
 
-The profiler/snapshot migration is covered by a native V8 provider contract,
-native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
-profile, heap profile, heap snapshot, and heapdump failure tests.
+The profiler/snapshot migration is covered by complete V8 and QuickJS provider
+suites, native and wasm32 Wasmer guest-bridge compilation, complete native V8
+and QuickJS Edge suites, the exact 67-import WASIX conformance check, and the
+serial V8 and QuickJS WASIX compatibility suites. Edge's worker CPU profile,
+heap profile, heap snapshot, and heapdump failure paths all use the same typed
+session contract.
 
 The attachment migration is covered by provider-neutral exactly-once contract
 tests, complete V8 and QuickJS provider suites, and the Wasmer guest/host-JS
@@ -508,7 +516,7 @@ The completed removal, mechanical, attachment, configuration, heap-space,
 memory-snapshot, source-map configuration, error-metadata snapshot,
 message-resource ownership, bytecode transaction, module-state snapshot,
 module-hooks configuration, tagged module creation, immutable creation metadata,
-and profiling-result phases reduce 106 exported functions to 69. The remaining
+and typed profiler-session phases reduce 106 exported functions to 67. The remaining
 module-resource changes can reduce it further, but their success criterion is
 not a specific number. The success criterion is that every remaining extension
 is either:

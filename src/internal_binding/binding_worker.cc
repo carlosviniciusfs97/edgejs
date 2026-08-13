@@ -117,6 +117,9 @@ struct Worker {
   std::string custom_err_reason;
   std::mutex task_mutex;
   std::deque<std::unique_ptr<WorkerTask>> completed_tasks;
+  std::unordered_map<uint32_t, unofficial_napi_profile> cpu_profiles;
+  uint32_t next_cpu_profile_id = 1;
+  unofficial_napi_profile heap_profile = nullptr;
 };
 
 struct WorkerTask {
@@ -796,45 +799,74 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       break;
     }
     case WorkerTaskType::kStartCpuProfile: {
-      unofficial_napi_cpu_profile_start_result result = unofficial_napi_cpu_profile_start_ok;
-      if (unofficial_napi_start_cpu_profile(worker_env, &result, &task->started_profile_id) != napi_ok) {
+      unofficial_napi_profile_start_result result = unofficial_napi_profile_start_ok;
+      unofficial_napi_profile profile = nullptr;
+      if (unofficial_napi_profile_start(
+              worker_env, unofficial_napi_profile_cpu, &result, &profile) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to start CPU profile");
-      } else if (result == unofficial_napi_cpu_profile_start_too_many) {
+      } else if (result == unofficial_napi_profile_start_busy) {
         SetTaskError(task, "ERR_CPU_PROFILE_TOO_MANY", "There are too many CPU profiles");
+      } else if (profile == nullptr) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "CPU profile session was not created");
       } else {
+        uint32_t profile_id = task->wrap->next_cpu_profile_id++;
+        while (profile_id == 0 || task->wrap->cpu_profiles.count(profile_id) != 0) {
+          profile_id = task->wrap->next_cpu_profile_id++;
+        }
+        task->wrap->cpu_profiles.emplace(profile_id, profile);
+        task->started_profile_id = profile_id;
         task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStopCpuProfile: {
-      napi_value json = nullptr;
-      if (unofficial_napi_stop_cpu_profile(
-              worker_env, task->profile_id, &task->found, &json) != napi_ok) {
-        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop CPU profile");
-      } else if (!task->found) {
+      auto profile_it = task->wrap->cpu_profiles.find(task->profile_id);
+      if (profile_it == task->wrap->cpu_profiles.end()) {
         SetTaskError(task, "ERR_CPU_PROFILE_NOT_STARTED", "CPU profile not started");
+        break;
+      }
+      unofficial_napi_profile profile = profile_it->second;
+      task->wrap->cpu_profiles.erase(profile_it);
+      napi_value json = nullptr;
+      if (unofficial_napi_profile_stop(worker_env, profile, &json) != napi_ok) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop CPU profile");
       } else if (!CopyUtf8String(worker_env, json, &task->json)) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy CPU profile");
+      } else {
+        task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStartHeapProfile: {
-      if (unofficial_napi_start_heap_profile(worker_env, &task->found) != napi_ok) {
+      unofficial_napi_profile_start_result result = unofficial_napi_profile_start_ok;
+      unofficial_napi_profile profile = nullptr;
+      if (unofficial_napi_profile_start(
+              worker_env, unofficial_napi_profile_heap, &result, &profile) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to start heap profile");
-      } else if (!task->found) {
+      } else if (result == unofficial_napi_profile_start_busy) {
         SetTaskError(task, "ERR_HEAP_PROFILE_HAVE_BEEN_STARTED", "heap profiler have been started");
+      } else if (profile == nullptr) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Heap profile session was not created");
+      } else {
+        task->wrap->heap_profile = profile;
+        task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStopHeapProfile: {
-      napi_value json = nullptr;
-      if (unofficial_napi_stop_heap_profile(
-              worker_env, &task->found, &json) != napi_ok) {
-        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop heap profile");
-      } else if (!task->found) {
+      unofficial_napi_profile profile = task->wrap->heap_profile;
+      if (profile == nullptr) {
         SetTaskError(task, "ERR_HEAP_PROFILE_NOT_STARTED", "heap profile not started");
+        break;
+      }
+      task->wrap->heap_profile = nullptr;
+      napi_value json = nullptr;
+      if (unofficial_napi_profile_stop(worker_env, profile, &json) != napi_ok) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop heap profile");
       } else if (!CopyUtf8String(worker_env, json, &task->json)) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy heap profile");
+      } else {
+        task->found = true;
       }
       break;
     }
@@ -1283,6 +1315,8 @@ cleanup_worker_env:
   shutdown_loop = EdgeWorkerEnvReleaseEventLoop(worker_env);
   if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
   (void)unofficial_napi_release_env(worker_scope, shutdown_loop);
+  wrap->cpu_profiles.clear();
+  wrap->heap_profile = nullptr;
   EdgeWorkerEnvDestroyReleasedEventLoop(shutdown_loop);
   wrap->worker_config.external_event_loop = nullptr;
   FinalizeWorkerThread(wrap, exit_code, custom_err, custom_err_reason);
