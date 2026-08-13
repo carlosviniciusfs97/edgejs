@@ -2,9 +2,26 @@
 
 | | | Remarks |
 | --- | --- | --- |
-| **Status** | 🟡 | Design audit complete; implementation is intentionally split into independently testable reductions. |
+| **Status** | ▶️ | Implementation active on `codex/napi-surface-reduction` from the current Edge and N-API `main` branches. |
 | **Baseline** | 106 functions | Exported from `napi/include/unofficial_napi.h` on 2026-08-11. |
 | **Goal** | Provider-neutral capabilities | Keep only semantics unavailable through standard Node-API, with explicit ownership and atomic state transitions. |
+
+## Implementation status
+
+The first implementation milestone reduces the exported header from 106 to 90
+operations. Phase 1 is complete. Five of the seven mechanical Phase 2 folds
+are also complete:
+
+- environment creation is one operation with nullable options;
+- environment release is one indivisible operation with a nullable loop;
+- structured clone has one optional-transfer-list form;
+- Edge implements non-index property filtering with standard Node-API; and
+- the worker stack limit is supplied only at environment creation.
+
+The heap-space bulk snapshot and environment-owned profiler/snapshot results
+remain intentionally separate follow-ups. They change result ownership and
+therefore need focused provider, guest-bridge, and worker-lifetime tests rather
+than being hidden in the mechanical ABI deletion.
 
 ## Decision
 
@@ -29,6 +46,15 @@ The first pass can remove 11 exports which have no Edge native consumer. A
 second, mechanical pass can remove or fold another 7 without changing
 semantics. The larger reductions should then follow their ownership boundary,
 not be attempted as one ABI rewrite.
+
+The implementation audit initially appeared to show that
+`module_wrap_set_module_source_object` and
+`module_wrap_get_module_source_object` were Edge-owned metadata. A complete
+consumer trace disproved that: V8's source-phase resolver consumes the stored
+object from the linked module record, and QuickJS retains the same provider
+state. These operations therefore remain provider capabilities. The
+host-JavaScript implementation must be completed instead of moving the value
+into Edge.
 
 ## Rules for deciding whether an extension belongs
 
@@ -231,14 +257,19 @@ Keep an opaque provider-owned module resource, but type it instead of exposing
 - replace source-text and synthetic creation with one tagged creation
   descriptor;
 - replace the two module callback setters with one module-hooks table;
-- replace `get_status`, `get_error`, `has_top_level_await`, and
-  `has_async_graph` with one module-state snapshot;
+- return immutable module requests and top-level-await status as part of the
+  creation result, then let Edge retain the request metadata and materialize
+  the JavaScript result with the required identity semantics;
+- replace `get_status`, `get_error`, and `has_async_graph` with one
+  module-state snapshot;
 - make `check_unsettled_top_level_await` take the opaque module handle instead
   of a JavaScript wrapper value;
 - keep link, instantiate, async evaluate, sync evaluate, namespace,
-  requests, set-export, cached-data, required-facade, and source-object
-  operations distinct because they perform different state transitions or
-  return values with different lifetimes.
+  set-export, cached-data, and required-facade operations distinct because
+  they perform different state transitions or return values with different
+  lifetimes;
+- keep source-object storage on the provider-owned module record because the
+  engine consumes it while resolving source-phase imports.
 
 Merging sync and async evaluate behind a boolean would not make the contract
 stronger: one returns a synchronous value/error contract and the other returns
@@ -319,8 +350,9 @@ not an equivalent replacement.
 
 ## Proposed migration order
 
-1. Add a generated ABI-usage test which compares the Edge Wasm imports with
-   the declared extension surface and rejects unused imports/stubs.
+1. Define one typed ABI inventory and generate declarations, bridge
+   registration, and import-conformance checks from it. Provider
+   implementations remain handwritten; this is not an opcode dispatcher.
 2. Remove the 11 unused/accidental exports and their bridge plumbing.
 3. Land the seven mechanical folds/replacements, one commit per capability.
 4. Introduce the environment options/hooks structs with `size` and `version`,

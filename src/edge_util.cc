@@ -798,7 +798,7 @@ napi_value GetOwnNonIndexPropertiesCallback(napi_env env, napi_callback_info inf
   }
 
   napi_value keys = nullptr;
-  if (unofficial_napi_get_own_non_index_properties(env, source, filter_bits, &keys) != napi_ok ||
+  if (EdgeGetOwnNonIndexProperties(env, source, filter_bits, &keys) != napi_ok ||
       keys == nullptr) {
     return Undefined(env);
   }
@@ -1434,6 +1434,52 @@ bool InstallTypesBinding(napi_env env) {
 }
 
 }  // namespace
+
+napi_status EdgeGetOwnNonIndexProperties(napi_env env,
+                                         napi_value value,
+                                         uint32_t filter_bits,
+                                         napi_value* result_out) {
+  if (env == nullptr || value == nullptr || result_out == nullptr) return napi_invalid_arg;
+  *result_out = nullptr;
+
+  napi_value keys = nullptr;
+  napi_status status = napi_get_all_property_names(env,
+                                                   value,
+                                                   napi_key_own_only,
+                                                   static_cast<napi_key_filter>(filter_bits),
+                                                   napi_key_keep_numbers,
+                                                   &keys);
+  if (status != napi_ok) return status;
+  if (keys == nullptr) return napi_generic_failure;
+
+  napi_value result = nullptr;
+  status = napi_create_array(env, &result);
+  if (status != napi_ok) return status;
+  if (result == nullptr) return napi_generic_failure;
+
+  uint32_t key_count = 0;
+  status = napi_get_array_length(env, keys, &key_count);
+  if (status != napi_ok) return status;
+
+  uint32_t result_index = 0;
+  for (uint32_t index = 0; index < key_count; ++index) {
+    napi_value key = nullptr;
+    status = napi_get_element(env, keys, index, &key);
+    if (status != napi_ok) return status;
+    if (key == nullptr) return napi_generic_failure;
+
+    napi_valuetype type = napi_undefined;
+    status = napi_typeof(env, key, &type);
+    if (status != napi_ok) return status;
+    if (type == napi_number) continue;
+
+    status = napi_set_element(env, result, result_index++, key);
+    if (status != napi_ok) return status;
+  }
+
+  *result_out = result;
+  return napi_ok;
+}
 
 napi_value EdgeCreateSharedTypedArray(napi_env env,
                                       napi_typedarray_type type,

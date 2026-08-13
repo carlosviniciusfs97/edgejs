@@ -803,6 +803,28 @@ globalThis.__edge_binding_cleanup_recreate_ok = 1;
 
 }  // namespace
 
+TEST_F(Test5InternalBindingParityPhase03, OwnNonIndexPropertiesUsesStandardNapiEnumeration) {
+  EnvScope s(runtime_.get());
+
+  constexpr const char* source = R"JS(
+const assert = require('assert');
+const utilBinding = internalBinding('util');
+const ownSymbol = Symbol('own-symbol');
+const ownSource = { 0: 'index', visible: true, [ownSymbol]: true };
+const ownNonIndex = utilBinding.getOwnNonIndexProperties(
+  ownSource,
+  utilBinding.constants.ALL_PROPERTIES,
+);
+assert.strictEqual(ownNonIndex.length, 2);
+assert.strictEqual(ownNonIndex.includes('visible'), true);
+assert.strictEqual(ownNonIndex.includes(ownSymbol), true);
+)JS";
+
+  std::string error;
+  EXPECT_EQ(EdgeRunScriptSource(s.env, source, &error), 0) << "error=" << error;
+  EXPECT_TRUE(error.empty()) << "error=" << error;
+}
+
 TEST_F(Test5InternalBindingParityPhase03, WaveOneAndTwoBindingsHaveCriticalParitySurface) {
   EnvScope s(runtime_.get());
 

@@ -33,7 +33,7 @@ struct EnvScope {
 
   explicit EnvScope(V8Runtime* runtime) {
     (void)runtime;
-    EXPECT_EQ(unofficial_napi_create_env(8, &env, &scope), napi_ok);
+    EXPECT_EQ(unofficial_napi_create_env(8, nullptr, &env, &scope), napi_ok);
     EXPECT_NE(env, nullptr);
     if (env != nullptr) {
       EXPECT_TRUE(EdgeAttachEnvironmentForRuntime(env));
@@ -46,7 +46,7 @@ struct EnvScope {
   ~EnvScope() {
     isolate.reset();
     if (env != nullptr) {
-      EXPECT_EQ(unofficial_napi_release_env(scope), napi_ok);
+      EXPECT_EQ(unofficial_napi_release_env(scope, nullptr), napi_ok);
       env = nullptr;
       scope = nullptr;
     }

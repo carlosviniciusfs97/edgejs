@@ -585,7 +585,7 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
 
     void* scope = nullptr;
     napi_env env = nullptr;
-    if (unofficial_napi_create_env(8, &env, &scope) != napi_ok || env == nullptr) {
+    if (unofficial_napi_create_env(8, nullptr, &env, &scope) != napi_ok || env == nullptr) {
       _exit(70);
     }
     std::string child_error;
@@ -600,7 +600,7 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
       (void)write(STDERR_FILENO, "\n", 1);
     }
     if (scope != nullptr) {
-      (void)unofficial_napi_release_env(scope);
+      (void)unofficial_napi_release_env(scope, nullptr);
     }
     _exit(child_exit);
   }

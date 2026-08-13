@@ -230,7 +230,7 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
 
   napi_env env = nullptr;
   void* env_scope = nullptr;
-  const napi_status create_status = unofficial_napi_create_env(8, &env, &env_scope);
+  const napi_status create_status = unofficial_napi_create_env(8, nullptr, &env, &env_scope);
   if (create_status != napi_ok || env == nullptr || env_scope == nullptr) {
     if (error_out != nullptr) {
       *error_out = "Failed to initialize runtime environment";
@@ -246,7 +246,7 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
                                        &startup_trace
 #endif
                                        )) {
-    (void)unofficial_napi_release_env(env_scope);
+    (void)unofficial_napi_release_env(env_scope, nullptr);
     if (error_out != nullptr) {
       *error_out = "Failed to attach runtime environment";
     }
@@ -255,7 +255,7 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.attach-runtime");
 
   if (EdgeRuntimePlatformInstallHooks(env) != napi_ok) {
-    (void)unofficial_napi_release_env(env_scope);
+    (void)unofficial_napi_release_env(env_scope, nullptr);
     if (error_out != nullptr) {
       *error_out = "Failed to attach runtime platform hooks";
     }
@@ -275,7 +275,7 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
   EdgeEnvironmentRunAtExitCallbacks(env);
   edge_builtin_bytecode::FlushIfDirty();
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.cleanup");
-  const napi_status release_status = unofficial_napi_release_env(env_scope);
+  const napi_status release_status = unofficial_napi_release_env(env_scope, nullptr);
   if (release_status != napi_ok) {
     if (error_out != nullptr) {
       *error_out = "Failed to release runtime environment";

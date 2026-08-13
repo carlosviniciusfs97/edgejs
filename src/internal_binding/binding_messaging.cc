@@ -18,6 +18,7 @@
 
 #include "binding_registry/binding_registry.h"
 #include "edge_environment.h"
+#include "edge_util.h"
 #include "internal_binding/helpers.h"
 #include "unofficial_napi.h"
 #include "../edge_module_loader.h"
@@ -1453,7 +1454,7 @@ napi_value CloneRootJSTransferableValueForQueue(napi_env env, napi_value value) 
   if (marker == nullptr) return nullptr;
 
   napi_value cloned = nullptr;
-  if (unofficial_napi_structured_clone(env, marker, &cloned) != napi_ok ||
+  if (unofficial_napi_structured_clone(env, marker, nullptr, &cloned) != napi_ok ||
       cloned == nullptr) {
     return nullptr;
   }
@@ -1534,7 +1535,7 @@ bool CreateTransferredJSTransferableMarkerForQueue(
   }
 
   napi_value cloned_marker = nullptr;
-  if (unofficial_napi_structured_clone(env, marker, &cloned_marker) != napi_ok ||
+  if (unofficial_napi_structured_clone(env, marker, nullptr, &cloned_marker) != napi_ok ||
       cloned_marker == nullptr) {
     return false;
   }
@@ -1671,7 +1672,7 @@ napi_value TransformTransferredValuesForQueue(
   if (seen_pairs != nullptr) seen_pairs->push_back({value, out});
 
   napi_value keys = nullptr;
-  if (unofficial_napi_get_own_non_index_properties(env, value, napi_key_all_properties, &keys) != napi_ok ||
+  if (EdgeGetOwnNonIndexProperties(env, value, napi_key_all_properties, &keys) != napi_ok ||
       keys == nullptr) {
     return out;
   }
@@ -1735,7 +1736,7 @@ bool TransferRootJSTransferableValueForQueue(
   }
 
   napi_value cloned = nullptr;
-  if (unofficial_napi_structured_clone(env, marker, &cloned) != napi_ok ||
+  if (unofficial_napi_structured_clone(env, marker, nullptr, &cloned) != napi_ok ||
       cloned == nullptr) {
     return false;
   }
@@ -1754,7 +1755,7 @@ napi_value StructuredCloneJSTransferableValue(napi_env env, napi_value value) {
   }
 
   napi_value cloned_data = nullptr;
-  if (unofficial_napi_structured_clone(env, prepared_data, &cloned_data) != napi_ok ||
+  if (unofficial_napi_structured_clone(env, prepared_data, nullptr, &cloned_data) != napi_ok ||
       cloned_data == nullptr) {
     return nullptr;
   }
@@ -2184,7 +2185,7 @@ bool ValueContainsMarkedUncloneable(napi_env env, napi_value value, napi_value v
   }
 
   napi_value keys = nullptr;
-  if (unofficial_napi_get_own_non_index_properties(env, value, napi_key_all_properties, &keys) != napi_ok ||
+  if (EdgeGetOwnNonIndexProperties(env, value, napi_key_all_properties, &keys) != napi_ok ||
       keys == nullptr) {
     return false;
   }
@@ -2273,7 +2274,7 @@ bool ValueRequiresMessagePortTransfer(napi_env env,
   }
 
   napi_value keys = nullptr;
-  if (unofficial_napi_get_own_non_index_properties(env, value, napi_key_all_properties, &keys) != napi_ok ||
+  if (EdgeGetOwnNonIndexProperties(env, value, napi_key_all_properties, &keys) != napi_ok ||
       keys == nullptr) {
     return false;
   }
@@ -2702,7 +2703,7 @@ napi_value CloneMessageValueWithTransfers(napi_env env, napi_value value, napi_v
     napi_value arraybuffer_transfer_list = CreateArrayBufferTransferList(env, normalized_transfer_arg);
     napi_value cloned = nullptr;
     const napi_status clone_status =
-        unofficial_napi_structured_clone_with_transfer(
+        unofficial_napi_structured_clone(
             env, clone_input, arraybuffer_transfer_list, &cloned);
     if (clone_status != napi_ok || cloned == nullptr) {
       bool has_pending = false;
@@ -2755,7 +2756,7 @@ napi_value CloneMessageValue(napi_env env, napi_value value, napi_value transfer
   auto clone_prepared_value = [&](napi_value prepared_value) -> napi_value {
     napi_value cloned = nullptr;
     const napi_status clone_status =
-        unofficial_napi_structured_clone(env, prepared_value, &cloned);
+        unofficial_napi_structured_clone(env, prepared_value, nullptr, &cloned);
     if (clone_status != napi_ok || cloned == nullptr) {
       bool has_pending = false;
       if (napi_is_exception_pending(env, &has_pending) == napi_ok && has_pending) {
@@ -3114,7 +3115,7 @@ napi_value TransformTransferredPortsForQueue(
   if (seen_pairs != nullptr) seen_pairs->push_back({value, out});
 
   napi_value keys = nullptr;
-  if (unofficial_napi_get_own_non_index_properties(env, value, napi_key_all_properties, &keys) != napi_ok ||
+  if (EdgeGetOwnNonIndexProperties(env, value, napi_key_all_properties, &keys) != napi_ok ||
       keys == nullptr) {
     return out;
   }
@@ -3316,7 +3317,7 @@ napi_value RestoreTransferredPortsInValue(napi_env env,
   }
 
   napi_value keys = nullptr;
-  if (unofficial_napi_get_own_non_index_properties(env, value, napi_key_all_properties, &keys) != napi_ok ||
+  if (EdgeGetOwnNonIndexProperties(env, value, napi_key_all_properties, &keys) != napi_ok ||
       keys == nullptr) {
     return value;
   }

@@ -1181,7 +1181,7 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
     }
   }
   EdgeInstallNapiEmbedderHooks();
-  if (unofficial_napi_create_env_with_options(8, &create_options, &worker_env, &worker_scope) != napi_ok ||
+  if (unofficial_napi_create_env(8, &create_options, &worker_env, &worker_scope) != napi_ok ||
       worker_env == nullptr || worker_scope == nullptr) {
     EdgeEnvironmentDestroyReleasedEventLoop(worker_loop);
     FinalizeWorkerThread(wrap, 1, "ERR_WORKER_INIT_FAILED", "Failed to create worker env");
@@ -1195,14 +1195,11 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
   if (!EdgeAttachEnvironmentForRuntime(worker_env, &wrap->worker_config)) {
     uv_loop_t* shutdown_loop = EdgeEnvironmentReleaseEventLoop(worker_env);
     if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
-    (void)unofficial_napi_release_env_with_loop(worker_scope, shutdown_loop);
+    (void)unofficial_napi_release_env(worker_scope, shutdown_loop);
     EdgeEnvironmentDestroyReleasedEventLoop(shutdown_loop);
     wrap->worker_config.external_event_loop = nullptr;
     FinalizeWorkerThread(wrap, 1, "ERR_WORKER_INIT_FAILED", "Failed to attach worker env");
     return;
-  }
-  if (wrap->stack_base != 0) {
-    (void)unofficial_napi_set_stack_limit(worker_env, reinterpret_cast<void*>(wrap->stack_base));
   }
   (void)unofficial_napi_set_near_heap_limit_callback(worker_env, WorkerNearHeapLimit, wrap);
   {
@@ -1274,7 +1271,7 @@ cleanup_worker_env:
   }
   shutdown_loop = EdgeWorkerEnvReleaseEventLoop(worker_env);
   if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
-  (void)unofficial_napi_release_env_with_loop(worker_scope, shutdown_loop);
+  (void)unofficial_napi_release_env(worker_scope, shutdown_loop);
   EdgeWorkerEnvDestroyReleasedEventLoop(shutdown_loop);
   wrap->worker_config.external_event_loop = nullptr;
   FinalizeWorkerThread(wrap, exit_code, custom_err, custom_err_reason);
