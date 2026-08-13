@@ -11,7 +11,8 @@
 The first implementation milestone reduced the exported header from 106 to 90
 operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
 environment-configuration work, the process-memory snapshot fold, and atomic
-source-map configuration and error-metadata snapshot are complete, reducing
+source-map configuration, error-metadata snapshot, and message-resource
+ownership are complete, reducing
 the current surface to 76
 operations:
 
@@ -41,7 +42,11 @@ operations:
   together, preventing providers from observing a partially updated pair; and
 - current source positions, stderr formatting, and thrown-at text are returned
   from one provider observation, while the same operation can atomically
-  consume preserved formatting state.
+  consume preserved formatting state; and
+- cross-environment values are represented by a typed opaque message. Edge
+  holds queued messages through move-only ownership; `message_take` consumes
+  the resource on success or failure, and `message_drop` is used only when an
+  unconsumed queue entry is abandoned.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
@@ -258,13 +263,13 @@ copy or a view over the entire WebAssembly memory.
 
 ### Cross-environment messages
 
-The current names `serialize_value`, `deserialize_value`, and
-`release_serialized_value` describe the V8 implementation, not the contract.
+The former names `serialize_value`, `deserialize_value`, and
+`release_serialized_value` described the V8 implementation, not the contract.
 The host-JavaScript provider correctly transports a host value through the
 Wasmer cross-worker registry, whose underlying transport performs structured
 clone/postMessage semantics. It does not need a second serializer.
 
-Replace the names with an opaque message resource:
+They are now represented by an opaque message resource:
 
 ```cpp
 unofficial_napi_message_create(source_env, value, &message);
@@ -272,11 +277,17 @@ unofficial_napi_message_take(destination_env, message, &value);  // consumes
 unofficial_napi_message_drop(message);                           // if unconsumed
 ```
 
-Three transitions are necessary even though the names become clearer: a
+Three transitions remain necessary even though the names are clearer: a
 queued message may be consumed in another environment or dropped because its
-port closes. `take` should consume the handle on both success and failure so
-the common success path cannot forget a separate release. Edge should own the
-handle with a move-only RAII wrapper while it is queued.
+port closes. `take` consumes the handle on both success and failure so the
+common success path cannot forget a separate release. Edge owns the handle
+with a move-only RAII wrapper while it is queued.
+
+The native Wasmer bridge stores message resources in a process-wide opaque
+handle table rather than reusing scope-bound `napi_value` IDs. This is required
+because a message can outlive its source handle scope and be taken by a
+different environment. The host-JavaScript bridge uses the Wasmer message
+registry with the same create/take/drop ownership contract.
 
 Within one environment, keep only the single structured-clone operation with
 an optional transfer list. It is not a substitute for the message handle,
@@ -438,9 +449,9 @@ must not choose an implementation with `#ifdef __wasi__`.
 ## Expected outcome
 
 The completed removal, mechanical, attachment, configuration, heap-space,
-memory-snapshot, source-map configuration, error-metadata snapshot, and
-profiling-result phases reduce 106 exported functions to 76. The later message,
-bytecode, module, and snapshot changes can reduce it
+memory-snapshot, source-map configuration, error-metadata snapshot,
+message-resource ownership, and profiling-result phases reduce 106 exported
+functions to 76. The later bytecode, module, and snapshot changes can reduce it
 further, but their success criterion is not a specific number. The success
 criterion is that every remaining extension is either:
 

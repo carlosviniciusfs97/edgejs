@@ -38,8 +38,46 @@ napi_value EdgeCryptoCreateKeyObjectFromCloneData(napi_env env, napi_value data)
 struct MessagePort;
 struct BroadcastChannelGroup;
 
+class EdgeMessagePayload {
+ public:
+  EdgeMessagePayload() = default;
+  explicit EdgeMessagePayload(unofficial_napi_message message) : message_(message) {}
+  ~EdgeMessagePayload() { Reset(); }
+
+  EdgeMessagePayload(const EdgeMessagePayload&) = delete;
+  EdgeMessagePayload& operator=(const EdgeMessagePayload&) = delete;
+
+  EdgeMessagePayload(EdgeMessagePayload&& other) noexcept : message_(other.Release()) {}
+  EdgeMessagePayload& operator=(EdgeMessagePayload&& other) noexcept {
+    if (this != &other) Reset(other.Release());
+    return *this;
+  }
+
+  explicit operator bool() const { return message_ != nullptr; }
+
+  napi_status Take(napi_env env, napi_value* result_out) {
+    unofficial_napi_message message = Release();
+    if (message == nullptr) return napi_invalid_arg;
+    return unofficial_napi_message_take(env, message, result_out);
+  }
+
+  void Reset(unofficial_napi_message message = nullptr) {
+    if (message_ != nullptr) unofficial_napi_message_drop(message_);
+    message_ = message;
+  }
+
+ private:
+  unofficial_napi_message Release() {
+    unofficial_napi_message message = message_;
+    message_ = nullptr;
+    return message;
+  }
+
+  unofficial_napi_message message_ = nullptr;
+};
+
 struct Message {
-  void* payload_data = nullptr;
+  EdgeMessagePayload payload;
   bool is_close = false;
   MessagePort* close_source = nullptr;
   struct TransferredPortData {
@@ -2482,10 +2520,6 @@ void DeleteQueuedMessages(napi_env env, MessagePortWrap* wrap) {
     wrap->data->close_message_enqueued = false;
   }
   for (auto& entry : queued) {
-    if (entry.payload_data != nullptr) {
-      unofficial_napi_release_serialized_value(entry.payload_data);
-      entry.payload_data = nullptr;
-    }
     for (auto& port_entry : entry.transferred_ports) {
       DeleteRefIfPresent(env, &port_entry.source_port_ref);
     }
@@ -2798,15 +2832,22 @@ void ThrowClosedMessagePortError(napi_env env) {
 
 void OnMessagePortClosed(uv_handle_t* handle);
 
-bool SerializeMessageValueForQueue(napi_env env, napi_value payload, void** payload_out) {
+bool CreateMessageValueForQueue(napi_env env,
+                                napi_value payload,
+                                EdgeMessagePayload* payload_out) {
   if (payload_out == nullptr) return false;
-  *payload_out = nullptr;
+  payload_out->Reset();
   if (payload == nullptr) return true;
 
   napi_value queue_payload = PrepareTransferableDataForStructuredClone(env, payload, false);
   if (queue_payload == nullptr) return false;
-  return unofficial_napi_serialize_value(env, queue_payload, payload_out) == napi_ok &&
-         *payload_out != nullptr;
+  unofficial_napi_message message = nullptr;
+  if (unofficial_napi_message_create(env, queue_payload, &message) != napi_ok ||
+      message == nullptr) {
+    return false;
+  }
+  payload_out->Reset(message);
+  return true;
 }
 
 bool IsCloneByReferenceValue(napi_env env, napi_value value) {
@@ -3359,19 +3400,11 @@ void EnqueueQueuedMessage(napi_env env,
     std::lock_guard<std::mutex> lock(target->mutex);
     if (queued.is_close) {
       if (target->closed || target->close_message_enqueued) {
-        if (queued.payload_data != nullptr) {
-          unofficial_napi_release_serialized_value(queued.payload_data);
-          queued.payload_data = nullptr;
-        }
         return;
       }
       target->close_message_enqueued = true;
     }
     if (target->closed) {
-      if (queued.payload_data != nullptr) {
-        unofficial_napi_release_serialized_value(queued.payload_data);
-        queued.payload_data = nullptr;
-      }
       for (auto& entry : queued.transferred_ports) {
         DeleteRefIfPresent(env, &entry.source_port_ref);
       }
@@ -3394,7 +3427,7 @@ void EnqueueMessageToPort(napi_env env,
   queued.close_source = close_source_wrap;
   queued.transferred_ports = std::move(transferred_ports);
   if (!is_close && payload != nullptr) {
-    if (!SerializeMessageValueForQueue(env, payload, &queued.payload_data)) {
+    if (!CreateMessageValueForQueue(env, payload, &queued.payload)) {
       ClearPendingException(env);
       for (auto& entry : queued.transferred_ports) {
         DeleteRefIfPresent(env, &entry.source_port_ref);
@@ -3405,24 +3438,21 @@ void EnqueueMessageToPort(napi_env env,
   EnqueueQueuedMessage(env, target, std::move(queued));
 }
 
-void EnqueueSerializedMessageToPort(
+void EnqueueMessagePayloadToPort(
     napi_env env,
     const EdgeMessagePortDataPtr& target,
-    void* payload_data,
+    EdgeMessagePayload payload,
     bool is_close,
     MessagePortWrap* close_source_wrap = nullptr,
     std::vector<QueuedMessage::TransferredPortEntry> transferred_ports = {}) {
   if (!target) {
-    if (payload_data != nullptr) {
-      unofficial_napi_release_serialized_value(payload_data);
-    }
     for (auto& entry : transferred_ports) {
       DeleteRefIfPresent(env, &entry.source_port_ref);
     }
     return;
   }
   QueuedMessage queued;
-  queued.payload_data = payload_data;
+  queued.payload = std::move(payload);
   queued.is_close = is_close;
   queued.close_source = close_source_wrap;
   queued.transferred_ports = std::move(transferred_ports);
@@ -3451,7 +3481,7 @@ void ProcessQueuedMessages(MessagePortWrap* wrap, bool force, size_t processing_
       std::lock_guard<std::mutex> lock(wrap->data->mutex);
       if (wrap->data->queued_messages.empty()) break;
       if (!force && !wrap->receiving_messages && !wrap->data->queued_messages.front().is_close) break;
-      next = wrap->data->queued_messages.front();
+      next = std::move(wrap->data->queued_messages.front());
       wrap->data->queued_messages.pop_front();
       if (next.is_close) wrap->data->close_message_enqueued = false;
       have_message = true;
@@ -3460,10 +3490,6 @@ void ProcessQueuedMessages(MessagePortWrap* wrap, bool force, size_t processing_
 
     if (next.is_close) {
       wrap->closing_has_ref = false;
-      if (next.payload_data != nullptr) {
-        unofficial_napi_release_serialized_value(next.payload_data);
-        next.payload_data = nullptr;
-      }
       BeginClosePort(wrap->handle_wrap.env, wrap, false);
       break;
     }
@@ -3471,16 +3497,14 @@ void ProcessQueuedMessages(MessagePortWrap* wrap, bool force, size_t processing_
     napi_value self = EdgeHandleWrapGetRefValue(wrap->handle_wrap.env, wrap->handle_wrap.wrapper_ref);
     napi_value payload = nullptr;
     napi_value message_error = nullptr;
-    if (next.payload_data != nullptr) {
-      if (unofficial_napi_deserialize_value(wrap->handle_wrap.env, next.payload_data, &payload) != napi_ok) {
+    if (next.payload) {
+      if (next.payload.Take(wrap->handle_wrap.env, &payload) != napi_ok) {
         payload = nullptr;
         message_error = TakePendingException(wrap->handle_wrap.env);
         if (message_error == nullptr) {
           message_error = CreateErrorWithMessage(wrap->handle_wrap.env, nullptr, "Message could not be deserialized");
         }
       }
-      unofficial_napi_release_serialized_value(next.payload_data);
-      next.payload_data = nullptr;
     }
     if (self != nullptr && message_error == nullptr) {
       napi_value ports = nullptr;
@@ -3830,7 +3854,7 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
   }
   std::vector<QueuedMessage::TransferredPortEntry> transferred_ports;
   napi_value cloned_payload = nullptr;
-  void* serialized_payload = nullptr;
+  EdgeMessagePayload message_payload;
   if (transfer_list != nullptr &&
       TransferListContainsValue(env, transfer_list, payload) &&
       IsTransferableValue(env, payload)) {
@@ -3867,12 +3891,8 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
 
     napi_value arraybuffer_transfer_list = CreateArrayBufferTransferList(env, normalized_transfer_arg);
     if (fast_path_peer != nullptr && arraybuffer_transfer_list == nullptr) {
-      if (!SerializeMessageValueForQueue(env, transformed_payload, &serialized_payload)) {
+      if (!CreateMessageValueForQueue(env, transformed_payload, &message_payload)) {
         DeleteTransferredPortRefs(env, &transferred_ports);
-        if (serialized_payload != nullptr) {
-          unofficial_napi_release_serialized_value(serialized_payload);
-          serialized_payload = nullptr;
-        }
         return ReadPendingCloneErrorMessage(env, transformed_payload);
       }
     } else {
@@ -3887,10 +3907,6 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
   ClearPendingException(env);
 
   if (wrap == nullptr || wrap->handle_wrap.state != kEdgeHandleInitialized || !wrap->data) {
-    if (serialized_payload != nullptr) {
-      unofficial_napi_release_serialized_value(serialized_payload);
-      serialized_payload = nullptr;
-    }
     DetachTransferredPorts(env, &transferred_ports);
     return Undefined(env);
   }
@@ -3909,10 +3925,6 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
       }
     }
     if (target_in_transfer_list) {
-      if (serialized_payload != nullptr) {
-        unofficial_napi_release_serialized_value(serialized_payload);
-        serialized_payload = nullptr;
-      }
       DetachTransferredPorts(env, &transferred_ports);
       EmitProcessWarning(env, "The target port was posted to itself, and the communication channel was lost");
       BeginClosePort(env, wrap, false);
@@ -3922,10 +3934,9 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
     }
 
     DetachTransferredPorts(env, &transferred_ports);
-    if (serialized_payload != nullptr) {
-      EnqueueSerializedMessageToPort(
-          env, peer, serialized_payload, false, nullptr, std::move(transferred_ports));
-      serialized_payload = nullptr;
+    if (message_payload) {
+      EnqueueMessagePayloadToPort(
+          env, peer, std::move(message_payload), false, nullptr, std::move(transferred_ports));
     } else {
       EnqueueMessageToPort(env, peer, cloned_payload, false, nullptr, std::move(transferred_ports));
     }
@@ -3959,10 +3970,6 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
 
   if (!transferred_ports.empty()) {
     DetachTransferredPorts(env, &transferred_ports);
-  }
-  if (serialized_payload != nullptr) {
-    unofficial_napi_release_serialized_value(serialized_payload);
-    serialized_payload = nullptr;
   }
   napi_value false_value = nullptr;
   napi_get_boolean(env, false, &false_value);
@@ -4741,7 +4748,7 @@ napi_value ReceiveMessageOnPortCallback(napi_env env, napi_callback_info info) {
     if (wrap->data) {
       std::lock_guard<std::mutex> lock(wrap->data->mutex);
       if (!wrap->data->queued_messages.empty()) {
-        next = wrap->data->queued_messages.front();
+        next = std::move(wrap->data->queued_messages.front());
         wrap->data->queued_messages.pop_front();
         if (next.is_close) wrap->data->close_message_enqueued = false;
         have_message = true;
@@ -4754,10 +4761,6 @@ napi_value ReceiveMessageOnPortCallback(napi_env env, napi_callback_info info) {
   }
 
   if (next.is_close) {
-    if (next.payload_data != nullptr) {
-      unofficial_napi_release_serialized_value(next.payload_data);
-      next.payload_data = nullptr;
-    }
     for (auto& entry : next.transferred_ports) {
       DeleteRefIfPresent(env, &entry.source_port_ref);
     }
@@ -4767,12 +4770,10 @@ napi_value ReceiveMessageOnPortCallback(napi_env env, napi_callback_info info) {
   }
 
   napi_value value = nullptr;
-  if (next.payload_data != nullptr) {
-    if (unofficial_napi_deserialize_value(env, next.payload_data, &value) != napi_ok) {
+  if (next.payload) {
+    if (next.payload.Take(env, &value) != napi_ok) {
       value = nullptr;
     }
-    unofficial_napi_release_serialized_value(next.payload_data);
-    next.payload_data = nullptr;
   }
   if (value == nullptr) {
     napi_value exception = TakePendingException(env);
