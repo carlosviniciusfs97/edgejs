@@ -3876,7 +3876,8 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
         return ReadPendingCloneErrorMessage(env, transformed_payload);
       }
     } else {
-      cloned_payload = CloneMessageValue(env, transformed_payload, normalized_transfer_arg);
+      cloned_payload = CloneMessageValueWithTransfers(
+          env, transformed_payload, normalized_transfer_arg);
       if (cloned_payload == nullptr) {
         DeleteTransferredPortRefs(env, &transferred_ports);
         return nullptr;

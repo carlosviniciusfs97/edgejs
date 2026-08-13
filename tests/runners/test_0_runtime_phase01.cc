@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -154,8 +155,6 @@ TEST_F(Test0RuntimePhase01, SyntaxErrorReturnsNonZero) {
 }
 
 TEST_F(Test0RuntimePhase01, EsmImportOfThrowingCjsReturnsJsErrorInsteadOfCrashing) {
-  EnvScope s(runtime_.get());
-
   const auto temp_dir = std::filesystem::temp_directory_path() / "edge_phase01_esm_import_cjs_throw";
   std::error_code mkdir_ec;
   std::filesystem::create_directories(temp_dir, mkdir_ec);
@@ -174,10 +173,22 @@ TEST_F(Test0RuntimePhase01, EsmImportOfThrowingCjsReturnsJsErrorInsteadOfCrashin
     out << "globalThis.__should_not_run = true;\n";
   }
 
-  std::string error;
-  const int exit_code = EdgeRunScriptFile(s.env, esm_path.c_str(), &error);
-  EXPECT_EQ(exit_code, 1);
-  EXPECT_NE(error.find("boom from cjs"), std::string::npos) << error;
+  // A failed static module graph is an uncaught main-module exception and may
+  // terminate the process. Exercise that boundary in a child so the test can
+  // distinguish the expected JavaScript exit from a native crash.
+  EXPECT_EXIT(
+      {
+        EnvScope s(runtime_.get());
+        std::string error;
+        const int exit_code =
+            EdgeRunScriptFileWithLoop(s.env, esm_path.c_str(), &error, true);
+        if (exit_code != 1 || error.find("boom from cjs") == std::string::npos) {
+          std::_Exit(2);
+        }
+        std::_Exit(exit_code);
+      },
+      ::testing::ExitedWithCode(1),
+      "boom from cjs");
 
   std::error_code remove_ec;
   std::filesystem::remove_all(temp_dir, remove_ec);
