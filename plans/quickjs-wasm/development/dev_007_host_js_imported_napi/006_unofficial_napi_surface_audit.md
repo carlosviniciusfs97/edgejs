@@ -11,7 +11,8 @@
 The first implementation milestone reduced the exported header from 106 to 90
 operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
 environment-configuration work, the process-memory snapshot fold, and atomic
-source-map configuration are complete, reducing the current surface to 79
+source-map configuration and error-metadata snapshot are complete, reducing
+the current surface to 76
 operations:
 
 - environment creation is one operation with nullable options;
@@ -37,7 +38,10 @@ operations:
   longer crosses the provider boundary through a second process-memory getter;
   and
 - source-map enablement and its optional error-source callback are configured
-  together, preventing providers from observing a partially updated pair.
+  together, preventing providers from observing a partially updated pair; and
+- current source positions, stderr formatting, and thrown-at text are returned
+  from one provider observation, while the same operation can atomically
+  consume preserved formatting state.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
@@ -341,9 +345,9 @@ threads. This removes the extension-wide `free_buffer` allocator convention.
 
 ### Error metadata
 
-The current error API can read source positions, stderr formatting, thrown-at
-text, and preserved formatting through four calls. Those calls may observe or
-consume different provider state. Replace them with one metadata snapshot:
+The former error API read source positions, stderr formatting, thrown-at text,
+and preserved formatting through four calls which could observe or consume
+different provider state. They now use one metadata snapshot:
 
 ```cpp
 struct unofficial_napi_error_metadata {
@@ -360,11 +364,12 @@ struct unofficial_napi_error_metadata {
 unofficial_napi_get_error_metadata(env, error, mode, &metadata);
 ```
 
-The mode selects current versus consume-preserved state. Keep
-`preserve_error_source_message` as the explicit capture transition. Source-map
-enablement and the source-map error callback now use one atomic configuration
-operation. The remaining metadata fold will ensure all formatting fields
-describe the same provider observation.
+The mode selects current versus consume-preserved state.
+`preserve_error_source_message` remains the explicit capture transition.
+Source-map enablement and the source-map error callback use one atomic
+configuration operation. All current formatting fields now come from the same
+provider message, and consuming preserved formatting is one indivisible state
+transition.
 
 ### Memory statistics
 
@@ -433,8 +438,9 @@ must not choose an implementation with `#ifdef __wasi__`.
 ## Expected outcome
 
 The completed removal, mechanical, attachment, configuration, heap-space,
-memory-snapshot, source-map configuration, and profiling-result phases reduce
-106 exported functions to 79. The later message, bytecode, module, and snapshot changes can reduce it
+memory-snapshot, source-map configuration, error-metadata snapshot, and
+profiling-result phases reduce 106 exported functions to 76. The later message,
+bytecode, module, and snapshot changes can reduce it
 further, but their success criterion is not a specific number. The success
 criterion is that every remaining extension is either:
 

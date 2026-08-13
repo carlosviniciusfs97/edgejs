@@ -268,8 +268,12 @@ napi_value ErrorsGetErrorSourcePositions(napi_env env, napi_callback_info info) 
     return out;
   }
 
-  unofficial_napi_error_source_positions positions = {};
-  if (unofficial_napi_get_error_source_positions(env, argv[0], &positions) != napi_ok) {
+  unofficial_napi_error_metadata metadata = {};
+  if (unofficial_napi_get_error_metadata(
+          env,
+          argv[0],
+          unofficial_napi_error_metadata_current,
+          &metadata) != napi_ok) {
     SetNamedString(env, out, "sourceLine", "");
     SetNamedString(env, out, "scriptResourceName", "");
     SetNamedInt32(env, out, "lineNumber", 0);
@@ -277,18 +281,18 @@ napi_value ErrorsGetErrorSourcePositions(napi_env env, napi_callback_info info) 
     return out;
   }
 
-  if (positions.source_line != nullptr) {
-    napi_set_named_property(env, out, "sourceLine", positions.source_line);
+  if (metadata.source_line != nullptr) {
+    napi_set_named_property(env, out, "sourceLine", metadata.source_line);
   } else {
     SetNamedString(env, out, "sourceLine", "");
   }
-  if (positions.script_resource_name != nullptr) {
-    napi_set_named_property(env, out, "scriptResourceName", positions.script_resource_name);
+  if (metadata.script_resource_name != nullptr) {
+    napi_set_named_property(env, out, "scriptResourceName", metadata.script_resource_name);
   } else {
     SetNamedString(env, out, "scriptResourceName", "");
   }
-  SetNamedInt32(env, out, "lineNumber", positions.line_number);
-  SetNamedInt32(env, out, "startColumn", positions.start_column);
+  SetNamedInt32(env, out, "lineNumber", metadata.line_number);
+  SetNamedInt32(env, out, "startColumn", metadata.start_column);
   return out;
 }
 

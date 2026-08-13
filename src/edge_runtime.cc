@@ -386,38 +386,32 @@ struct PendingExceptionInfo {
   std::string thrown_at;
 };
 
-std::string GetErrorSourceLine(napi_env env,
-                               napi_value exception,
-                               bool align_internal_assert = false) {
-  if (env == nullptr || exception == nullptr) {
-    return {};
-  }
-
-  napi_value stderr_line = nullptr;
-  if (unofficial_napi_get_error_source_line_for_stderr(env, exception, &stderr_line) == napi_ok &&
-      stderr_line != nullptr) {
-    std::string formatted = NapiValueToUtf8(env, stderr_line);
+std::string FormatErrorSourceLine(
+    napi_env env,
+    const unofficial_napi_error_metadata& metadata,
+    bool align_internal_assert = false) {
+  if (metadata.stderr_line != nullptr) {
+    std::string formatted = NapiValueToUtf8(env, metadata.stderr_line);
     if (!formatted.empty() && !align_internal_assert) {
       return formatted;
     }
   }
 
-  unofficial_napi_error_source_positions positions = {};
-  if (unofficial_napi_get_error_source_positions(env, exception, &positions) != napi_ok ||
-      positions.source_line == nullptr ||
-      positions.script_resource_name == nullptr ||
-      positions.line_number <= 0) {
+  if (metadata.source_line == nullptr ||
+      metadata.script_resource_name == nullptr ||
+      metadata.line_number <= 0) {
     return {};
   }
 
-  const std::string source_line = NapiValueToUtf8(env, positions.source_line);
-  const std::string script_resource_name = NapiValueToUtf8(env, positions.script_resource_name);
+  const std::string source_line = NapiValueToUtf8(env, metadata.source_line);
+  const std::string script_resource_name =
+      NapiValueToUtf8(env, metadata.script_resource_name);
   if (source_line.empty() || script_resource_name.empty()) {
     return {};
   }
 
-  int32_t start_column = positions.start_column;
-  int32_t end_column = positions.end_column;
+  int32_t start_column = metadata.start_column;
+  int32_t end_column = metadata.end_column;
   if (align_internal_assert && script_resource_name == "node:internal/assert") {
     start_column = 0;
     while (start_column < static_cast<int32_t>(source_line.size()) &&
@@ -432,9 +426,27 @@ std::string GetErrorSourceLine(napi_env env,
 
   std::string underline(static_cast<size_t>(start_column), ' ');
   underline.append(static_cast<size_t>(std::max<int32_t>(1, end_column - start_column)), '^');
-  return script_resource_name + ":" + std::to_string(positions.line_number) + "\n" +
+  return script_resource_name + ":" + std::to_string(metadata.line_number) + "\n" +
          source_line + "\n" +
          underline + "\n";
+}
+
+std::string GetErrorSourceLine(napi_env env,
+                               napi_value exception,
+                               bool align_internal_assert = false) {
+  if (env == nullptr || exception == nullptr) {
+    return {};
+  }
+
+  unofficial_napi_error_metadata metadata = {};
+  if (unofficial_napi_get_error_metadata(
+          env,
+          exception,
+          unofficial_napi_error_metadata_current,
+          &metadata) != napi_ok) {
+    return {};
+  }
+  return FormatErrorSourceLine(env, metadata, align_internal_assert);
 }
 
 std::string GetArrowMessageFromError(napi_env env, napi_value exception) {
@@ -519,18 +531,17 @@ bool TakePendingExceptionInfo(napi_env env,
     std::cerr << "[edge-exc] pending exception type=" << static_cast<int>(exception_type)
               << " value=" << exception_text << "\n";
   }
-  napi_value preserved_exception_line_value = nullptr;
-  napi_value preserved_thrown_at_value = nullptr;
-  if (unofficial_napi_take_preserved_error_formatting(
+  unofficial_napi_error_metadata preserved_metadata = {};
+  if (unofficial_napi_get_error_metadata(
           env,
           out->exception,
-          &preserved_exception_line_value,
-          &preserved_thrown_at_value) == napi_ok) {
-    if (preserved_exception_line_value != nullptr) {
-      out->exception_line = NapiValueToUtf8(env, preserved_exception_line_value);
+          unofficial_napi_error_metadata_take_preserved,
+          &preserved_metadata) == napi_ok) {
+    if (preserved_metadata.stderr_line != nullptr) {
+      out->exception_line = NapiValueToUtf8(env, preserved_metadata.stderr_line);
     }
-    if (preserved_thrown_at_value != nullptr) {
-      out->thrown_at = NapiValueToUtf8(env, preserved_thrown_at_value);
+    if (preserved_metadata.thrown_at != nullptr) {
+      out->thrown_at = NapiValueToUtf8(env, preserved_metadata.thrown_at);
     }
   }
 
@@ -542,28 +553,39 @@ bool TakePendingExceptionInfo(napi_env env,
         out->exception_line = prior_exception_line;
       }
       if (out->thrown_at.empty()) {
-        napi_value thrown_at_value = nullptr;
-        if (unofficial_napi_get_error_thrown_at(env, out->exception, &thrown_at_value) == napi_ok &&
-            thrown_at_value != nullptr) {
-          out->thrown_at = NapiValueToUtf8(env, thrown_at_value);
+        unofficial_napi_error_metadata metadata = {};
+        if (unofficial_napi_get_error_metadata(
+                env,
+                out->exception,
+                unofficial_napi_error_metadata_current,
+                &metadata) == napi_ok &&
+            metadata.thrown_at != nullptr) {
+          out->thrown_at = NapiValueToUtf8(env, metadata.thrown_at);
         }
       }
       return true;
     }
   }
 
+  unofficial_napi_error_metadata current_metadata = {};
+  bool has_current_metadata = false;
+  if (out->exception_line.empty() || out->thrown_at.empty()) {
+    has_current_metadata = unofficial_napi_get_error_metadata(
+                               env,
+                               out->exception,
+                               unofficial_napi_error_metadata_current,
+                               &current_metadata) == napi_ok;
+  }
   if (out->exception_line.empty()) {
     out->exception_line = GetArrowMessageFromError(env, out->exception);
   }
-  if (out->exception_line.empty()) {
-    out->exception_line = GetErrorSourceLine(env, out->exception);
+  if (out->exception_line.empty() && has_current_metadata) {
+    out->exception_line = FormatErrorSourceLine(env, current_metadata);
   }
-  if (out->thrown_at.empty()) {
-    napi_value thrown_at_value = nullptr;
-    if (unofficial_napi_get_error_thrown_at(env, out->exception, &thrown_at_value) == napi_ok &&
-        thrown_at_value != nullptr) {
-      out->thrown_at = NapiValueToUtf8(env, thrown_at_value);
-    }
+  if (out->thrown_at.empty() &&
+      has_current_metadata &&
+      current_metadata.thrown_at != nullptr) {
+    out->thrown_at = NapiValueToUtf8(env, current_metadata.thrown_at);
   }
   return true;
 }
@@ -653,10 +675,14 @@ std::string FormatUncaughtExceptionForStderr(napi_env env,
   if (EdgeExecArgvHasFlag("--trace-uncaught")) {
     std::string thrown_at = pending_thrown_at;
     if (thrown_at.empty()) {
-      napi_value thrown_at_value = nullptr;
-      if (unofficial_napi_get_error_thrown_at(env, exception, &thrown_at_value) == napi_ok &&
-          thrown_at_value != nullptr) {
-        thrown_at = NapiValueToUtf8(env, thrown_at_value);
+      unofficial_napi_error_metadata metadata = {};
+      if (unofficial_napi_get_error_metadata(
+              env,
+              exception,
+              unofficial_napi_error_metadata_current,
+              &metadata) == napi_ok &&
+          metadata.thrown_at != nullptr) {
+        thrown_at = NapiValueToUtf8(env, metadata.thrown_at);
       }
     }
     if (!thrown_at.empty()) {
