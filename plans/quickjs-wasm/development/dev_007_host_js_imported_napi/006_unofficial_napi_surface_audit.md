@@ -10,8 +10,8 @@
 
 The first implementation milestone reduced the exported header from 106 to 90
 operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
-environment-configuration work are complete, reducing the current surface to
-81 operations:
+environment-configuration work and the process-memory snapshot fold are
+complete, reducing the current surface to 80 operations:
 
 - environment creation is one operation with nullable options;
 - environment release is one indivisible operation with a nullable loop;
@@ -30,7 +30,10 @@ environment-configuration work are complete, reducing the current surface to
   and OOM callbacks together; and
 - process-global `set_embedder_hooks` and `set_flags_from_string` are gone.
   Engine flags, physical/constrained memory, resource limits, stack limit, and
-  guest-heap ownership are versioned immutable environment-creation inputs.
+  guest-heap ownership are versioned immutable environment-creation inputs;
+  and
+- ArrayBuffer memory is part of the atomic heap-statistics snapshot, so Edge no
+  longer crosses the provider boundary through a second process-memory getter.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
@@ -361,10 +364,11 @@ fields describe the same provider observation.
 
 ### Memory statistics
 
-Add ArrayBuffer memory to the heap-statistics snapshot so
-`get_process_memory_info` can be derived by Edge and removed. Return heap-space
-statistics in bulk rather than count-plus-index iteration. Keep heap-code
-statistics separate because callers do not otherwise need to pay for it.
+ArrayBuffer memory is now part of the heap-statistics snapshot and
+`get_process_memory_info` has been removed. Edge derives `process.memoryUsage()`
+and diagnostic-report heap values from that one snapshot. Heap-space statistics
+are already returned in bulk rather than count-plus-index iteration. Heap-code
+statistics remain separate because callers do not otherwise need to pay for it.
 
 ### Module state
 
@@ -424,11 +428,11 @@ must not choose an implementation with `#ifdef __wasi__`.
 
 ## Expected outcome
 
-The completed removal, mechanical, attachment, configuration, heap-space, and
-profiling-result phases reduce 106 exported functions to 81. The later message,
-bytecode, module, and snapshot changes can reduce it further, but their success
-criterion is not a specific number. The success criterion is that every
-remaining extension is either:
+The completed removal, mechanical, attachment, configuration, heap-space,
+memory-snapshot, and profiling-result phases reduce 106 exported functions to
+80. The later message, bytecode, module, and snapshot changes can reduce it
+further, but their success criterion is not a specific number. The success
+criterion is that every remaining extension is either:
 
 - one provider-owned engine capability unavailable in standard Node-API; or
 - one explicit transition on a typed opaque resource whose ownership cannot be

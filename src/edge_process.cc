@@ -1797,11 +1797,8 @@ bool BuildJavascriptHeap(napi_env env, napi_value process_obj, napi_value* out) 
   if (out == nullptr) return false;
   *out = nullptr;
 
-  double heap_total = 0;
-  double heap_used = 0;
-  double external = 0;
-  double array_buffers = 0;
-  (void)unofficial_napi_get_process_memory_info(env, &heap_total, &heap_used, &external, &array_buffers);
+  unofficial_napi_heap_statistics heap_statistics{};
+  (void)unofficial_napi_get_heap_statistics(env, &heap_statistics);
 
   napi_value exec_argv_value = nullptr;
   (void)GetNamedPropertyIfPresent(env, process_obj, "execArgv", &exec_argv_value);
@@ -1816,16 +1813,16 @@ bool BuildJavascriptHeap(napi_env env, napi_value process_obj, napi_value* out) 
     return false;
   }
 
-  SetNamedInt64(env, js_heap, "totalMemory", static_cast<int64_t>(heap_total));
+  SetNamedInt64(env, js_heap, "totalMemory", static_cast<int64_t>(heap_statistics.total_heap_size));
   SetNamedInt64(env, js_heap, "executableMemory", 0);
-  SetNamedInt64(env, js_heap, "totalCommittedMemory", static_cast<int64_t>(heap_total));
+  SetNamedInt64(env, js_heap, "totalCommittedMemory", static_cast<int64_t>(heap_statistics.total_heap_size));
   SetNamedInt64(env, js_heap, "availableMemory", 0);
   SetNamedInt64(env, js_heap, "totalGlobalHandlesMemory", 0);
   SetNamedInt64(env, js_heap, "usedGlobalHandlesMemory", 0);
-  SetNamedInt64(env, js_heap, "usedMemory", static_cast<int64_t>(heap_used));
+  SetNamedInt64(env, js_heap, "usedMemory", static_cast<int64_t>(heap_statistics.used_heap_size));
   SetNamedInt64(env, js_heap, "memoryLimit", static_cast<int64_t>(heap_limit));
   SetNamedInt64(env, js_heap, "mallocedMemory", 0);
-  SetNamedInt64(env, js_heap, "externalMemory", static_cast<int64_t>(external));
+  SetNamedInt64(env, js_heap, "externalMemory", static_cast<int64_t>(heap_statistics.external_memory));
   SetNamedInt64(env, js_heap, "peakMallocedMemory", 0);
   SetNamedInt64(env, js_heap, "nativeContextCount", 0);
   SetNamedInt64(env, js_heap, "detachedContextCount", 0);
@@ -2730,25 +2727,22 @@ void WriteReportUserLimits(SimpleJsonWriter& writer) {
 void WriteReportJavascriptHeap(SimpleJsonWriter& writer,
                                napi_env env,
                                const ReportBindingState* state) {
-  double heap_total = 0;
-  double heap_used = 0;
-  double external = 0;
-  double array_buffers = 0;
+  unofficial_napi_heap_statistics heap_statistics{};
   if (env != nullptr) {
-    (void)unofficial_napi_get_process_memory_info(env, &heap_total, &heap_used, &external, &array_buffers);
+    (void)unofficial_napi_get_heap_statistics(env, &heap_statistics);
   }
 
   writer.json_objectstart("javascriptHeap");
-  writer.json_keyvalue("totalMemory", static_cast<int64_t>(heap_total));
+  writer.json_keyvalue("totalMemory", static_cast<int64_t>(heap_statistics.total_heap_size));
   writer.json_keyvalue("executableMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("totalCommittedMemory", static_cast<int64_t>(heap_total));
+  writer.json_keyvalue("totalCommittedMemory", static_cast<int64_t>(heap_statistics.total_heap_size));
   writer.json_keyvalue("availableMemory", static_cast<int64_t>(0));
   writer.json_keyvalue("totalGlobalHandlesMemory", static_cast<int64_t>(0));
   writer.json_keyvalue("usedGlobalHandlesMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("usedMemory", static_cast<int64_t>(heap_used));
+  writer.json_keyvalue("usedMemory", static_cast<int64_t>(heap_statistics.used_heap_size));
   writer.json_keyvalue("memoryLimit", static_cast<int64_t>(state != nullptr ? state->max_heap_size_bytes : 0));
   writer.json_keyvalue("mallocedMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("externalMemory", static_cast<int64_t>(external));
+  writer.json_keyvalue("externalMemory", static_cast<int64_t>(heap_statistics.external_memory));
   writer.json_keyvalue("peakMallocedMemory", static_cast<int64_t>(0));
   writer.json_keyvalue("nativeContextCount", static_cast<int64_t>(0));
   writer.json_keyvalue("detachedContextCount", static_cast<int64_t>(0));
@@ -4536,18 +4530,15 @@ napi_value ProcessMethodsMemoryUsageBufferCallback(napi_env env, napi_callback_i
     ThrowSystemError(env, rss_rc, "uv_resident_set_memory");
     return nullptr;
   }
-  double heap_total = 0;
-  double heap_used = 0;
-  double external = 0;
-  double array_buffers = 0;
-  const napi_status memory_status = unofficial_napi_get_process_memory_info(
-      env, &heap_total, &heap_used, &external, &array_buffers);
+  unofficial_napi_heap_statistics heap_statistics{};
+  const napi_status memory_status =
+      unofficial_napi_get_heap_statistics(env, &heap_statistics);
   if (memory_status != napi_ok) return nullptr;
   values[0] = static_cast<double>(rss);
-  values[1] = heap_total;
-  values[2] = heap_used;
-  values[3] = external;
-  values[4] = array_buffers;
+  values[1] = static_cast<double>(heap_statistics.total_heap_size);
+  values[2] = static_cast<double>(heap_statistics.used_heap_size);
+  values[3] = static_cast<double>(heap_statistics.external_memory);
+  values[4] = static_cast<double>(heap_statistics.array_buffer_memory);
   if (!output.Release(true)) return nullptr;
   napi_value undefined = nullptr;
   napi_get_undefined(env, &undefined);
