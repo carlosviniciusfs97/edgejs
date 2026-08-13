@@ -37,6 +37,7 @@ constexpr int32_t kEvaluationPhase = 2;
 struct ModuleWrapInstance {
   napi_ref wrapper_ref = nullptr;
   napi_ref url_ref = nullptr;
+  napi_ref module_requests_ref = nullptr;
   unofficial_napi_module module_handle = nullptr;
   bool has_top_level_await = false;
 };
@@ -115,7 +116,29 @@ void ModuleWrapFinalize(napi_env env, void* data, void* /*hint*/) {
   }
   ResetRef(env, &instance->wrapper_ref);
   ResetRef(env, &instance->url_ref);
+  ResetRef(env, &instance->module_requests_ref);
   delete instance;
+}
+
+bool AdoptModuleCreationResult(
+    napi_env env,
+    const unofficial_napi_module_create_result& result,
+    ModuleWrapInstance* instance) {
+  if (instance == nullptr || result.module == nullptr ||
+      result.module_requests == nullptr) {
+    if (result.module != nullptr) {
+      (void)unofficial_napi_module_wrap_destroy(env, result.module);
+    }
+    return false;
+  }
+  if (napi_create_reference(env, result.module_requests, 1,
+                            &instance->module_requests_ref) != napi_ok) {
+    (void)unofficial_napi_module_wrap_destroy(env, result.module);
+    return false;
+  }
+  instance->module_handle = result.module;
+  instance->has_top_level_await = result.has_top_level_await;
+  return true;
 }
 
 void SetNamedInt(napi_env env, napi_value obj, const char* key, int32_t value) {
@@ -420,10 +443,11 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
       create_options.context_or_undefined = argc >= 2 ? argv[1] : nullptr;
       create_options.payload.synthetic.export_names = argv[2];
       create_options.payload.synthetic.synthetic_evaluation_steps = argv[3];
+      unofficial_napi_module_create_result create_result{};
       if (unofficial_napi_module_wrap_create(env,
                                              &create_options,
-                                             &instance->module_handle) != napi_ok ||
-          instance->module_handle == nullptr) {
+                                             &create_result) != napi_ok ||
+          !AdoptModuleCreationResult(env, create_result, instance)) {
         delete instance;
         return nullptr;
       }
@@ -559,9 +583,11 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
       create_options.payload.source_text.line_offset = line_offset;
       create_options.payload.source_text.column_offset = column_offset;
       create_options.payload.source_text.host_defined_option_id = host_defined_option;
+      unofficial_napi_module_create_result create_result{};
       const napi_status create_status = unofficial_napi_module_wrap_create(
-          env, &create_options, &instance->module_handle);
-      if (create_status != napi_ok || instance->module_handle == nullptr) {
+          env, &create_options, &create_result);
+      if (create_status != napi_ok ||
+          !AdoptModuleCreationResult(env, create_result, instance)) {
         napi_value err = nullptr;
         if (napi_get_and_clear_last_exception(env, &err) == napi_ok && err != nullptr) {
           const std::string resource_name =
@@ -572,13 +598,6 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
         }
         delete instance;
         return nullptr;
-      }
-      if (instance->module_handle != nullptr) {
-        unofficial_napi_module_state state{};
-        if (unofficial_napi_module_wrap_get_state(
-                env, instance->module_handle, &state) == napi_ok) {
-          instance->has_top_level_await = state.has_top_level_await;
-        }
       }
     }
   }
@@ -626,13 +645,9 @@ napi_value ModuleWrapGetModuleRequests(napi_env env, napi_callback_info info) {
   size_t argc = 0;
   napi_get_cb_info(env, info, &argc, nullptr, &this_arg, nullptr);
   ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
-  if (instance != nullptr && instance->module_handle != nullptr) {
-    napi_value out = nullptr;
-    if (unofficial_napi_module_wrap_get_module_requests(env, instance->module_handle, &out) == napi_ok &&
-        out != nullptr) {
-      return out;
-    }
-    return Undefined(env);
+  if (instance != nullptr && instance->module_requests_ref != nullptr) {
+    napi_value requests = GetRefValue(env, instance->module_requests_ref);
+    return requests != nullptr ? requests : Undefined(env);
   }
   napi_value out = nullptr;
   napi_create_array_with_length(env, 0, &out);

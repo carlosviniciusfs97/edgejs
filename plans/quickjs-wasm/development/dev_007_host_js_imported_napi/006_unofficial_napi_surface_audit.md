@@ -13,7 +13,7 @@ operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
 environment-configuration work, the process-memory snapshot fold, and atomic
 source-map configuration, error-metadata snapshot, and message-resource
 ownership are complete, reducing
-the current surface to 70
+the current surface to 69
 operations:
 
 - environment creation is one operation with nullable options;
@@ -377,9 +377,7 @@ The module-state migration is complete. It replaces four field-at-a-time
 operations (`get_status`, `get_error`, `has_top_level_await`, and
 `has_async_graph`) with one provider-neutral snapshot, a net reduction of
 three exports. The module handle is also now typed across Edge, V8, QuickJS,
-and the Wasmer bridge without changing its pointer-sized ABI. Moving immutable
-request metadata into the creation result remains a separate module-resource
-improvement.
+and the Wasmer bridge without changing its pointer-sized ABI.
 
 The module-hooks migration is complete. Two independently mutable callback
 setters are now one versioned configuration operation, a net reduction of one
@@ -393,6 +391,14 @@ versioned tagged descriptor retains type-specific fields while removing a
 provider symbol and a Wasm import. Descriptor size, version, and tag validation
 are covered in both native providers; Edge uses the same call on native and
 WASIX targets.
+
+The immutable creation-metadata migration is complete. The creation result now
+returns the opaque module handle, the frozen module-request array, and initial
+top-level-await status atomically. Edge retains the request array through a
+normal N-API reference and serves the binding getter from that owned value, so
+the post-creation `unofficial_napi_module_wrap_get_module_requests` query and
+the initial mutable-state query are gone. Mutable status, error, and async-graph
+state remain in the separate module-state snapshot.
 
 ### Profilers
 
@@ -501,8 +507,8 @@ must not choose an implementation with `#ifdef __wasi__`.
 The completed removal, mechanical, attachment, configuration, heap-space,
 memory-snapshot, source-map configuration, error-metadata snapshot,
 message-resource ownership, bytecode transaction, module-state snapshot,
-module-hooks configuration, tagged module creation, and profiling-result phases
-reduce 106 exported functions to 70. The remaining
+module-hooks configuration, tagged module creation, immutable creation metadata,
+and profiling-result phases reduce 106 exported functions to 69. The remaining
 module-resource changes can reduce it further, but their success criterion is
 not a specific number. The success criterion is that every remaining extension
 is either:
