@@ -2778,6 +2778,41 @@ napi_value CloneMessageValueWithTransfers(napi_env env, napi_value value, napi_v
   return cloned;
 }
 
+napi_value CloneMessageValueWithArrayBufferTransfers(
+    napi_env env,
+    napi_value transformed_value,
+    napi_value normalized_transfer_arg) {
+  // MessagePortPostMessageCallback has already validated the complete
+  // transfer list and replaced every transferred port with a queue marker.
+  // This stage owns only the structured clone and ArrayBuffer transfer. It
+  // must not collect, detach, or restore MessagePorts a second time.
+  napi_value clone_input =
+      PrepareTransferableDataForStructuredClone(env, transformed_value, false);
+  if (clone_input == nullptr) return nullptr;
+
+  napi_value arraybuffer_transfer_list =
+      CreateArrayBufferTransferList(env, normalized_transfer_arg);
+  napi_value cloned = nullptr;
+  const napi_status clone_status = unofficial_napi_structured_clone(
+      env, clone_input, arraybuffer_transfer_list, &cloned);
+  if (clone_status != napi_ok || cloned == nullptr) {
+    bool has_pending = false;
+    if (napi_is_exception_pending(env, &has_pending) == napi_ok && has_pending) {
+      return ReadPendingCloneErrorMessage(env, clone_input);
+    }
+    std::string message = DescribeCloneFailureValue(env, clone_input);
+    napi_value err = CreateDataCloneError(
+        env, message.empty() ? "The object could not be cloned." : message.c_str());
+    if (err != nullptr) napi_throw(env, err);
+    return nullptr;
+  }
+  // Keep native and JS-transferable markers serialized while the value is
+  // queued. The receiving side restores them after taking the queued message;
+  // restoring here would put host objects back into a value that must be
+  // cloned once more by EnqueueMessageToPort.
+  return cloned;
+}
+
 napi_value CloneMessageValue(napi_env env, napi_value value, napi_value transfer_arg) {
   napi_value clone_input = value;
   if (IsProcessEnvValue(env, clone_input)) {
@@ -3874,7 +3909,6 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
       DeleteTransferredPortRefs(env, &transferred_ports);
       return nullptr;
     }
-
     std::vector<ValueTransformPair> seen_pairs;
     napi_value transformed_payload =
         TransformTransferredPortsForQueue(env, transferred_payload, transferred_ports, &seen_pairs);
@@ -3882,7 +3916,6 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
       DeleteTransferredPortRefs(env, &transferred_ports);
       return nullptr;
     }
-
     EdgeMessagePortDataPtr fast_path_peer;
     if (wrap != nullptr && wrap->handle_wrap.state == kEdgeHandleInitialized && wrap->data) {
       std::lock_guard<std::mutex> lock(wrap->data->mutex);
@@ -3896,7 +3929,7 @@ napi_value MessagePortPostMessageCallback(napi_env env, napi_callback_info info)
         return ReadPendingCloneErrorMessage(env, transformed_payload);
       }
     } else {
-      cloned_payload = CloneMessageValueWithTransfers(
+      cloned_payload = CloneMessageValueWithArrayBufferTransfers(
           env, transformed_payload, normalized_transfer_arg);
       if (cloned_payload == nullptr) {
         DeleteTransferredPortRefs(env, &transferred_ports);

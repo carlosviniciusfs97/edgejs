@@ -1081,9 +1081,10 @@ napi_value ParserConsume(napi_env env, napi_callback_info info) {
         uint32_t ignored = 0;
         if (napi_reference_ref(env, p->wrapper_ref, &ignored) != napi_ok) {
           ClearConsumedStreamBinding(p);
-          napi_value undefined = nullptr;
-          napi_get_undefined(env, &undefined);
-          return undefined;
+          napi_throw_error(env,
+                           "ERR_HTTP_PARSER_CONSUME",
+                           "Failed to retain the HTTP parser while consuming a stream");
+          return nullptr;
         }
         p->consumed_wrapper_ref_held = true;
         // consume() transfers read dispatch to the parser listener. Ensure the
@@ -1095,6 +1096,10 @@ napi_value ParserConsume(napi_env env, napi_callback_info info) {
         // the listener transfer.
         if (read_status != 0 && read_status != UV_ENOTCONN) {
           ClearConsumedStreamBinding(p);
+          napi_throw_error(env,
+                           uv_err_name(read_status),
+                           uv_strerror(read_status));
+          return nullptr;
         }
         if (TraceNetEnabled()) {
           std::fprintf(stderr,
@@ -1105,12 +1110,18 @@ napi_value ParserConsume(napi_env env, napi_callback_info info) {
                        read_status == 0 || read_status == UV_ENOTCONN,
                        read_status);
         }
-      } else if (TraceNetEnabled()) {
-        std::fprintf(stderr,
-                     "EDGE_TRACE_NET http_parser consume parser=%p stream=%p listener=%p ok=0\n",
-                     static_cast<void*>(p),
-                     static_cast<void*>(stream),
-                     static_cast<void*>(&p->consumed_listener));
+      } else {
+        if (TraceNetEnabled()) {
+          std::fprintf(stderr,
+                       "EDGE_TRACE_NET http_parser consume parser=%p stream=%p listener=%p ok=0\n",
+                       static_cast<void*>(p),
+                       static_cast<void*>(stream),
+                       static_cast<void*>(&p->consumed_listener));
+        }
+        napi_throw_error(env,
+                         "ERR_HTTP_PARSER_CONSUME",
+                         "The stream already has an active read listener");
+        return nullptr;
       }
     }
   }

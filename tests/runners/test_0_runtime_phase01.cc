@@ -351,6 +351,55 @@ TEST_F(Test0RuntimePhase01, TaskQueueStateIsIsolatedPerEnv) {
   EXPECT_TRUE(second_has_rejection_to_warn);
 }
 
+TEST_F(Test0RuntimePhase01, TickCallbackDoesNotDependOnMutableReflectGlobal) {
+  EnvScope s(runtime_.get());
+
+  napi_value binding = EdgeGetOrCreateTaskQueueBinding(s.env);
+  ASSERT_NE(binding, nullptr);
+  napi_value set_tick_callback = nullptr;
+  ASSERT_EQ(napi_get_named_property(
+                s.env, binding, "setTickCallback", &set_tick_callback),
+            napi_ok);
+  ASSERT_NE(set_tick_callback, nullptr);
+
+  napi_value source = nullptr;
+  napi_value callback = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "(function processTicksAndRejections() { "
+                "globalThis.__edge_tick_receiver_ok = (this === globalThis); })",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &callback), napi_ok);
+  ASSERT_NE(callback, nullptr);
+  napi_value ignored = nullptr;
+  ASSERT_EQ(napi_call_function(
+                s.env, binding, set_tick_callback, 1, &callback, &ignored),
+            napi_ok);
+
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "globalThis.Reflect = undefined",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &ignored), napi_ok);
+
+  bool called = false;
+  EXPECT_EQ(EdgeRunTaskQueueTickCallback(s.env, &called), napi_ok);
+  EXPECT_TRUE(called);
+  napi_value global = nullptr;
+  napi_value receiver_ok = nullptr;
+  bool receiver_matches = false;
+  ASSERT_EQ(napi_get_global(s.env, &global), napi_ok);
+  ASSERT_EQ(napi_get_named_property(
+                s.env, global, "__edge_tick_receiver_ok", &receiver_ok),
+            napi_ok);
+  ASSERT_EQ(napi_get_value_bool(s.env, receiver_ok, &receiver_matches), napi_ok);
+  EXPECT_TRUE(receiver_matches);
+}
+
 TEST_F(Test0RuntimePhase01, NativeImmediateQueueRunsBeforeJsImmediatesAndDrainsNestedTasks) {
   EnvScope s(runtime_.get());
 

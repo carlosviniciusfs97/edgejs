@@ -582,20 +582,11 @@ napi_value BuildResourceLimitsArray(napi_env env, const std::array<double, 4>& l
   return typed;
 }
 
-bool CopyUtf8String(napi_env env, napi_value value, std::string* output) {
+bool CopyUtf8Bytes(napi_env env, napi_value value, std::string* output) {
   if (env == nullptr || value == nullptr || output == nullptr) return false;
-  size_t length = 0;
-  if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok) {
-    return false;
-  }
-  output->assign(length + 1, '\0');
-  size_t written = 0;
-  if (napi_get_value_string_utf8(
-          env, value, output->data(), output->size(), &written) != napi_ok) {
-    output->clear();
-    return false;
-  }
-  output->resize(written);
+  EdgeBufferLease bytes;
+  if (!bytes.Acquire(env, value, unofficial_napi_buffer_access_read)) return false;
+  output->assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
   return true;
 }
 
@@ -791,6 +782,7 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       break;
     }
     case WorkerTaskType::kGetHeapStatistics: {
+      unofficial_napi_heap_statistics_init(&task->heap_statistics);
       if (unofficial_napi_get_heap_statistics(worker_env, &task->heap_statistics) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to get heap statistics");
       } else {
@@ -830,7 +822,7 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       napi_value json = nullptr;
       if (unofficial_napi_profile_stop(worker_env, profile, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop CPU profile");
-      } else if (!CopyUtf8String(worker_env, json, &task->json)) {
+      } else if (!CopyUtf8Bytes(worker_env, json, &task->json)) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy CPU profile");
       } else {
         task->found = true;
@@ -863,7 +855,7 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       napi_value json = nullptr;
       if (unofficial_napi_profile_stop(worker_env, profile, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop heap profile");
-      } else if (!CopyUtf8String(worker_env, json, &task->json)) {
+      } else if (!CopyUtf8Bytes(worker_env, json, &task->json)) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy heap profile");
       } else {
         task->found = true;
@@ -875,7 +867,7 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       if (unofficial_napi_take_heap_snapshot(
               worker_env, &task->heap_snapshot_options, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to take heap snapshot");
-      } else if (!CopyUtf8String(worker_env, json, &task->json)) {
+      } else if (!CopyUtf8Bytes(worker_env, json, &task->json)) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy heap snapshot");
       } else {
         task->found = true;

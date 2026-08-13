@@ -2120,12 +2120,16 @@ void ConsumeHTTP2Data(Http2SessionWrap* session) {
     return;
   }
 
-  std::vector<uint8_t> input(
-      session->pending_parent_read_bytes.begin() + session->pending_parent_read_offset,
-      session->pending_parent_read_bytes.end());
+  // Move ownership of the current contiguous input out of the session. Parser
+  // callbacks may synchronously append new parent data, but they now write to
+  // a distinct vector and cannot invalidate the buffer passed to nghttp2.
+  // This gives reentrancy safety without copying the entire unconsumed input
+  // at the start of every pause/resume cycle.
+  const size_t input_offset = session->pending_parent_read_offset;
+  std::vector<uint8_t> input = std::move(session->pending_parent_read_bytes);
   session->pending_parent_read_bytes.clear();
   session->pending_parent_read_offset = 0;
-  const size_t len = input.size();
+  const size_t len = input.size() - input_offset;
   if (len == 0) {
     session->receive_paused = false;
     return;
@@ -2142,7 +2146,8 @@ void ConsumeHTTP2Data(Http2SessionWrap* session) {
   session->in_scope = true;
   session->consuming_parent_read = true;
 
-  const ssize_t rc = nghttp2_session_mem_recv(session->session, input.data(), len);
+  const ssize_t rc = nghttp2_session_mem_recv(
+      session->session, input.data() + input_offset, len);
   session->consuming_parent_read = false;
   session->in_scope = was_in_scope;
   DebugSession(session,
@@ -2155,7 +2160,9 @@ void ConsumeHTTP2Data(Http2SessionWrap* session) {
     if (consumed < len) {
       std::vector<uint8_t> pending;
       pending.reserve((len - consumed) + session->pending_parent_read_bytes.size());
-      pending.insert(pending.end(), input.begin() + consumed, input.end());
+      pending.insert(pending.end(),
+                     input.begin() + input_offset + consumed,
+                     input.end());
       pending.insert(pending.end(),
                      session->pending_parent_read_bytes.begin(),
                      session->pending_parent_read_bytes.end());

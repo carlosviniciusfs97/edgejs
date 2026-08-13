@@ -39,7 +39,8 @@ class EdgeBytecode {
                    size_t cache_byte_length = 0,
                    bool has_cache = false,
                    bool* cache_rejected_out = nullptr,
-                   bool* can_parse_as_module_out = nullptr) {
+                   bool* can_parse_as_module_out = nullptr,
+                   bool compile_on_cache_rejection = true) {
     Reset();
     if (cache_rejected_out != nullptr) *cache_rejected_out = false;
     if (can_parse_as_module_out != nullptr) *can_parse_as_module_out = false;
@@ -57,6 +58,10 @@ class EdgeBytecode {
     options.cache_bytes = cache_bytes;
     options.cache_byte_length = cache_byte_length;
     options.has_cache = has_cache ? 1 : 0;
+    options.cache_policy =
+        compile_on_cache_rejection
+            ? unofficial_napi_bytecode_cache_compile_on_reject
+            : unofficial_napi_bytecode_cache_validate_only;
 
     unofficial_napi_bytecode_open_result result{};
     const napi_status status = unofficial_napi_bytecode_open(env, &options, &result);

@@ -496,9 +496,11 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
             has_bytes ? data.data() : nullptr,
             has_bytes ? data.size() : 0,
             true,
-            &rejected);
-        // SourceTextModule requires rejection to throw even though the strong
-        // open contract also prepared a valid fallback artifact.
+            &rejected,
+            nullptr,
+            false);
+        // SourceTextModule rejects invalid cachedData without paying for a
+        // fallback artifact that the constructor is required to discard.
         rejected = open_status != napi_ok || rejected;
         SetNamedBool(env, this_arg, "cachedDataRejected", rejected);
         if (rejected) {
@@ -850,24 +852,6 @@ napi_value ModuleWrapGetError(napi_env env, napi_callback_info info) {
     }
   }
   return Undefined(env);
-}
-
-napi_value ModuleWrapHasTopLevelAwait(napi_env env, napi_callback_info info) {
-  napi_value this_arg = nullptr;
-  size_t argc = 0;
-  napi_get_cb_info(env, info, &argc, nullptr, &this_arg, nullptr);
-  ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
-  bool value = instance != nullptr && instance->has_top_level_await;
-  if (instance != nullptr && instance->module_handle != nullptr) {
-    unofficial_napi_module_state state{};
-    if (unofficial_napi_module_wrap_get_state(
-            env, instance->module_handle, &state) == napi_ok) {
-      value = state.has_top_level_await;
-    }
-  }
-  napi_value out = nullptr;
-  napi_get_boolean(env, value, &out);
-  return out != nullptr ? out : Undefined(env);
 }
 
 napi_value ModuleWrapHasAsyncGraph(napi_env env, napi_callback_info info) {

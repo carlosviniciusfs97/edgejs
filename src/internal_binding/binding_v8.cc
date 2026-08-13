@@ -55,6 +55,7 @@ struct V8BindingState {
   napi_ref heap_statistics_buffer_ref = nullptr;
   napi_ref heap_space_statistics_buffer_ref = nullptr;
   napi_ref heap_code_statistics_buffer_ref = nullptr;
+  std::vector<unofficial_napi_heap_space_statistics> heap_space_snapshot;
 };
 
 napi_value MakeUndefined(napi_env env) {
@@ -206,6 +207,7 @@ napi_value V8UpdateHeapStatisticsBuffer(napi_env env, napi_callback_info /*info*
   if (buffer == nullptr) return MakeUndefined(env);
 
   unofficial_napi_heap_statistics stats{};
+  unofficial_napi_heap_statistics_init(&stats);
   if (unofficial_napi_get_heap_statistics(env, &stats) != napi_ok) {
     return MakeUndefined(env);
   }
@@ -245,18 +247,21 @@ napi_value V8UpdateHeapSpaceStatisticsBuffer(napi_env env, napi_callback_info in
       env, state->heap_space_statistics_buffer_ref, kHeapSpaceStatisticsPropertiesCount, &output);
   if (buffer == nullptr) return MakeUndefined(env);
 
-  std::vector<unofficial_napi_heap_space_statistics> statistics;
-  if (!GetHeapSpaceStatisticsSnapshot(env, &statistics) ||
-      space_index >= statistics.size()) {
+  if ((space_index == 0 || state->heap_space_snapshot.empty()) &&
+      !GetHeapSpaceStatisticsSnapshot(env, &state->heap_space_snapshot)) {
     return MakeUndefined(env);
   }
-  const auto& stats = statistics[space_index];
+  if (space_index >= state->heap_space_snapshot.size()) return MakeUndefined(env);
+  const auto stats = state->heap_space_snapshot[space_index];
 
   buffer[0] = static_cast<double>(stats.space_size);
   buffer[1] = static_cast<double>(stats.space_used_size);
   buffer[2] = static_cast<double>(stats.space_available_size);
   buffer[3] = static_cast<double>(stats.physical_space_size);
   if (!output.Release(true)) return MakeUndefined(env);
+  if (space_index + 1 >= state->heap_space_snapshot.size()) {
+    state->heap_space_snapshot.clear();
+  }
   return MakeUndefined(env);
 }
 
@@ -347,9 +352,11 @@ napi_value InitV8(napi_env env) {
 
   napi_value heap_spaces = nullptr;
   std::vector<unofficial_napi_heap_space_statistics> heap_space_statistics;
-  if (GetHeapSpaceStatisticsSnapshot(env, &heap_space_statistics) &&
-      napi_create_array_with_length(env, heap_space_statistics.size(), &heap_spaces) == napi_ok &&
-      heap_spaces != nullptr) {
+  const bool has_heap_spaces =
+      GetHeapSpaceStatisticsSnapshot(env, &heap_space_statistics);
+  const size_t heap_space_count = has_heap_spaces ? heap_space_statistics.size() : 0;
+  if (napi_create_array_with_length(env, heap_space_count, &heap_spaces) == napi_ok &&
+      heap_spaces != nullptr && has_heap_spaces) {
     for (uint32_t i = 0; i < heap_space_statistics.size(); ++i) {
       const auto& stats = heap_space_statistics[i];
       napi_value name = nullptr;

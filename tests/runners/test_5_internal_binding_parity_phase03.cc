@@ -58,12 +58,21 @@ assert.strictEqual(asyncWrap.constants.kPromiseResolve, 4);
 assert.strictEqual(asyncWrap.constants.kStackLength, 7);
 assert.strictEqual(asyncWrap.constants.kUsesExecutionAsyncResource, 8);
 assert.strictEqual(typeof asyncWrap.Providers.PROMISE, 'number');
+const destroyCalls = [];
 asyncWrap.setupHooks({
   init() {},
   before() {},
   after() {},
-  destroy() {},
+  destroy(id) { destroyCalls.push(id); },
   promise_resolve() {},
+});
+asyncWrap.queueDestroyAsyncId(321);
+// Destroy hooks are dispatched through a deferred platform task, matching
+// Node's deferred queueDestroyAsyncId semantics. The JS immediate keeps the
+// loop alive and observes the platform task after it drains.
+globalThis.__edge_destroy_calls = destroyCalls;
+setImmediate(() => {
+  assert.deepStrictEqual(destroyCalls, [321]);
 });
 asyncWrap.setPromiseHooks(() => {}, undefined, () => {}, undefined);
 const promiseHooks = asyncWrap.getPromiseHooks();
@@ -800,7 +809,7 @@ globalThis.__edge_binding_cleanup_recreate_ok = 1;
 
 }  // namespace
 
-TEST_F(Test5InternalBindingParityPhase03, OwnNonIndexPropertiesUsesStandardNapiEnumeration) {
+TEST_F(Test5InternalBindingParityPhase03, OwnNonIndexPropertiesFiltersIndicesInProvider) {
   EnvScope s(runtime_.get());
 
   constexpr const char* source = R"JS(
@@ -826,7 +835,7 @@ TEST_F(Test5InternalBindingParityPhase03, WaveOneAndTwoBindingsHaveCriticalParit
   EnvScope s(runtime_.get());
 
   std::string error;
-  const int exit_code = EdgeRunScriptSource(s.env, kParityWaveScript, &error);
+  const int exit_code = EdgeRunScriptSourceWithLoop(s.env, kParityWaveScript, &error, true);
   EXPECT_EQ(exit_code, 0) << "error=" << error;
   EXPECT_TRUE(error.empty());
 
@@ -840,6 +849,18 @@ TEST_F(Test5InternalBindingParityPhase03, WaveOneAndTwoBindingsHaveCriticalParit
   ASSERT_EQ(napi_get_value_int32(s.env, ok_value, &ok), napi_ok);
   EXPECT_EQ(ok, 1);
 
+  // EdgeRunScriptSource drains the event loop before returning, so inspect the
+  // array directly without bootstrapping Node a second time in the same env.
+  napi_value destroy_calls = nullptr;
+  ASSERT_EQ(napi_get_named_property(s.env, global, "__edge_destroy_calls", &destroy_calls), napi_ok);
+  uint32_t destroy_call_count = 0;
+  ASSERT_EQ(napi_get_array_length(s.env, destroy_calls, &destroy_call_count), napi_ok);
+  ASSERT_EQ(destroy_call_count, 1u);
+  napi_value destroyed_async_id = nullptr;
+  ASSERT_EQ(napi_get_element(s.env, destroy_calls, 0, &destroyed_async_id), napi_ok);
+  double destroyed_async_id_number = 0;
+  ASSERT_EQ(napi_get_value_double(s.env, destroyed_async_id, &destroyed_async_id_number), napi_ok);
+  EXPECT_EQ(destroyed_async_id_number, 321);
 }
 
 TEST_F(Test5InternalBindingParityPhase03, BindingCachesCanBeDestroyedAndRecreatedAcrossEnvs) {

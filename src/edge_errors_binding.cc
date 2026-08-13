@@ -272,7 +272,7 @@ napi_value ErrorsGetErrorSourcePositions(napi_env env, napi_callback_info info) 
   if (unofficial_napi_get_error_metadata(
           env,
           argv[0],
-          unofficial_napi_error_metadata_current,
+          unofficial_napi_error_metadata_positions_only,
           &metadata) != napi_ok) {
     SetNamedString(env, out, "sourceLine", "");
     SetNamedString(env, out, "scriptResourceName", "");

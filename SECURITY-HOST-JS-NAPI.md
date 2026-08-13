@@ -25,6 +25,10 @@ they are not lost; none of them currently blocks the package.
   strategy; deleting a few globals is not sufficient isolation.
 - Values, callbacks, exceptions, promises, and typed-array backing stores that
   cross N-API can leak host-realm objects or capabilities into guest code.
+- QuickJS `CallSite.getThis()` and `getTypeName()` currently expose the live
+  receiver for strict-mode and ESM frames. Before treating either provider as
+  a boundary, mirror V8's strict-frame censoring so stack preparation cannot
+  recover privileged internal receiver objects.
 - Cross-worker N-API values are published through Wasmer worker
   `postMessage()` calls. The scheduler retains a central clone and sends it to
   the worker that requests the opaque handle. Before multi-tenant use, bind

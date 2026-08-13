@@ -1793,16 +1793,60 @@ bool BuildJavascriptStack(napi_env env,
   return true;
 }
 
+struct JavascriptHeapMetrics {
+  uint64_t total_memory = 0;
+  uint64_t executable_memory = 0;
+  uint64_t total_committed_memory = 0;
+  uint64_t available_memory = 0;
+  uint64_t total_global_handles_memory = 0;
+  uint64_t used_global_handles_memory = 0;
+  uint64_t used_memory = 0;
+  uint64_t memory_limit = 0;
+  uint64_t malloced_memory = 0;
+  uint64_t external_memory = 0;
+  uint64_t peak_malloced_memory = 0;
+  uint64_t native_context_count = 0;
+  uint64_t detached_context_count = 0;
+  uint64_t does_zap_garbage = 0;
+};
+
+JavascriptHeapMetrics GetJavascriptHeapMetrics(napi_env env,
+                                               uint64_t fallback_heap_limit) {
+  unofficial_napi_heap_statistics stats{};
+  unofficial_napi_heap_statistics_init(&stats);
+  if (env == nullptr ||
+      unofficial_napi_get_heap_statistics(env, &stats) != napi_ok) {
+    return {.memory_limit = fallback_heap_limit};
+  }
+  return {
+      .total_memory = stats.total_heap_size,
+      .executable_memory = stats.total_heap_size_executable,
+      .total_committed_memory = stats.total_physical_size,
+      .available_memory = stats.total_available_size,
+      .total_global_handles_memory = stats.total_global_handles_size,
+      .used_global_handles_memory = stats.used_global_handles_size,
+      .used_memory = stats.used_heap_size,
+      .memory_limit =
+          (stats.valid_fields & unofficial_napi_heap_stat_heap_size_limit) != 0
+              ? stats.heap_size_limit
+              : fallback_heap_limit,
+      .malloced_memory = stats.malloced_memory,
+      .external_memory = stats.external_memory,
+      .peak_malloced_memory = stats.peak_malloced_memory,
+      .native_context_count = stats.number_of_native_contexts,
+      .detached_context_count = stats.number_of_detached_contexts,
+      .does_zap_garbage = stats.does_zap_garbage,
+  };
+}
+
 bool BuildJavascriptHeap(napi_env env, napi_value process_obj, napi_value* out) {
   if (out == nullptr) return false;
   *out = nullptr;
 
-  unofficial_napi_heap_statistics heap_statistics{};
-  (void)unofficial_napi_get_heap_statistics(env, &heap_statistics);
-
   napi_value exec_argv_value = nullptr;
   (void)GetNamedPropertyIfPresent(env, process_obj, "execArgv", &exec_argv_value);
   const uint64_t heap_limit = ReadReportHeapLimitFromExecArgv(GetStringArrayValue(env, exec_argv_value));
+  const JavascriptHeapMetrics heap = GetJavascriptHeapMetrics(env, heap_limit);
 
   napi_value js_heap = nullptr;
   napi_value heap_spaces = nullptr;
@@ -1813,20 +1857,20 @@ bool BuildJavascriptHeap(napi_env env, napi_value process_obj, napi_value* out) 
     return false;
   }
 
-  SetNamedInt64(env, js_heap, "totalMemory", static_cast<int64_t>(heap_statistics.total_heap_size));
-  SetNamedInt64(env, js_heap, "executableMemory", 0);
-  SetNamedInt64(env, js_heap, "totalCommittedMemory", static_cast<int64_t>(heap_statistics.total_heap_size));
-  SetNamedInt64(env, js_heap, "availableMemory", 0);
-  SetNamedInt64(env, js_heap, "totalGlobalHandlesMemory", 0);
-  SetNamedInt64(env, js_heap, "usedGlobalHandlesMemory", 0);
-  SetNamedInt64(env, js_heap, "usedMemory", static_cast<int64_t>(heap_statistics.used_heap_size));
-  SetNamedInt64(env, js_heap, "memoryLimit", static_cast<int64_t>(heap_limit));
-  SetNamedInt64(env, js_heap, "mallocedMemory", 0);
-  SetNamedInt64(env, js_heap, "externalMemory", static_cast<int64_t>(heap_statistics.external_memory));
-  SetNamedInt64(env, js_heap, "peakMallocedMemory", 0);
-  SetNamedInt64(env, js_heap, "nativeContextCount", 0);
-  SetNamedInt64(env, js_heap, "detachedContextCount", 0);
-  SetNamedInt64(env, js_heap, "doesZapGarbage", 0);
+  SetNamedInt64(env, js_heap, "totalMemory", static_cast<int64_t>(heap.total_memory));
+  SetNamedInt64(env, js_heap, "executableMemory", static_cast<int64_t>(heap.executable_memory));
+  SetNamedInt64(env, js_heap, "totalCommittedMemory", static_cast<int64_t>(heap.total_committed_memory));
+  SetNamedInt64(env, js_heap, "availableMemory", static_cast<int64_t>(heap.available_memory));
+  SetNamedInt64(env, js_heap, "totalGlobalHandlesMemory", static_cast<int64_t>(heap.total_global_handles_memory));
+  SetNamedInt64(env, js_heap, "usedGlobalHandlesMemory", static_cast<int64_t>(heap.used_global_handles_memory));
+  SetNamedInt64(env, js_heap, "usedMemory", static_cast<int64_t>(heap.used_memory));
+  SetNamedInt64(env, js_heap, "memoryLimit", static_cast<int64_t>(heap.memory_limit));
+  SetNamedInt64(env, js_heap, "mallocedMemory", static_cast<int64_t>(heap.malloced_memory));
+  SetNamedInt64(env, js_heap, "externalMemory", static_cast<int64_t>(heap.external_memory));
+  SetNamedInt64(env, js_heap, "peakMallocedMemory", static_cast<int64_t>(heap.peak_malloced_memory));
+  SetNamedInt64(env, js_heap, "nativeContextCount", static_cast<int64_t>(heap.native_context_count));
+  SetNamedInt64(env, js_heap, "detachedContextCount", static_cast<int64_t>(heap.detached_context_count));
+  SetNamedInt64(env, js_heap, "doesZapGarbage", static_cast<int64_t>(heap.does_zap_garbage));
 
   SetNamedInt64(env, new_space, "memorySize", 0);
   SetNamedInt64(env, new_space, "committedMemory", 0);
@@ -2727,26 +2771,24 @@ void WriteReportUserLimits(SimpleJsonWriter& writer) {
 void WriteReportJavascriptHeap(SimpleJsonWriter& writer,
                                napi_env env,
                                const ReportBindingState* state) {
-  unofficial_napi_heap_statistics heap_statistics{};
-  if (env != nullptr) {
-    (void)unofficial_napi_get_heap_statistics(env, &heap_statistics);
-  }
+  const JavascriptHeapMetrics heap = GetJavascriptHeapMetrics(
+      env, state != nullptr ? state->max_heap_size_bytes : 0);
 
   writer.json_objectstart("javascriptHeap");
-  writer.json_keyvalue("totalMemory", static_cast<int64_t>(heap_statistics.total_heap_size));
-  writer.json_keyvalue("executableMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("totalCommittedMemory", static_cast<int64_t>(heap_statistics.total_heap_size));
-  writer.json_keyvalue("availableMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("totalGlobalHandlesMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("usedGlobalHandlesMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("usedMemory", static_cast<int64_t>(heap_statistics.used_heap_size));
-  writer.json_keyvalue("memoryLimit", static_cast<int64_t>(state != nullptr ? state->max_heap_size_bytes : 0));
-  writer.json_keyvalue("mallocedMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("externalMemory", static_cast<int64_t>(heap_statistics.external_memory));
-  writer.json_keyvalue("peakMallocedMemory", static_cast<int64_t>(0));
-  writer.json_keyvalue("nativeContextCount", static_cast<int64_t>(0));
-  writer.json_keyvalue("detachedContextCount", static_cast<int64_t>(0));
-  writer.json_keyvalue("doesZapGarbage", static_cast<int64_t>(0));
+  writer.json_keyvalue("totalMemory", static_cast<int64_t>(heap.total_memory));
+  writer.json_keyvalue("executableMemory", static_cast<int64_t>(heap.executable_memory));
+  writer.json_keyvalue("totalCommittedMemory", static_cast<int64_t>(heap.total_committed_memory));
+  writer.json_keyvalue("availableMemory", static_cast<int64_t>(heap.available_memory));
+  writer.json_keyvalue("totalGlobalHandlesMemory", static_cast<int64_t>(heap.total_global_handles_memory));
+  writer.json_keyvalue("usedGlobalHandlesMemory", static_cast<int64_t>(heap.used_global_handles_memory));
+  writer.json_keyvalue("usedMemory", static_cast<int64_t>(heap.used_memory));
+  writer.json_keyvalue("memoryLimit", static_cast<int64_t>(heap.memory_limit));
+  writer.json_keyvalue("mallocedMemory", static_cast<int64_t>(heap.malloced_memory));
+  writer.json_keyvalue("externalMemory", static_cast<int64_t>(heap.external_memory));
+  writer.json_keyvalue("peakMallocedMemory", static_cast<int64_t>(heap.peak_malloced_memory));
+  writer.json_keyvalue("nativeContextCount", static_cast<int64_t>(heap.native_context_count));
+  writer.json_keyvalue("detachedContextCount", static_cast<int64_t>(heap.detached_context_count));
+  writer.json_keyvalue("doesZapGarbage", static_cast<int64_t>(heap.does_zap_garbage));
   writer.json_objectstart("heapSpaces");
   writer.json_objectstart("new_space");
   writer.json_keyvalue("memorySize", static_cast<int64_t>(0));
@@ -4531,6 +4573,7 @@ napi_value ProcessMethodsMemoryUsageBufferCallback(napi_env env, napi_callback_i
     return nullptr;
   }
   unofficial_napi_heap_statistics heap_statistics{};
+  unofficial_napi_heap_statistics_init(&heap_statistics);
   const napi_status memory_status =
       unofficial_napi_get_heap_statistics(env, &heap_statistics);
   if (memory_status != napi_ok) return nullptr;
