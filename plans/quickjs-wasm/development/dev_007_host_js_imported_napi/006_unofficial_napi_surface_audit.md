@@ -10,8 +10,9 @@
 
 The first implementation milestone reduced the exported header from 106 to 90
 operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
-environment-configuration work and the process-memory snapshot fold are
-complete, reducing the current surface to 80 operations:
+environment-configuration work, the process-memory snapshot fold, and atomic
+source-map configuration are complete, reducing the current surface to 79
+operations:
 
 - environment creation is one operation with nullable options;
 - environment release is one indivisible operation with a nullable loop;
@@ -33,7 +34,10 @@ complete, reducing the current surface to 80 operations:
   guest-heap ownership are versioned immutable environment-creation inputs;
   and
 - ArrayBuffer memory is part of the atomic heap-statistics snapshot, so Edge no
-  longer crosses the provider boundary through a second process-memory getter.
+  longer crosses the provider boundary through a second process-memory getter;
+  and
+- source-map enablement and its optional error-source callback are configured
+  together, preventing providers from observing a partially updated pair.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
@@ -357,10 +361,10 @@ unofficial_napi_get_error_metadata(env, error, mode, &metadata);
 ```
 
 The mode selects current versus consume-preserved state. Keep
-`preserve_error_source_message` as the explicit capture transition. Merge
-source-map enablement and the source-map error callback into one source-map
-configuration operation. This reduces calls while ensuring all formatting
-fields describe the same provider observation.
+`preserve_error_source_message` as the explicit capture transition. Source-map
+enablement and the source-map error callback now use one atomic configuration
+operation. The remaining metadata fold will ensure all formatting fields
+describe the same provider observation.
 
 ### Memory statistics
 
@@ -429,8 +433,8 @@ must not choose an implementation with `#ifdef __wasi__`.
 ## Expected outcome
 
 The completed removal, mechanical, attachment, configuration, heap-space,
-memory-snapshot, and profiling-result phases reduce 106 exported functions to
-80. The later message, bytecode, module, and snapshot changes can reduce it
+memory-snapshot, source-map configuration, and profiling-result phases reduce
+106 exported functions to 79. The later message, bytecode, module, and snapshot changes can reduce it
 further, but their success criterion is not a specific number. The success
 criterion is that every remaining extension is either:
 

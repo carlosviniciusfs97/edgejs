@@ -174,6 +174,17 @@ void ErrorsSetRef(napi_env env, napi_ref* slot, napi_value value) {
   }
 }
 
+void ErrorsApplySourceMapConfiguration(napi_env env,
+                                       const ErrorsBindingState& state) {
+  napi_value callback = nullptr;
+  if (state.get_source_map_error_source_ref != nullptr) {
+    (void)napi_get_reference_value(
+        env, state.get_source_map_error_source_ref, &callback);
+  }
+  (void)unofficial_napi_configure_source_maps(
+      env, state.source_maps_enabled, callback);
+}
+
 napi_value ErrorsSetPrepareStackTraceCallback(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1] = {nullptr};
@@ -195,12 +206,10 @@ napi_value ErrorsSetGetSourceMapErrorSource(napi_env env, napi_callback_info inf
   napi_value argv[1] = {nullptr};
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok) return nullptr;
   auto& st = EnsureErrorsState(env);
-  if (argc >= 1) {
-    ErrorsSetRef(env, &st.get_source_map_error_source_ref, argv[0]);
-    (void)unofficial_napi_set_get_source_map_error_source_callback(env, argv[0]);
-  } else {
-    (void)unofficial_napi_set_get_source_map_error_source_callback(env, nullptr);
-  }
+  ErrorsSetRef(env,
+               &st.get_source_map_error_source_ref,
+               argc >= 1 ? argv[0] : nullptr);
+  ErrorsApplySourceMapConfiguration(env, st);
   return MakeUndefined(env);
 }
 
@@ -214,7 +223,7 @@ napi_value ErrorsSetSourceMapsEnabled(napi_env env, napi_callback_info info) {
     napi_get_value_bool(env, argv[0], &enabled);
   }
   st.source_maps_enabled = enabled;
-  (void)unofficial_napi_set_source_maps_enabled(env, enabled);
+  ErrorsApplySourceMapConfiguration(env, st);
   return MakeUndefined(env);
 }
 
@@ -414,7 +423,7 @@ napi_value GetOrCreateErrorsBinding(napi_env env) {
 
   const bool source_maps_enabled = EdgeExecArgvHasFlag("--enable-source-maps");
   st.source_maps_enabled = source_maps_enabled;
-  (void)unofficial_napi_set_source_maps_enabled(env, source_maps_enabled);
+  ErrorsApplySourceMapConfiguration(env, st);
 
   auto define_method = [&](const char* name, napi_callback cb) -> bool {
     napi_value fn = nullptr;
