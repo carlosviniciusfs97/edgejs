@@ -1,4 +1,5 @@
 #include "internal_binding/binding_initializers.h"
+#include "internal_binding/binding_module_wrap.h"
 
 #include <filesystem>
 #include <string>
@@ -998,6 +999,11 @@ napi_value ModuleWrapThrowIfPromiseRejected(napi_env env, napi_callback_info inf
 }
 
 }  // namespace
+
+unofficial_napi_module GetModuleWrapHandle(napi_env env, napi_value wrapper) {
+  ModuleWrapInstance* instance = UnwrapModuleWrap(env, wrapper);
+  return instance != nullptr ? instance->module_handle : nullptr;
+}
 
 napi_value InitModuleWrap(napi_env env) {
   auto& state = EnsureBindingState(env);

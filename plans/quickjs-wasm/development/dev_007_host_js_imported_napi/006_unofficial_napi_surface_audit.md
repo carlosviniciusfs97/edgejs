@@ -13,7 +13,7 @@ operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
 environment-configuration work, the process-memory snapshot fold, and atomic
 source-map configuration, error-metadata snapshot, and message-resource
 ownership are complete, reducing
-the current surface to 67
+the current surface to 66
 operations:
 
 - environment creation is one operation with nullable options;
@@ -72,11 +72,21 @@ operations:
   session contract. Edge owns the numeric IDs exposed by its worker binding,
   while providers own profiler lifetime and clean up any session left active
   at environment teardown. This replaces four provider-specific start/stop
-  operations, CPU IDs, and heap `found` flags with two ownership transitions.
+  operations, CPU IDs, and heap `found` flags with two ownership transitions;
+  and
+- dynamic near-heap-limit registration is one atomic configuration slot.
+  Supplying a callback installs or replaces it; supplying no callback removes
+  it and applies the requested restored limit. V8 registers its engine adapter
+  once, QuickJS preserves its validated no-op behavior, and Edge no longer
+  coordinates two provider operations; and
+- unsettled-top-level-await inspection takes the provider-owned opaque module
+  handle. Edge unwraps its own native `ModuleWrap`; providers no longer scan
+  JavaScript wrapper identity to recover a module, and the host-JavaScript
+  module record no longer retains a wrapper solely for reverse lookup.
 
 The profiler/snapshot migration is covered by complete V8 and QuickJS provider
 suites, native and wasm32 Wasmer guest-bridge compilation, complete native V8
-and QuickJS Edge suites, the exact 67-import WASIX conformance check, and the
+and QuickJS Edge suites, the exact 66-import WASIX conformance check, and the
 serial V8 and QuickJS WASIX compatibility suites. Edge's worker CPU profile,
 heap profile, heap snapshot, and heapdump failure paths all use the same typed
 session contract.
@@ -244,8 +254,10 @@ The exact names are provisional; the invariants are not:
 - the host-JavaScript provider may report an unsupported capability, but Edge
   never selects a provider using `#ifdef __wasi__`.
 
-The near-heap-limit callback remains a separate dynamic registration because
-workers install and remove it during their lifetime. Promise hooks,
+The near-heap-limit callback remains separate dynamic state because workers
+install, replace, and remove it during their lifetime, but those transitions
+are one validated configuration operation rather than a setter/remover pair.
+Promise hooks,
 prepare-stack-trace, source-map callbacks, and rejection callbacks are also
 runtime JavaScript state, not immutable embedder attachment hooks.
 
@@ -385,7 +397,9 @@ The module-state migration is complete. It replaces four field-at-a-time
 operations (`get_status`, `get_error`, `has_top_level_await`, and
 `has_async_graph`) with one provider-neutral snapshot, a net reduction of
 three exports. The module handle is also now typed across Edge, V8, QuickJS,
-and the Wasmer bridge without changing its pointer-sized ABI.
+and the Wasmer bridge without changing its pointer-sized ABI. Unsettled-TLA
+inspection now consumes that typed handle directly; providers do not recover
+it by scanning JavaScript wrapper identity.
 
 The module-hooks migration is complete. Two independently mutable callback
 setters are now one versioned configuration operation, a net reduction of one
@@ -516,7 +530,8 @@ The completed removal, mechanical, attachment, configuration, heap-space,
 memory-snapshot, source-map configuration, error-metadata snapshot,
 message-resource ownership, bytecode transaction, module-state snapshot,
 module-hooks configuration, tagged module creation, immutable creation metadata,
-and typed profiler-session phases reduce 106 exported functions to 67. The remaining
+typed profiler-session phases, and atomic near-heap-limit configuration reduce
+106 exported functions to 66. The remaining
 module-resource changes can reduce it further, but their success criterion is
 not a specific number. The success criterion is that every remaining extension
 is either:

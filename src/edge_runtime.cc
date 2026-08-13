@@ -72,6 +72,7 @@
 #include "edge_spawn_sync.h"
 #include "internal_binding/helpers.h"
 #include "internal_binding/binding_initializers.h"
+#include "internal_binding/binding_module_wrap.h"
 
 #if defined(EDGE_NAPI_QUICKJS) && defined(EDGE_QUICKJS_WEBASSEMBLY)
 #include "webassembly/edge_wasm.h"
@@ -1675,9 +1676,13 @@ bool ApplyUnsettledTopLevelAwaitExitCodeIfNeeded(napi_env env) {
   napi_value module = GetEntryPointModuleFromUtilSymbol(env, global);
   if (module == nullptr) return false;
 
+  unofficial_napi_module module_handle =
+      internal_binding::GetModuleWrapHandle(env, module);
+  if (module_handle == nullptr) return false;
+
   bool settled = true;
   if (unofficial_napi_module_wrap_check_unsettled_top_level_await(
-          env, module, AreProcessWarningsEnabled(), &settled) != napi_ok) {
+          env, module_handle, AreProcessWarningsEnabled(), &settled) != napi_ok) {
     return false;
   }
   if (settled) return false;

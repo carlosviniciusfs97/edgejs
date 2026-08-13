@@ -1244,7 +1244,8 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
     FinalizeWorkerThread(wrap, 1, "ERR_WORKER_INIT_FAILED", "Failed to attach worker env");
     return;
   }
-  (void)unofficial_napi_set_near_heap_limit_callback(worker_env, WorkerNearHeapLimit, wrap);
+  (void)unofficial_napi_configure_near_heap_limit_callback(
+      worker_env, WorkerNearHeapLimit, wrap, 0);
   {
     std::lock_guard<std::mutex> lock(wrap->mutex);
     wrap->worker_config.env_message_port_data.reset();
@@ -1306,7 +1307,8 @@ cleanup_worker_env:
     (void)unofficial_napi_cancel_terminate_execution(worker_env);
   }
 
-  (void)unofficial_napi_remove_near_heap_limit_callback(worker_env, 0);
+  (void)unofficial_napi_configure_near_heap_limit_callback(
+      worker_env, nullptr, nullptr, 0);
   EdgeWorkerEnvRunCleanupPreserveLoop(worker_env);
   EdgeEnvironmentRunAtExitCallbacks(worker_env);
   if (exit_code == 0 && custom_err.empty() && custom_err_reason.empty()) {
