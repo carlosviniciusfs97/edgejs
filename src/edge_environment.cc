@@ -8,6 +8,7 @@
 
 #include "edge_runtime_platform.h"
 #include "edge_handle_scope.h"
+#include "edge_process.h"
 #include "edge_timers_host.h"
 #include "edge_worker_env.h"
 #include "unofficial_napi.h"
@@ -51,28 +52,19 @@ void AttachedEnvUnassignContextToken(napi_env env, void* token, void* /*data*/) 
 }
 
 bool RegisterAttachedEnvHooks(napi_env env) {
-#if defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  if (unofficial_napi_set_edge_environment(env, edge::Environment::Get(env)) != napi_ok) {
-    return false;
-  }
-  if (unofficial_napi_set_env_cleanup_callback(env, AttachedEnvCleanup, nullptr) != napi_ok) {
-    (void)unofficial_napi_set_edge_environment(env, nullptr);
-    return false;
-  }
-  if (unofficial_napi_set_env_destroy_callback(env, AttachedEnvDestroy, nullptr) != napi_ok) {
-    (void)unofficial_napi_set_env_cleanup_callback(env, nullptr, nullptr);
-    (void)unofficial_napi_set_edge_environment(env, nullptr);
-    return false;
-  }
-  if (unofficial_napi_set_context_token_callbacks(
-          env, AttachedEnvAssignContextToken, AttachedEnvUnassignContextToken, nullptr) != napi_ok) {
-    (void)unofficial_napi_set_env_destroy_callback(env, nullptr, nullptr);
-    (void)unofficial_napi_set_env_cleanup_callback(env, nullptr, nullptr);
-    (void)unofficial_napi_set_edge_environment(env, nullptr);
-    return false;
-  }
-#endif
-  return true;
+  unofficial_napi_env_hooks hooks{};
+  hooks.size = sizeof(hooks);
+  hooks.version = UNOFFICIAL_NAPI_ENV_HOOKS_VERSION;
+  hooks.cleanup_callback = AttachedEnvCleanup;
+  hooks.destroy_callback = AttachedEnvDestroy;
+  hooks.context_token_assign_callback = AttachedEnvAssignContextToken;
+  hooks.context_token_unassign_callback = AttachedEnvUnassignContextToken;
+  hooks.fatal_error_callback = EdgeFatalErrorReportCallback;
+  hooks.oom_error_callback = EdgeOomErrorReportCallback;
+  if (EdgeRuntimePlatformPrepareEnvHooks(env, &hooks) != napi_ok) return false;
+  if (unofficial_napi_attach_env(env, &hooks) == napi_ok) return true;
+  EdgeRunRuntimePlatformEnvCleanup(env);
+  return false;
 }
 
 void RunSlotDeleters(std::unordered_map<size_t, edge::SlotEntry>* slots) {

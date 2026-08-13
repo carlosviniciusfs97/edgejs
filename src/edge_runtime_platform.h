@@ -2,6 +2,7 @@
 #define EDGE_RUNTIME_PLATFORM_H_
 
 #include "node_api.h"
+#include "unofficial_napi.h"
 
 using EdgeRuntimePlatformTaskCallback = void (*)(napi_env env, void* data);
 using EdgeRuntimePlatformTaskCleanup = void (*)(napi_env env, void* data);
@@ -27,9 +28,12 @@ size_t EdgeRuntimePlatformDrainImmediateTasks(napi_env env, bool only_refed = fa
 bool EdgeRuntimePlatformHasImmediateTasks(napi_env env);
 bool EdgeRuntimePlatformHasRefedImmediateTasks(napi_env env);
 
-// Attach the current env to the embedder-owned foreground task queue hook.
-// Edge owns queueing and drain policy; engine backends only post work into it.
-napi_status EdgeRuntimePlatformInstallHooks(napi_env env);
+// Prepare Edge's foreground queue and add its immutable callback and target to
+// the environment hook table. The caller commits the complete table with the
+// provider in one attachment transition.
+napi_status EdgeRuntimePlatformPrepareEnvHooks(
+    napi_env env,
+    unofficial_napi_env_hooks* hooks);
 
 napi_status EdgeRuntimePlatformEnqueueForegroundTask(napi_env env,
                                                     EdgeRuntimePlatformTaskCallback callback,

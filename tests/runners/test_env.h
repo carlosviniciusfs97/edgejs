@@ -37,7 +37,6 @@ struct EnvScope {
     EXPECT_NE(env, nullptr);
     if (env != nullptr) {
       EXPECT_TRUE(EdgeAttachEnvironmentForRuntime(env));
-      EXPECT_EQ(EdgeRuntimePlatformInstallHooks(env), napi_ok);
       EXPECT_EQ(EdgeInitializeTimersHost(env), napi_ok);
     }
     isolate = std::make_unique<IsolateShim>(env);

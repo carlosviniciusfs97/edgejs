@@ -2750,12 +2750,6 @@ int RunScriptWithGlobals(napi_env env,
   auto should_abort_worker_bootstrap = [&]() -> bool {
     return !EdgeWorkerEnvOwnsProcessState(env) && EdgeWorkerEnvStopRequested(env);
   };
-  if (EdgeRuntimePlatformInstallHooks(env) != napi_ok) {
-    if (error_out != nullptr) {
-      *error_out = "Failed to attach runtime platform hooks";
-    }
-    return 1;
-  }
   if (should_abort_worker_bootstrap()) return 1;
   if (EdgeInitializeTimersHost(env) != napi_ok) {
     if (error_out != nullptr) {

@@ -254,15 +254,6 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
   }
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.attach-runtime");
 
-  if (EdgeRuntimePlatformInstallHooks(env) != napi_ok) {
-    (void)unofficial_napi_release_env(env_scope, nullptr);
-    if (error_out != nullptr) {
-      *error_out = "Failed to attach runtime platform hooks";
-    }
-    return 1;
-  }
-  EDGE_STARTUP_TRACE(startup_trace, "cli.env.install-runtime-hooks");
-
   const int exit_code = runner(env);
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.runner-returned");
   if (EDGE_TRACE_ENABLED("EDGE_TRACE_BOOTSTRAP")) {

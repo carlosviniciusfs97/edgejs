@@ -4967,6 +4967,19 @@ void ReportBindingFinalize(napi_env env, void* data, void* hint) {
 
 }  // namespace
 
+[[noreturn]] void EdgeFatalErrorReportCallback(napi_env env,
+                                               const char* location,
+                                               const char* message) {
+  FatalErrorReportCallback(env, location, message);
+}
+
+[[noreturn]] void EdgeOomErrorReportCallback(napi_env env,
+                                             const char* location,
+                                             bool is_heap_oom,
+                                             const char* detail) {
+  OomErrorReportCallback(env, location, is_heap_oom, detail);
+}
+
 #if defined(ENABLE_TRACING)
 uint64_t EdgeGetProcessStartTimeNanoseconds() {
   return g_process_start_time_ns;
@@ -5402,10 +5415,6 @@ napi_status EdgeInstallProcessObject(napi_env env,
     state.command_line = BuildCommandLineSnapshot(exec_argv, script_argv, current_script_path);
     state.max_heap_size_bytes = ReadReportHeapLimitFromExecArgv(exec_argv);
     state.sequence = 0;
-  }
-
-  if (unofficial_napi_set_fatal_error_callbacks(env, FatalErrorReportCallback, OomErrorReportCallback) != napi_ok) {
-    return napi_generic_failure;
   }
 
   return napi_ok;

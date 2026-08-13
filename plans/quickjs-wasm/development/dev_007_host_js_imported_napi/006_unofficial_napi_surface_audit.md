@@ -9,8 +9,8 @@
 ## Implementation status
 
 The first implementation milestone reduced the exported header from 106 to 90
-operations. Phase 1 and all seven mechanical Phase 2 folds are complete,
-reducing the current surface to 88 operations:
+operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
+attachment slice are complete, reducing the current surface to 83 operations:
 
 - environment creation is one operation with nullable options;
 - environment release is one indivisible operation with a nullable loop;
@@ -22,11 +22,23 @@ reducing the current surface to 88 operations:
 - profiler and heap-snapshot JSON is returned as an environment-owned
   `napi_value`; Edge copies it into Edge-owned `std::string` storage before a
   worker result crosses threads, so the provider-wide `free_buffer` allocator
-  API is gone.
+  API is gone; and
+- six independently mutable environment setters are replaced by one versioned,
+  immutable, exactly-once `unofficial_napi_attach_env` transition. The hook
+  table carries lifecycle, context-token, foreground scheduling, fatal-error,
+  and OOM callbacks together.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
 profile, heap profile, heap snapshot, and heapdump failure tests.
+
+The attachment migration is covered by provider-neutral exactly-once contract
+tests, complete V8 and QuickJS provider suites, and the Wasmer guest/host-JS
+bridge. V8 binds platform, lifecycle, and fatal state atomically; QuickJS owns
+and invokes the attached lifecycle callbacks exactly once; the Wasmer bridge
+accepts one wasm32 hook descriptor and rejects duplicate attachment. Edge
+builds the complete table before crossing the provider boundary and does not
+select attachment behavior with `#ifdef __wasi__`.
 
 ## Decision
 
@@ -166,8 +178,9 @@ The exact names are provisional; the invariants are not:
   table;
 - imported host-JavaScript environments use the same attachment operation but
   have no `env_owner` to release;
-- callback `data` points at the Edge environment, removing both
-  `set_edge_environment` and the unused getter;
+- callback `data` points at one embedder-owned attachment state object;
+  callbacks that need the Edge environment recover it from `napi_env`, removing
+  both `set_edge_environment` and the unused getter;
 - `destroy_env_instance` is not public, so callers cannot split destruction
   from isolate/provider release;
 - global `set_embedder_hooks` and `set_flags_from_string` disappear. Their
@@ -179,6 +192,25 @@ The near-heap-limit callback remains a separate dynamic registration because
 workers install and remove it during their lifetime. Promise hooks,
 prepare-stack-trace, source-map callbacks, and rejection callbacks are also
 runtime JavaScript state, not immutable embedder attachment hooks.
+
+### Phase 3 implementation status
+
+The immutable attachment half is complete. These six public operations are
+gone:
+
+- `unofficial_napi_set_edge_environment`;
+- `unofficial_napi_set_env_cleanup_callback`;
+- `unofficial_napi_set_env_destroy_callback`;
+- `unofficial_napi_set_context_token_callbacks`;
+- `unofficial_napi_set_enqueue_foreground_task_callback`; and
+- `unofficial_napi_set_fatal_error_callbacks`.
+
+They are represented by the single `unofficial_napi_attach_env` operation, a
+net reduction of five exports. The remaining Phase 3 work is pre-creation
+configuration: fold process-global `set_embedder_hooks` and
+`set_flags_from_string` into a versioned runtime/environment creation contract
+without changing initialization order or making per-environment data falsely
+global.
 
 ## Phase 4: strengthen opaque resources
 
