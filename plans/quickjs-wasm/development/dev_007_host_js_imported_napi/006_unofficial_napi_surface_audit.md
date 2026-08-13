@@ -13,7 +13,7 @@ operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
 environment-configuration work, the process-memory snapshot fold, and atomic
 source-map configuration, error-metadata snapshot, and message-resource
 ownership are complete, reducing
-the current surface to 71
+the current surface to 70
 operations:
 
 - environment creation is one operation with nullable options;
@@ -63,7 +63,11 @@ operations:
   and
 - dynamic-import and import-meta callbacks are installed through one
   versioned module-hooks descriptor. Updating either JavaScript-facing hook
-  sends the provider a complete, atomic view of both callbacks.
+  sends the provider a complete, atomic view of both callbacks; and
+- source-text and synthetic modules are created through one versioned, tagged
+  descriptor. Providers validate the module kind and its complete payload at
+  one boundary, while the Wasm guest imports one operation instead of exposing
+  one import per module kind.
 
 The profiler/snapshot migration is covered by a native V8 provider contract,
 native and wasm32 Wasmer guest-bridge compilation, and Edge's worker CPU
@@ -373,15 +377,22 @@ The module-state migration is complete. It replaces four field-at-a-time
 operations (`get_status`, `get_error`, `has_top_level_await`, and
 `has_async_graph`) with one provider-neutral snapshot, a net reduction of
 three exports. The module handle is also now typed across Edge, V8, QuickJS,
-and the Wasmer bridge without changing its pointer-sized ABI. Consolidating
-creation and hooks, and moving immutable request metadata into the creation
-result remain separate module-resource improvements.
+and the Wasmer bridge without changing its pointer-sized ABI. Moving immutable
+request metadata into the creation result remains a separate module-resource
+improvement.
 
 The module-hooks migration is complete. Two independently mutable callback
 setters are now one versioned configuration operation, a net reduction of one
 export. Edge retains the callbacks needed by its public binding methods and
 sends both values whenever either public setter changes, so no provider can
 observe a half-updated pair.
+
+The module-creation migration is complete. Source-text and synthetic creation
+are two variants of one `unofficial_napi_module_wrap_create` transaction. Its
+versioned tagged descriptor retains type-specific fields while removing a
+provider symbol and a Wasm import. Descriptor size, version, and tag validation
+are covered in both native providers; Edge uses the same call on native and
+WASIX targets.
 
 ### Profilers
 
@@ -490,8 +501,8 @@ must not choose an implementation with `#ifdef __wasi__`.
 The completed removal, mechanical, attachment, configuration, heap-space,
 memory-snapshot, source-map configuration, error-metadata snapshot,
 message-resource ownership, bytecode transaction, module-state snapshot,
-module-hooks configuration, and profiling-result phases reduce 106 exported
-functions to 71. The remaining
+module-hooks configuration, tagged module creation, and profiling-result phases
+reduce 106 exported functions to 70. The remaining
 module-resource changes can reduce it further, but their success criterion is
 not a specific number. The success criterion is that every remaining extension
 is either:

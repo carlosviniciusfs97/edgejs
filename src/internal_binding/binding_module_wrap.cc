@@ -411,13 +411,18 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
   if (has_exports_array && napi_is_array(env, argv[2], &is_array) == napi_ok && is_array) {
     SetNamedBool(env, this_arg, "synthetic", true);
     if (argc >= 4 && argv[3] != nullptr) {
-      if (unofficial_napi_module_wrap_create_synthetic(env,
-                                                       this_arg,
-                                                       argc >= 1 ? argv[0] : nullptr,
-                                                       argc >= 2 ? argv[1] : nullptr,
-                                                       argv[2],
-                                                       argv[3],
-                                                       &instance->module_handle) != napi_ok ||
+      unofficial_napi_module_create_options create_options{};
+      create_options.size = sizeof(create_options);
+      create_options.version = UNOFFICIAL_NAPI_MODULE_CREATE_OPTIONS_VERSION;
+      create_options.kind = unofficial_napi_module_synthetic;
+      create_options.wrapper = this_arg;
+      create_options.url = argc >= 1 ? argv[0] : nullptr;
+      create_options.context_or_undefined = argc >= 2 ? argv[1] : nullptr;
+      create_options.payload.synthetic.export_names = argv[2];
+      create_options.payload.synthetic.synthetic_evaluation_steps = argv[3];
+      if (unofficial_napi_module_wrap_create(env,
+                                             &create_options,
+                                             &instance->module_handle) != napi_ok ||
           instance->module_handle == nullptr) {
         delete instance;
         return nullptr;
@@ -543,16 +548,19 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
       const unofficial_napi_js_source module_source = module_bytecode
                                                           ? module_bytecode.source()
                                                           : unofficial_napi_js_source_from_text(argv[2]);
-      const napi_status create_status =
-          unofficial_napi_module_wrap_create_source_text(env,
-                                                         this_arg,
-                                                         argc >= 1 ? argv[0] : nullptr,
-                                                         argc >= 2 ? argv[1] : nullptr,
-                                                         &module_source,
-                                                         line_offset,
-                                                         column_offset,
-                                                         host_defined_option,
-                                                         &instance->module_handle);
+      unofficial_napi_module_create_options create_options{};
+      create_options.size = sizeof(create_options);
+      create_options.version = UNOFFICIAL_NAPI_MODULE_CREATE_OPTIONS_VERSION;
+      create_options.kind = unofficial_napi_module_source_text;
+      create_options.wrapper = this_arg;
+      create_options.url = argc >= 1 ? argv[0] : nullptr;
+      create_options.context_or_undefined = argc >= 2 ? argv[1] : nullptr;
+      create_options.payload.source_text.source = &module_source;
+      create_options.payload.source_text.line_offset = line_offset;
+      create_options.payload.source_text.column_offset = column_offset;
+      create_options.payload.source_text.host_defined_option_id = host_defined_option;
+      const napi_status create_status = unofficial_napi_module_wrap_create(
+          env, &create_options, &instance->module_handle);
       if (create_status != napi_ok || instance->module_handle == nullptr) {
         napi_value err = nullptr;
         if (napi_get_and_clear_last_exception(env, &err) == napi_ok && err != nullptr) {
