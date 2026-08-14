@@ -826,10 +826,9 @@ napi_value ModuleWrapGetStatus(napi_env env, napi_callback_info info) {
   ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
   int32_t status = kUninstantiated;
   if (instance != nullptr && instance->module_handle != nullptr) {
-    unofficial_napi_module_state state{};
     if (unofficial_napi_module_wrap_get_state(
-            env, instance->module_handle, &state) == napi_ok) {
-      status = state.status;
+            env, instance->module_handle, &status, nullptr, nullptr) != napi_ok) {
+      status = kUninstantiated;
     }
   }
   napi_value out = nullptr;
@@ -844,11 +843,11 @@ napi_value ModuleWrapGetError(napi_env env, napi_callback_info info) {
   ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
   if (instance == nullptr) return Undefined(env);
   if (instance->module_handle != nullptr) {
-    unofficial_napi_module_state state{};
+    napi_value error = nullptr;
     if (unofficial_napi_module_wrap_get_state(
-            env, instance->module_handle, &state) == napi_ok &&
-        state.error != nullptr) {
-      return state.error;
+            env, instance->module_handle, nullptr, &error, nullptr) == napi_ok &&
+        error != nullptr) {
+      return error;
     }
   }
   return Undefined(env);
@@ -861,18 +860,17 @@ napi_value ModuleWrapHasAsyncGraph(napi_env env, napi_callback_info info) {
   ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
   bool value = false;
   if (instance != nullptr && instance->module_handle != nullptr) {
-    unofficial_napi_module_state state{};
+    int32_t status = kUninstantiated;
     if (unofficial_napi_module_wrap_get_state(
-            env, instance->module_handle, &state) != napi_ok) {
+            env, instance->module_handle, &status, nullptr, &value) != napi_ok) {
       return nullptr;
     }
-    if (state.status < kInstantiated) {
+    if (status < kInstantiated) {
       ThrowCodeError(env,
                      "ERR_MODULE_NOT_INSTANTIATED",
                      "Module has not been instantiated");
       return nullptr;
     }
-    value = state.has_async_graph;
   }
   napi_value out = nullptr;
   napi_get_boolean(env, value, &out);

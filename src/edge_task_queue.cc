@@ -15,6 +15,7 @@ struct TaskQueueBindingState {
   ~TaskQueueBindingState() {
     DeleteRefIfAny(env, &binding_ref);
     DeleteRefIfAny(env, &tick_entry_ref);
+    DeleteRefIfAny(env, &tick_receiver_ref);
     DeleteRefIfAny(env, &promise_reject_callback_ref);
     tick_info_fields = nullptr;
     if (auto* environment = EdgeEnvironmentGet(env); environment != nullptr) {
@@ -26,6 +27,7 @@ struct TaskQueueBindingState {
   napi_env env = nullptr;
   napi_ref binding_ref = nullptr;
   napi_ref tick_entry_ref = nullptr;
+  napi_ref tick_receiver_ref = nullptr;
   napi_ref promise_reject_callback_ref = nullptr;
   int32_t* tick_info_fields = nullptr;
 };
@@ -81,9 +83,10 @@ static napi_value TaskQueueSetTickCallback(napi_env env, napi_callback_info info
 
   napi_valuetype t = napi_undefined;
   if (napi_typeof(env, argv[0], &t) == napi_ok && t == napi_function) {
-    // Capture both the callback and the pristine Reflect.apply during Node
-    // bootstrap. Dispatch then has no mutable-global lookup, while retaining
-    // the JavaScript processTicksAndRejections frame exposed by Node stacks.
+    // Capture the callback and pristine Reflect.apply during Node bootstrap.
+    // The process receiver is retained separately: V8 uses it for the native
+    // process.processTicksAndRejections stack label even though the closure
+    // does not otherwise depend on its dynamic `this` value.
     static constexpr char kTickEntryFactorySource[] =
         "((apply) => (recv, callback) => "
         "function processTicksAndRejections() {"
@@ -117,10 +120,19 @@ static napi_value TaskQueueSetTickCallback(napi_env env, napi_callback_info info
         new_entry_ref == nullptr) {
       return nullptr;
     }
+    napi_ref new_receiver_ref = nullptr;
+    if (napi_create_reference(env, process, 1, &new_receiver_ref) != napi_ok ||
+        new_receiver_ref == nullptr) {
+      DeleteRefIfAny(env, &new_entry_ref);
+      return nullptr;
+    }
     DeleteRefIfAny(env, &st.tick_entry_ref);
+    DeleteRefIfAny(env, &st.tick_receiver_ref);
     st.tick_entry_ref = new_entry_ref;
+    st.tick_receiver_ref = new_receiver_ref;
   } else {
     DeleteRefIfAny(env, &st.tick_entry_ref);
+    DeleteRefIfAny(env, &st.tick_receiver_ref);
   }
 
   return internal_binding::Undefined(env);
@@ -233,6 +245,9 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
   if (state == nullptr || state->tick_entry_ref == nullptr) {
     return napi_ok;
   }
+  if (state->tick_receiver_ref == nullptr) {
+    return napi_generic_failure;
+  }
 
   edge::HandleScope scope(env);
 
@@ -242,21 +257,18 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
     return status == napi_ok ? napi_generic_failure : status;
   }
 
-  napi_value global = nullptr;
-  status = napi_get_global(env, &global);
-  if (status != napi_ok || global == nullptr) {
+  napi_value tick_receiver = nullptr;
+  status = napi_get_reference_value(
+      env, state->tick_receiver_ref, &tick_receiver);
+  if (status != napi_ok || tick_receiver == nullptr) {
     return status == napi_ok ? napi_generic_failure : status;
   }
 
-  napi_value process = nullptr;
-  if (napi_get_named_property(env, global, "process", &process) != napi_ok || process == nullptr) {
-    process = global;
-  }
-
-  // The closure captured the callback, receiver, and invocation intrinsic at
-  // setup time, so the dispatch path is independent of mutable user globals.
+  // Both the closure and its receiver were captured at setup time, so dispatch
+  // is independent of mutable user globals.
   napi_value ignored = nullptr;
-  status = napi_call_function(env, process, tick_entry, 0, nullptr, &ignored);
+  status = napi_call_function(
+      env, tick_receiver, tick_entry, 0, nullptr, &ignored);
   if (status == napi_ok && called != nullptr) {
     *called = true;
   }

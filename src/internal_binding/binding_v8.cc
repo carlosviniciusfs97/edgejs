@@ -56,6 +56,7 @@ struct V8BindingState {
   napi_ref heap_space_statistics_buffer_ref = nullptr;
   napi_ref heap_code_statistics_buffer_ref = nullptr;
   std::vector<unofficial_napi_heap_space_statistics> heap_space_snapshot;
+  uint32_t next_heap_space_snapshot_index = 0;
 };
 
 napi_value MakeUndefined(napi_env env) {
@@ -247,11 +248,22 @@ napi_value V8UpdateHeapSpaceStatisticsBuffer(napi_env env, napi_callback_info in
       env, state->heap_space_statistics_buffer_ref, kHeapSpaceStatisticsPropertiesCount, &output);
   if (buffer == nullptr) return MakeUndefined(env);
 
-  if ((space_index == 0 || state->heap_space_snapshot.empty()) &&
-      !GetHeapSpaceStatisticsSnapshot(env, &state->heap_space_snapshot)) {
+  // One lib/v8.js read is a contiguous index walk. Any repeat, skip, or
+  // backwards request begins a new observation so direct binding consumers and
+  // abandoned iterations cannot retain stale provider statistics indefinitely.
+  if (state->heap_space_snapshot.empty() ||
+      space_index != state->next_heap_space_snapshot_index) {
+    state->heap_space_snapshot.clear();
+    state->next_heap_space_snapshot_index = 0;
+    if (!GetHeapSpaceStatisticsSnapshot(env, &state->heap_space_snapshot)) {
+      return MakeUndefined(env);
+    }
+  }
+  if (space_index >= state->heap_space_snapshot.size()) {
+    state->heap_space_snapshot.clear();
+    state->next_heap_space_snapshot_index = 0;
     return MakeUndefined(env);
   }
-  if (space_index >= state->heap_space_snapshot.size()) return MakeUndefined(env);
   const auto stats = state->heap_space_snapshot[space_index];
 
   buffer[0] = static_cast<double>(stats.space_size);
@@ -261,6 +273,9 @@ napi_value V8UpdateHeapSpaceStatisticsBuffer(napi_env env, napi_callback_info in
   if (!output.Release(true)) return MakeUndefined(env);
   if (space_index + 1 >= state->heap_space_snapshot.size()) {
     state->heap_space_snapshot.clear();
+    state->next_heap_space_snapshot_index = 0;
+  } else {
+    state->next_heap_space_snapshot_index = space_index + 1;
   }
   return MakeUndefined(env);
 }

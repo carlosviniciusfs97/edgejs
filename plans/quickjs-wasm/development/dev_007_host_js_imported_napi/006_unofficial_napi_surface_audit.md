@@ -106,6 +106,17 @@ N-API-side Edge memory-hook adapter and its unused shutdown-pump callback path
 were removed; WASIX now reports its actual runtime memory ceiling through its
 libuv platform implementation.
 
+The 2026-08-13 review follow-up hardened three boundaries without adding an
+operation: V8 property enumeration now preserves a throwing Proxy `ownKeys`
+exception, environment creation validates descriptor size/version before
+reading or taking ownership of `guest_heap_ctx`, and the duplicated wasm32
+environment-options decoder is shared. Module-state queries now use nullable
+typed outputs rather than an aggregate result struct, so status-only polling
+does not materialize an error handle or compute async-graph state. Edge's
+heap-space cache is reused only for one contiguous indexed observation, and
+task-queue dispatch no longer reads the mutable global `process` property for
+an ignored call receiver.
+
 ## Decision
 
 The unofficial surface is too large, but the function count is a symptom rather
@@ -395,8 +406,10 @@ promise-driven evaluation.
 
 The module-state migration is complete. It replaces four field-at-a-time
 operations (`get_status`, `get_error`, `has_top_level_await`, and
-`has_async_graph`) with one provider-neutral snapshot, a net reduction of
-three exports. The module handle is also now typed across Edge, V8, QuickJS,
+`has_async_graph`) with one provider-neutral query, a net reduction of three
+exports. Nullable typed outputs let each caller request only the fields it
+observes while keeping related fields in one provider call when Node requires
+them together. The module handle is also now typed across Edge, V8, QuickJS,
 and the Wasmer bridge without changing its pointer-sized ABI. Unsettled-TLA
 inspection now consumes that typed handle directly; providers do not recover
 it by scanning JavaScript wrapper identity.

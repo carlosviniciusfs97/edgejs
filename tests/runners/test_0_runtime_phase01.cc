@@ -351,7 +351,7 @@ TEST_F(Test0RuntimePhase01, TaskQueueStateIsIsolatedPerEnv) {
   EXPECT_TRUE(second_has_rejection_to_warn);
 }
 
-TEST_F(Test0RuntimePhase01, TickCallbackDoesNotDependOnMutableReflectGlobal) {
+TEST_F(Test0RuntimePhase01, TickCallbackDoesNotDependOnMutableDispatchGlobals) {
   EnvScope s(runtime_.get());
 
   napi_value binding = EdgeGetOrCreateTaskQueueBinding(s.env);
@@ -380,7 +380,9 @@ TEST_F(Test0RuntimePhase01, TickCallbackDoesNotDependOnMutableReflectGlobal) {
 
   ASSERT_EQ(napi_create_string_utf8(
                 s.env,
-                "globalThis.Reflect = undefined",
+                "globalThis.Reflect = undefined; "
+                "Object.defineProperty(globalThis, 'process', { "
+                "configurable: true, get() { throw new Error('process read during tick'); } });",
                 NAPI_AUTO_LENGTH,
                 &source),
             napi_ok);
