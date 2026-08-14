@@ -2518,7 +2518,7 @@ bool ShouldEnableSharedArrayBufferPerContext() {
 }
 
 napi_value GlobalGcCallback(napi_env env, napi_callback_info /*info*/) {
-  if (unofficial_napi_request_gc_for_testing(env) != napi_ok) {
+  if (unofficial_napi_collect_garbage(env) != napi_ok) {
     napi_throw_error(env, nullptr, "Failed to run gc()");
     return nullptr;
   }

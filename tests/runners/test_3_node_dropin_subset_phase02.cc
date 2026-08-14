@@ -577,13 +577,13 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
       _exit(70);
     }
 
-    void* scope = nullptr;
+    unofficial_napi_env_owner owner = nullptr;
     napi_env env = nullptr;
-    if (unofficial_napi_create_env(8, nullptr, &env, &scope) != napi_ok || env == nullptr) {
+    if (unofficial_napi_create_env(8, nullptr, &env, &owner) != napi_ok || env == nullptr) {
       _exit(70);
     }
     if (!EdgeAttachEnvironmentForRuntime(env)) {
-      (void)unofficial_napi_release_env(scope, nullptr);
+      (void)unofficial_napi_release_env(owner, nullptr);
       _exit(70);
     }
     std::string child_error;
@@ -597,8 +597,8 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
       (void)write(STDERR_FILENO, child_error.c_str(), child_error.size());
       (void)write(STDERR_FILENO, "\n", 1);
     }
-    if (scope != nullptr) {
-      (void)unofficial_napi_release_env(scope, nullptr);
+    if (owner != nullptr) {
+      (void)unofficial_napi_release_env(owner, nullptr);
     }
     _exit(child_exit);
   }

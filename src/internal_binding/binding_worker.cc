@@ -77,7 +77,7 @@ struct WorkerThreadData {
 
   Worker* worker = nullptr;
   napi_env env = nullptr;
-  void* scope = nullptr;
+  unofficial_napi_env_owner owner = nullptr;
   uv_async_t stop_async{};
   std::atomic<bool> stop_async_initialized{false};
 };
@@ -1139,7 +1139,7 @@ void FinalizeWorkerThread(Worker* wrap, int exit_code, const std::string& custom
     std::lock_guard<std::mutex> lock(wrap->mutex);
     if (wrap->thread_data != nullptr) {
       wrap->thread_data->env = nullptr;
-      wrap->thread_data->scope = nullptr;
+      wrap->thread_data->owner = nullptr;
     }
     wrap->exit_code = exit_code;
     wrap->custom_err = custom_err;
@@ -1170,7 +1170,7 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
   std::string custom_err_reason;
   WorkerThreadData* thread_data = wrap != nullptr ? wrap->thread_data.get() : nullptr;
   napi_env worker_env = nullptr;
-  void* worker_scope = nullptr;
+  unofficial_napi_env_owner worker_owner = nullptr;
   uv_loop_t* worker_loop = nullptr;
   if (wrap != nullptr) {
     wrap->stack_base = stack_top > (wrap->thread_stack_size - kWorkerStackBufferSize)
@@ -1216,8 +1216,8 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
       create_options.stack_limit = reinterpret_cast<void*>(wrap->stack_base);
     }
   }
-  if (unofficial_napi_create_env(8, &create_options, &worker_env, &worker_scope) != napi_ok ||
-      worker_env == nullptr || worker_scope == nullptr) {
+  if (unofficial_napi_create_env(8, &create_options, &worker_env, &worker_owner) != napi_ok ||
+      worker_env == nullptr || worker_owner == nullptr) {
     EdgeEnvironmentDestroyReleasedEventLoop(worker_loop);
     FinalizeWorkerThread(wrap, 1, "ERR_WORKER_INIT_FAILED", "Failed to create worker env");
     return;
@@ -1230,7 +1230,7 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
   if (!EdgeAttachEnvironmentForRuntime(worker_env, &wrap->worker_config)) {
     uv_loop_t* shutdown_loop = EdgeEnvironmentReleaseEventLoop(worker_env);
     if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
-    (void)unofficial_napi_release_env(worker_scope, shutdown_loop);
+    (void)unofficial_napi_release_env(worker_owner, shutdown_loop);
     EdgeEnvironmentDestroyReleasedEventLoop(shutdown_loop);
     wrap->worker_config.external_event_loop = nullptr;
     FinalizeWorkerThread(wrap, 1, "ERR_WORKER_INIT_FAILED", "Failed to attach worker env");
@@ -1243,7 +1243,7 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
     wrap->worker_config.env_message_port_data.reset();
     if (thread_data != nullptr) {
       thread_data->env = worker_env;
-      thread_data->scope = worker_scope;
+      thread_data->owner = worker_owner;
     }
   }
   wrap->loop_start_time_ms.store(static_cast<double>(uv_hrtime()) / 1e6, std::memory_order_release);
@@ -1304,11 +1304,11 @@ cleanup_worker_env:
   EdgeWorkerEnvRunCleanupPreserveLoop(worker_env);
   EdgeEnvironmentRunAtExitCallbacks(worker_env);
   if (exit_code == 0 && custom_err.empty() && custom_err_reason.empty()) {
-    (void)unofficial_napi_low_memory_notification(worker_env);
+    (void)unofficial_napi_collect_garbage(worker_env);
   }
   shutdown_loop = EdgeWorkerEnvReleaseEventLoop(worker_env);
   if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
-  (void)unofficial_napi_release_env(worker_scope, shutdown_loop);
+  (void)unofficial_napi_release_env(worker_owner, shutdown_loop);
   wrap->cpu_profiles.clear();
   wrap->heap_profile = nullptr;
   EdgeWorkerEnvDestroyReleasedEventLoop(shutdown_loop);

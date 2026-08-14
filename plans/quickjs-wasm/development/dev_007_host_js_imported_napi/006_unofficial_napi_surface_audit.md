@@ -109,13 +109,24 @@ libuv platform implementation.
 The 2026-08-13 review follow-up hardened three boundaries without adding an
 operation: V8 property enumeration now preserves a throwing Proxy `ownKeys`
 exception, environment creation validates descriptor size/version before
-reading or taking ownership of `guest_heap_ctx`, and the duplicated wasm32
+reading or taking ownership of the guest-heap resource, and the duplicated wasm32
 environment-options decoder is shared. Module-state queries now use nullable
 typed outputs rather than an aggregate result struct, so status-only polling
 does not materialize an error handle or compute async-graph state. Edge's
 heap-space cache is reused only for one contiguous indexed observation, and
 task-queue dispatch no longer reads the mutable global `process` property for
 an ignored call receiver.
+
+The production-GC and environment-resource tightening is also complete. The
+test-named full-GC operation and the separate memory-pressure notification are
+one `unofficial_napi_collect_garbage` capability. Each provider uses its
+production collection primitive; in particular, V8 uses
+`LowMemoryNotification()` rather than its testing-only forced-GC API. This
+preserves `--expose-gc` and worker memory-pressure behavior while removing one
+export and an unnecessary mode type. Environment ownership and guest-heap
+ownership now use distinct opaque handle types across Edge, both native
+providers, and the Wasmer bridge; raw `void*` values remain only for
+non-resource callback data or addresses such as the native stack limit.
 
 ## Decision
 
