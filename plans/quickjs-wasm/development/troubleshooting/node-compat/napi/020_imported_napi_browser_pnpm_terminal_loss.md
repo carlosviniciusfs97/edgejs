@@ -70,6 +70,57 @@ total:        28.3 s
 
 `NEXT_TEST_WASM_DIR` is not used by the development script.
 
+## 2026-08-14 Next.js production-build quiescence follow-up
+
+The ordinary production sequence initially reported a successful `next build`
+but produced no `.next/BUILD_ID`, so `next start` correctly rejected the
+incomplete output. SWC loaded and transformed successfully. Instrumentation
+localized the early exit to Next's output-file tracing phase, where
+`@vercel/nft` repeatedly awaits filesystem callbacks.
+
+The minimal runtime reproduction was independent of Next:
+
+```js
+const fs = require('fs');
+let completed = 0;
+(async () => {
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => {
+      fs.readlink('/workspace/next', () => {
+        completed++;
+        resolve();
+      });
+    });
+  }
+})();
+process.on('beforeExit', () => console.log(completed));
+```
+
+The browser runtime exited after 18 callbacks. Every individual filesystem
+operation and `process.nextTick` callback worked; the defect was Edge's outer
+event-loop quiescence test. A provider checkpoint could drain one Edge task,
+leaving the task queue empty at that instant. Edge then counted the turn as
+idle even though the drained callback's Promise continuation would schedule
+the next operation at the following host checkpoint. A chain longer than the
+fixed idle grace window therefore exited cleanly but prematurely.
+
+`CompleteProviderEventLoopCheckpoint` now reports two different facts:
+
+- whether Edge work remains pending after the drain; and
+- whether the checkpoint drained Edge work and therefore made progress.
+
+The outer loop resets its idle decision on either pending work or progress and
+continues until the combined provider/Edge queues reach a fixed point. This is
+provider-neutral Node event-loop behavior: there is no `__wasi__` branch,
+Next-specific keepalive, timer, or new N-API operation.
+
+Verification with a rebuilt exnref host-N-API WebC used the fixture's ordinary
+commands, without `NEXT_TEST_WASM_DIR` or an explicit SWC package. `pnpm build`
+completed with status 0 and wrote `.next/BUILD_ID`; `pnpm start` reached ready,
+opened port 3000, and rendered `Welcome to Next.js on Wasmer.` in the browser.
+The source-map warning for the generated host-N-API function URL is separate
+diagnostic noise and was not involved in the missing build.
+
 ## Buffer ownership action plan (completed)
 
 1. Keep mirror coherence and mirror lifetime as separate mechanisms in the

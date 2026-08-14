@@ -219,6 +219,37 @@ TEST_F(Test0RuntimePhase01, EmptySourceReturnsNonZero) {
   EXPECT_EQ(error, "Empty script source");
 }
 
+TEST_F(Test0RuntimePhase01, AsyncFsPromiseChainReachesQuiescence) {
+  EnvScope s(runtime_.get());
+  constexpr const char* kSource = R"JS(
+const fs = require('fs');
+globalThis.__edge_fs_chain_count = 0;
+globalThis.__edge_fs_chain_done = false;
+(async () => {
+  for (let i = 0; i < 64; i++) {
+    await new Promise((resolve, reject) => {
+      fs.stat('.', (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        globalThis.__edge_fs_chain_count++;
+        resolve();
+      });
+    });
+  }
+  globalThis.__edge_fs_chain_done = true;
+})();
+)JS";
+
+  std::string error;
+  const int exit_code = EdgeRunScriptSourceWithLoop(s.env, kSource, &error, true);
+  EXPECT_EQ(exit_code, 0) << "error=" << error;
+  EXPECT_TRUE(error.empty()) << "error=" << error;
+  EXPECT_EQ(GetGlobalUtf8(s.env, "__edge_fs_chain_count"), "64");
+  EXPECT_EQ(GetGlobalUtf8(s.env, "__edge_fs_chain_done"), "true");
+}
+
 TEST_F(Test0RuntimePhase01, NativePathResolveNormalizesDotSegments) {
 #ifdef _WIN32
   EXPECT_EQ(edge_path::PathResolve("C:\\base\\dir", {"..\\pkg", ".\\entry.js"}),

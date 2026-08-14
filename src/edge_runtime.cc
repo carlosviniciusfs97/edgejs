@@ -1428,9 +1428,13 @@ napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
                                                 bool has_runnable_work,
                                                 bool* has_pending_provider_work = nullptr,
                                                 bool* host_tasks_admitted = nullptr,
-                                                bool* has_pending_edge_work = nullptr) {
+                                                bool* has_pending_edge_work = nullptr,
+                                                bool* made_edge_progress = nullptr) {
   if (has_pending_edge_work != nullptr) {
     *has_pending_edge_work = false;
+  }
+  if (made_edge_progress != nullptr) {
+    *made_edge_progress = false;
   }
   uint32_t checkpoint_state = unofficial_napi_event_loop_checkpoint_state_none;
   napi_status status =
@@ -1456,6 +1460,11 @@ napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
   if (!EdgeGetTaskQueueFlags(env, &has_tick_scheduled, &has_rejection_to_warn) ||
       (!has_tick_scheduled && !has_rejection_to_warn)) {
     return napi_ok;
+  }
+  // A drain can settle a Promise even when it leaves no task-queue flags set.
+  // Report that progress separately from work which remains pending.
+  if (made_edge_progress != nullptr) {
+    *made_edge_progress = true;
   }
   const napi_status drain_status = DrainProcessTickCallback(env);
   if (has_pending_edge_work != nullptr &&
@@ -1761,12 +1770,14 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     bool has_pending_provider_work = false;
     bool host_tasks_admitted = false;
     bool has_pending_edge_work = false;
+    bool made_edge_progress = false;
     const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
         env,
         has_runnable_work,
         &has_pending_provider_work,
         &host_tasks_admitted,
-        &has_pending_edge_work);
+        &has_pending_edge_work,
+        &made_edge_progress);
     if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider checkpoint while waiting for the top-level Promise";
@@ -1779,7 +1790,8 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
       return checkpoint_async_status;
     }
     const bool loop_alive = loop != nullptr && uv_loop_alive(loop) != 0;
-    if (!loop_alive && !has_pending_provider_work && !has_pending_edge_work) {
+    if (!loop_alive && !has_pending_provider_work && !has_pending_edge_work &&
+        !made_edge_progress) {
       // A pending top-level Promise with no event-loop or provider work is an
       // unsettled TLA, not work that can make progress by spinning here.
       break;
@@ -2019,12 +2031,14 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     bool has_pending_provider_work = false;
     bool host_tasks_admitted = false;
     bool has_pending_edge_work = false;
+    bool made_edge_progress = false;
     const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
         env,
         has_runnable_work,
         &has_pending_provider_work,
         &host_tasks_admitted,
-        &has_pending_edge_work);
+        &has_pending_edge_work,
+        &made_edge_progress);
     if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider event-loop checkpoint";
@@ -2046,7 +2060,8 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
 
     bool more = uv_loop_alive(loop) != 0 ||
                 has_pending_provider_work ||
-                has_pending_edge_work;
+                has_pending_edge_work ||
+                made_edge_progress;
     if (more) {
       idle_drain_turns = 0;
       if (!host_tasks_admitted &&
@@ -2079,12 +2094,14 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       bool has_pending_idle_provider_work = false;
       bool idle_host_tasks_admitted = false;
       bool has_pending_idle_edge_work = false;
+      bool made_idle_edge_progress = false;
       const napi_status idle_checkpoint_status = CompleteProviderEventLoopCheckpoint(
           env,
           false,
           &has_pending_idle_provider_work,
           &idle_host_tasks_admitted,
-          &has_pending_idle_edge_work);
+          &has_pending_idle_edge_work,
+          &made_idle_edge_progress);
       if (idle_checkpoint_status != napi_ok &&
           idle_checkpoint_status != napi_pending_exception) {
         if (error_out != nullptr) {
@@ -2106,7 +2123,8 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       }
       if (uv_loop_alive(loop) != 0 ||
           has_pending_idle_provider_work ||
-          has_pending_idle_edge_work) {
+          has_pending_idle_edge_work ||
+          made_idle_edge_progress) {
         idle_drain_turns = 0;
       }
       continue;
@@ -2119,12 +2137,14 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
 
     bool has_pending_before_exit_provider_work = false;
     bool has_pending_before_exit_edge_work = false;
+    bool made_before_exit_edge_progress = false;
     const napi_status before_exit_checkpoint_status =
         CompleteProviderEventLoopCheckpoint(
             env, uv_backend_timeout(loop) == 0,
             &has_pending_before_exit_provider_work,
             nullptr,
-            &has_pending_before_exit_edge_work);
+            &has_pending_before_exit_edge_work,
+            &made_before_exit_edge_progress);
     if (before_exit_checkpoint_status != napi_ok &&
         before_exit_checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
@@ -2140,7 +2160,8 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
 
     more = uv_loop_alive(loop) != 0 ||
            has_pending_before_exit_provider_work ||
-           has_pending_before_exit_edge_work;
+           has_pending_before_exit_edge_work ||
+           made_before_exit_edge_progress;
     if (!more) {
       break;
     }
