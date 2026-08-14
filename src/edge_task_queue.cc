@@ -69,8 +69,7 @@ static napi_value TaskQueueEnqueueMicrotask(napi_env env, napi_callback_info inf
 }
 
 static napi_value TaskQueueRunMicrotasks(napi_env env, napi_callback_info /*info*/) {
-  (void)unofficial_napi_event_loop_checkpoint(
-      env, unofficial_napi_event_loop_checkpoint_microtasks, true, nullptr);
+  (void)unofficial_napi_process_microtasks(env);
   return internal_binding::Undefined(env);
 }
 

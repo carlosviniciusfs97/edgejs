@@ -5501,6 +5501,16 @@ bool LoadResolvedModule(napi_env env, ModuleLoaderState* state, const fs::path& 
 
 }  // namespace
 
+bool EdgeResolveModulePathForImport(const std::string& specifier,
+                                    const std::string& base_dir,
+                                    std::string* resolved_path_out) {
+  if (resolved_path_out == nullptr) return false;
+  fs::path resolved;
+  if (!ResolveModulePath(specifier, base_dir, &resolved)) return false;
+  *resolved_path_out = resolved.string();
+  return true;
+}
+
 napi_value EdgeInstallBuiltinsBinding(napi_env env) {
   if (env == nullptr) return nullptr;
   ModuleLoaderState* state = GetModuleLoaderState(env);
