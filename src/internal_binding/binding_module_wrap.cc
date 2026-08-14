@@ -16,6 +16,9 @@
 #include "../edge_bytecode_cache.h"
 #include "../edge_module_loader.h"
 #include "../edge_path.h"
+#if defined(EDGE_WEBCONTAINER_COMPAT)
+#include "../edge_url.h"
+#endif
 
 namespace internal_binding {
 
@@ -912,6 +915,46 @@ napi_value ModuleWrapImportModuleDynamically(napi_env env, napi_callback_info in
 
   napi_value global = GetGlobal(env);
   if (global == nullptr) return Undefined(env);
+
+#if defined(EDGE_WEBCONTAINER_COMPAT)
+  // Next's WebContainer SWC path passes an installed bare package through
+  // pathToFileURL(). Keep Node's normal file-URL semantics elsewhere: only
+  // rewrite a missing URL directly under cwd when the same relative text
+  // resolves as an installed package.
+  napi_value rewritten_specifier = nullptr;
+  {
+    const std::string specifier = ValueToUtf8(env, argv[0]);
+    if (specifier.rfind("file://", 0) == 0) {
+      const std::filesystem::path candidate(
+          edge_path::NormalizeFileURLOrPath(specifier));
+      std::error_code ec;
+      if (!candidate.empty() && !std::filesystem::exists(candidate, ec)) {
+        const std::filesystem::path cwd = std::filesystem::current_path(ec);
+        const std::filesystem::path relative =
+            ec ? std::filesystem::path() : candidate.lexically_relative(cwd);
+        const std::string package_specifier = relative.generic_string();
+        const bool is_bare_package =
+            !package_specifier.empty() && package_specifier != "." &&
+            package_specifier.rfind("../", 0) != 0 &&
+            package_specifier[0] != '/' && package_specifier[0] != '.';
+        std::string resolved_path;
+        if (is_bare_package &&
+            EdgeResolveModulePathForImport(
+                package_specifier, cwd.string(), &resolved_path)) {
+          const std::string resolved_url =
+              edge_url::PathToFileURLString(resolved_path);
+          if (!resolved_url.empty()) {
+            (void)napi_create_string_utf8(env,
+                                          resolved_url.c_str(),
+                                          resolved_url.size(),
+                                          &rewritten_specifier);
+          }
+        }
+      }
+    }
+  }
+  if (rewritten_specifier != nullptr) argv[0] = rewritten_specifier;
+#endif
 
   napi_value result = nullptr;
   if (argc >= 5) {

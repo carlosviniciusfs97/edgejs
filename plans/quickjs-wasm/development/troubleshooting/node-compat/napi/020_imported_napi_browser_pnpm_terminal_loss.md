@@ -70,6 +70,13 @@ total:        28.3 s
 
 `NEXT_TEST_WASM_DIR` is not used by the development script.
 
+The WebContainer module-resolution compatibility path is a WASIX build
+capability. Native code no longer discovers that capability by repeatedly
+reading the mutable `process.versions.webcontainer` property during every
+dynamic import. WASIX builds define `EDGE_WEBCONTAINER_COMPAT`; the JavaScript
+property remains the public capability marker, while native builds omit the
+compatibility fallback entirely.
+
 ## 2026-08-14 Next.js production-build quiescence follow-up
 
 The ordinary production sequence initially reported a successful `next build`
