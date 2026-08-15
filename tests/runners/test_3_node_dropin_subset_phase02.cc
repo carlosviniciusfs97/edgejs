@@ -25,6 +25,7 @@
 #include "edge_module_loader.h"
 #include "edge_process_wrap.h"
 #include "edge_runtime.h"
+#include "uv.h"
 
 namespace {
 void BestEffortKillLeakedFixtureChildren();
@@ -34,6 +35,16 @@ class Test3NodeDropinSubsetPhase02 : public FixtureTestBase {
  protected:
   static void TearDownTestSuite() { BestEffortKillLeakedFixtureChildren(); }
 };
+
+#if defined(__wasi__)
+TEST_F(Test3NodeDropinSubsetPhase02,
+       WasixFreeMemoryAccountsForCurrentLinearMemory) {
+  const uint64_t total = uv_get_total_memory();
+  const uint64_t free = uv_get_free_memory();
+  EXPECT_GT(total, 0u);
+  EXPECT_LT(free, total);
+}
+#endif
 
 namespace {
 
@@ -138,6 +149,34 @@ std::string_view TrimLeadingAsciiWhitespace(std::string_view s) {
   return s;
 }
 
+bool IsDirectiveStatement(std::string_view line) {
+  line = TrimLeadingAsciiWhitespace(line);
+  if (line.size() < 2 || (line.front() != '\'' && line.front() != '"')) {
+    return false;
+  }
+  const char quote = line.front();
+  bool escaped = false;
+  size_t end = 1;
+  for (; end < line.size(); ++end) {
+    const char ch = line[end];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch == quote) break;
+  }
+  if (end == line.size()) return false;
+  std::string_view tail = TrimLeadingAsciiWhitespace(line.substr(end + 1));
+  if (!tail.empty() && tail.front() == ';') {
+    tail = TrimLeadingAsciiWhitespace(tail.substr(1));
+  }
+  return tail.empty() || StartsWith(tail, "//");
+}
+
 std::vector<std::string> ParseLeadingFlagsHeader(const std::filesystem::path& script_path) {
   std::ifstream in(script_path);
   if (!in.is_open()) {
@@ -145,23 +184,44 @@ std::vector<std::string> ParseLeadingFlagsHeader(const std::filesystem::path& sc
   }
 
   std::string line;
-  // Node test metadata is conventionally near the top of the file, but it is
-  // not required to precede directives or the license header. In particular,
-  // some tests place `// Flags:` after `'use strict'`. Scan the complete
-  // metadata prefix instead of treating the first JavaScript statement as the
-  // end of metadata.
-  for (size_t line_number = 0;
-       line_number < 32 && std::getline(in, line);
-       ++line_number) {
+  bool in_block_comment = false;
+  bool first_line = true;
+  // Metadata may follow an arbitrarily long license/comment preamble and
+  // directive prologue. Scan that grammar-defined prefix, stopping at the
+  // first executable statement instead of relying on a line-count heuristic.
+  while (std::getline(in, line)) {
     std::string_view view(line);
     if (!view.empty() && view.back() == '\r') {
       view.remove_suffix(1);
     }
-    view = TrimLeadingAsciiWhitespace(view);
+    if (first_line && StartsWith(view, "#!")) {
+      first_line = false;
+      continue;
+    }
+    first_line = false;
 
-    if (StartsWith(view, "// Flags:")) {
-      view.remove_prefix(std::string_view("// Flags:").size());
-      return SplitAsciiWhitespace(view);
+    while (true) {
+      view = TrimLeadingAsciiWhitespace(view);
+      if (in_block_comment) {
+        const size_t comment_end = view.find("*/");
+        if (comment_end == std::string_view::npos) break;
+        view.remove_prefix(comment_end + 2);
+        in_block_comment = false;
+        continue;
+      }
+      if (view.empty()) break;
+      if (StartsWith(view, "// Flags:")) {
+        view.remove_prefix(std::string_view("// Flags:").size());
+        return SplitAsciiWhitespace(view);
+      }
+      if (StartsWith(view, "//")) break;
+      if (StartsWith(view, "/*")) {
+        view.remove_prefix(2);
+        in_block_comment = true;
+        continue;
+      }
+      if (IsDirectiveStatement(view)) break;
+      return {};
     }
   }
   return {};
@@ -598,6 +658,9 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
       (void)write(STDERR_FILENO, "\n", 1);
     }
     if (owner != nullptr) {
+      EdgeEnvironmentRunCleanup(env);
+      EdgeEnvironmentRunAtExitCallbacks(env);
+      EdgeEnvironmentDetach(env);
       (void)unofficial_napi_release_env(owner, nullptr);
     }
     _exit(child_exit);
@@ -657,6 +720,45 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
 }
 
 }  // namespace
+
+TEST_F(Test3NodeDropinSubsetPhase02, FlagsMetadataScansCompleteCommentAndDirectivePrefix) {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("edge-flags-prefix-" + std::to_string(CurrentProcessId()) + ".js");
+  {
+    std::ofstream out(path);
+    ASSERT_TRUE(out.is_open());
+    out << "/*\n";
+    for (size_t i = 0; i < 64; ++i) {
+      out << " * license line " << i << "\n";
+    }
+    out << " */\n'use strict';\n// another metadata comment\n";
+    out << "// Flags: --trace-uncaught --no-warnings\n";
+    out << "require('node:assert');\n";
+  }
+  const std::vector<std::string> flags = ParseLeadingFlagsHeader(path);
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
+  ASSERT_EQ(flags.size(), 2u);
+  EXPECT_EQ(flags[0], "--trace-uncaught");
+  EXPECT_EQ(flags[1], "--no-warnings");
+}
+
+TEST_F(Test3NodeDropinSubsetPhase02, FlagsMetadataStopsAtExecutableCode) {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("edge-flags-code-" + std::to_string(CurrentProcessId()) + ".js");
+  {
+    std::ofstream out(path);
+    ASSERT_TRUE(out.is_open());
+    out << "const alreadyRunning = true;\n";
+    out << "// Flags: --expose-gc\n";
+  }
+  const std::vector<std::string> flags = ParseLeadingFlagsHeader(path);
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
+  EXPECT_TRUE(flags.empty());
+}
 
 TEST_F(Test3NodeDropinSubsetPhase02, NodeAssertSubsetTest) {
   EnvScope s(runtime_.get());
@@ -1246,9 +1348,17 @@ DEFINE_RAW_NODE_TEST(RawQuerystringMulticharSeparatorFromNodeTest, "test-queryst
 DEFINE_RAW_NODE_TEST(RawQuerystringMaxKeysNonFiniteFromNodeTest, "test-querystring-maxKeys-non-finite.js")
 DEFINE_RAW_NODE_TEST(RawQuerystringEscapeFromNodeTest, "test-querystring-escape.js")
 
+// Exercises repeated receive pause/resume cycles. The native parser must
+// consume these iteratively so peer-driven backpressure cannot grow the C++
+// stack.
+DEFINE_RAW_NODE_TEST(RawHttp2BackpressureFromNodeTest,
+                     "test-http2-backpressure.js")
+
 // Raw Node process tests
 DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessFeaturesFromNodeTest, "test-process-features.js")
 DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessAbortFromNodeTest, "test-process-abort.js")
+DEFINE_RAW_NODE_TEST(RawDomainAbortPolicyFromNodeTest,
+                     "test-domain-with-abort-on-uncaught-exception.js")
 TEST_F(Test3NodeDropinSubsetPhase02, RawProcessArgv0FromNodeTest) {
   if (RawNodeScriptHasUnsupportedFlagsHeader("test-process-argv-0.js")) {
     GTEST_SKIP() << "Skipping Node.js raw test with unsupported // Flags header: test-process-argv-0.js";

@@ -3,10 +3,17 @@
 #include "test_env.h"
 #include "edge_version.h"
 #include "edge_runtime.h"
+#include "internal_binding/binding_initializers.h"
 
 class Test5InternalBindingParityPhase03 : public FixtureTestBase {};
 
 namespace {
+
+napi_value TestDOMExceptionConstructor(napi_env env, napi_callback_info) {
+  napi_value undefined = nullptr;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
 
 constexpr const char* kParityWaveScript = R"JS(
 const assert = require('assert');
@@ -200,6 +207,13 @@ if (callSites.length > 0) {
   assert.strictEqual(typeof callSites[0].scriptId, 'string');
   assert.ok(!String(callSites[0].scriptName).includes('node:util'));
 }
+function captureMaximumCallSites(depth) {
+  if (depth === 0) return utilBinding.getCallSites(200);
+  return captureMaximumCallSites(depth - 1);
+}
+const maximumCallSites = captureMaximumCallSites(220);
+assert.strictEqual(maximumCallSites.length, 200);
+assert.strictEqual(maximumCallSites[0].functionName, 'captureMaximumCallSites');
 
 const messagingBinding = internalBinding('messaging');
 assert.ok(messagingBinding && typeof messagingBinding === 'object');
@@ -829,6 +843,68 @@ assert.strictEqual(ownNonIndex.includes(ownSymbol), true);
   std::string error;
   EXPECT_EQ(EdgeRunScriptSource(s.env, source, &error), 0) << "error=" << error;
   EXPECT_TRUE(error.empty()) << "error=" << error;
+}
+
+TEST_F(Test5InternalBindingParityPhase03,
+       LazyDOMExceptionPropertySurvivesBootstrapOrdering) {
+  EnvScope s(runtime_.get());
+
+  napi_value binding = internal_binding::InitMessaging(s.env);
+  ASSERT_NE(binding, nullptr);
+  napi_value expose = nullptr;
+  ASSERT_EQ(napi_get_named_property(
+                s.env, binding, "exposeLazyDOMExceptionProperty", &expose),
+            napi_ok);
+
+  napi_value target = nullptr;
+  ASSERT_EQ(napi_create_object(s.env, &target), napi_ok);
+  napi_value argv[1] = {target};
+  napi_value ignored = nullptr;
+  ASSERT_EQ(napi_call_function(s.env, binding, expose, 1, argv, &ignored),
+            napi_ok);
+
+  // The constructor is deliberately installed after the lazy property. This
+  // is the bootstrap order that previously left DOMException absent forever.
+  napi_value global = nullptr;
+  ASSERT_EQ(napi_get_global(s.env, &global), napi_ok);
+  napi_value constructor = nullptr;
+  ASSERT_EQ(napi_create_function(s.env,
+                                 "DOMException",
+                                 NAPI_AUTO_LENGTH,
+                                 TestDOMExceptionConstructor,
+                                 nullptr,
+                                 &constructor),
+            napi_ok);
+  ASSERT_EQ(
+      napi_set_named_property(s.env, global, "DOMException", constructor),
+      napi_ok);
+
+  napi_value resolved = nullptr;
+  ASSERT_EQ(napi_get_named_property(s.env, target, "DOMException", &resolved),
+            napi_ok);
+  bool equal = false;
+  ASSERT_EQ(napi_strict_equals(s.env, resolved, constructor, &equal), napi_ok);
+  EXPECT_TRUE(equal);
+
+  // The first successful read replaces the accessor with the final data
+  // property, so later reads no longer pay a bootstrap lookup.
+  napi_value replacement = nullptr;
+  ASSERT_EQ(napi_create_function(s.env,
+                                 "ReplacementDOMException",
+                                 NAPI_AUTO_LENGTH,
+                                 TestDOMExceptionConstructor,
+                                 nullptr,
+                                 &replacement),
+            napi_ok);
+  ASSERT_EQ(
+      napi_set_named_property(s.env, global, "DOMException", replacement),
+      napi_ok);
+  napi_value cached = nullptr;
+  ASSERT_EQ(napi_get_named_property(s.env, target, "DOMException", &cached),
+            napi_ok);
+  equal = false;
+  ASSERT_EQ(napi_strict_equals(s.env, cached, constructor, &equal), napi_ok);
+  EXPECT_TRUE(equal);
 }
 
 TEST_F(Test5InternalBindingParityPhase03, WaveOneAndTwoBindingsHaveCriticalParitySurface) {

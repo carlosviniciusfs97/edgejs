@@ -12,7 +12,12 @@
 
 class V8Runtime {
  public:
-  V8Runtime() = default;
+  V8Runtime() {
+    unofficial_napi_runtime_options options{};
+    options.size = sizeof(options);
+    options.version = UNOFFICIAL_NAPI_RUNTIME_OPTIONS_VERSION;
+    EXPECT_EQ(unofficial_napi_configure_runtime(&options), napi_ok);
+  }
   ~V8Runtime() = default;
 };
 
@@ -45,6 +50,11 @@ struct EnvScope {
   ~EnvScope() {
     isolate.reset();
     if (env != nullptr) {
+      // Edge owns its cleanup lifecycle. Drain and detach Edge resources
+      // before asking the provider to destroy the JavaScript environment.
+      EdgeEnvironmentRunCleanup(env);
+      EdgeEnvironmentRunAtExitCallbacks(env);
+      EdgeEnvironmentDetach(env);
       EXPECT_EQ(unofficial_napi_release_env(owner, nullptr), napi_ok);
       env = nullptr;
       owner = nullptr;

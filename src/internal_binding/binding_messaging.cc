@@ -4117,6 +4117,46 @@ napi_value MessageChannelConstructorCallback(napi_env env, napi_callback_info in
   return this_arg;
 }
 
+napi_value LazyDOMExceptionGetter(napi_env env, napi_callback_info info) {
+  napi_value target = nullptr;
+  if (napi_get_cb_info(env, info, nullptr, nullptr, &target, nullptr) != napi_ok ||
+      target == nullptr) {
+    return nullptr;
+  }
+  napi_value dom_exception = nullptr;
+  napi_value per_context_exports = EdgeGetPerContextExports(env);
+  if (per_context_exports != nullptr && !IsUndefined(env, per_context_exports)) {
+    dom_exception = GetNamed(env, per_context_exports, "DOMException");
+  }
+  if (!IsFunction(env, dom_exception)) {
+    napi_value global = GetGlobal(env);
+    bool target_is_global = false;
+    if (global != nullptr) {
+      (void)napi_strict_equals(env, target, global, &target_is_global);
+    }
+    // Reading global.DOMException while this getter is installed on the global
+    // would recurse. A later bootstrap define replaces this configurable
+    // accessor; non-global targets can safely inherit the global constructor.
+    dom_exception = !target_is_global ? GetNamed(env, global, "DOMException")
+                                      : nullptr;
+  }
+  if (dom_exception == nullptr || IsUndefined(env, dom_exception)) {
+    // Bootstrap has not installed the constructor yet. Keep the configurable
+    // accessor in place so the next observation can resolve it.
+    return Undefined(env);
+  }
+
+  napi_property_descriptor resolved{};
+  resolved.utf8name = "DOMException";
+  resolved.value = dom_exception;
+  resolved.attributes =
+      static_cast<napi_property_attributes>(napi_writable | napi_configurable);
+  if (napi_define_properties(env, target, 1, &resolved) != napi_ok) {
+    return nullptr;
+  }
+  return dom_exception;
+}
+
 napi_value ExposeLazyDOMExceptionPropertyCallback(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1] = {nullptr};
@@ -4127,17 +4167,20 @@ napi_value ExposeLazyDOMExceptionPropertyCallback(napi_env env, napi_callback_in
   if (napi_typeof(env, argv[0], &target_type) != napi_ok || target_type != napi_object) return Undefined(env);
 
   napi_value dom_exception = ResolveDOMExceptionValue(env);
-  if (dom_exception == nullptr || IsUndefined(env, dom_exception)) return Undefined(env);
-
-  // Node exposes DOMException as an ordinary writable, non-enumerable data
-  // property by the time user code runs. Resolve it during bootstrap so the
-  // observable descriptor is provider-neutral and does not depend on whether
-  // some earlier bootstrap path happened to trigger a lazy getter.
   napi_property_descriptor desc = {};
   desc.utf8name = "DOMException";
-  desc.value = dom_exception;
-  desc.attributes = static_cast<napi_property_attributes>(napi_writable | napi_configurable);
-  napi_define_properties(env, argv[0], 1, &desc);
+  if (dom_exception != nullptr && !IsUndefined(env, dom_exception)) {
+    // Resolve eagerly when bootstrap ordering permits, matching Node's final
+    // writable, non-enumerable data descriptor.
+    desc.value = dom_exception;
+    desc.attributes =
+        static_cast<napi_property_attributes>(napi_writable | napi_configurable);
+  } else {
+    // A transient bootstrap miss must not permanently omit the property.
+    desc.getter = LazyDOMExceptionGetter;
+    desc.attributes = napi_configurable;
+  }
+  if (napi_define_properties(env, argv[0], 1, &desc) != napi_ok) return nullptr;
   return Undefined(env);
 }
 

@@ -80,6 +80,12 @@ struct WorkerThreadData {
   unofficial_napi_env_owner owner = nullptr;
   uv_async_t stop_async{};
   std::atomic<bool> stop_async_initialized{false};
+  // Provider profiler handles are created, consumed, and invalidated only on
+  // the worker engine thread. Keeping them on WorkerThreadData makes that
+  // affinity structural instead of relying on the parent-facing Worker mutex.
+  std::unordered_map<uint32_t, unofficial_napi_profile> cpu_profiles;
+  uint32_t next_cpu_profile_id = 1;
+  unofficial_napi_profile heap_profile = nullptr;
 };
 
 struct Worker {
@@ -117,9 +123,6 @@ struct Worker {
   std::string custom_err_reason;
   std::mutex task_mutex;
   std::deque<std::unique_ptr<WorkerTask>> completed_tasks;
-  std::unordered_map<uint32_t, unofficial_napi_profile> cpu_profiles;
-  uint32_t next_cpu_profile_id = 1;
-  unofficial_napi_profile heap_profile = nullptr;
 };
 
 struct WorkerTask {
@@ -771,6 +774,11 @@ void SetTaskError(WorkerTask* task, const char* code, const std::string& message
 void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
   auto* task = static_cast<WorkerTask*>(data);
   if (task == nullptr || task->wrap == nullptr || worker_env == nullptr) return;
+  WorkerThreadData* thread_data = task->wrap->thread_data.get();
+  if (thread_data == nullptr) {
+    SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Worker thread state is unavailable");
+    return;
+  }
 
   switch (task->type) {
     case WorkerTaskType::kCpuUsage: {
@@ -786,6 +794,7 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       if (unofficial_napi_get_heap_statistics(worker_env, &task->heap_statistics) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to get heap statistics");
       } else {
+        unofficial_napi_heap_statistics_normalize(&task->heap_statistics);
         task->found = true;
       }
       break;
@@ -801,24 +810,24 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       } else if (profile == nullptr) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "CPU profile session was not created");
       } else {
-        uint32_t profile_id = task->wrap->next_cpu_profile_id++;
-        while (profile_id == 0 || task->wrap->cpu_profiles.count(profile_id) != 0) {
-          profile_id = task->wrap->next_cpu_profile_id++;
+        uint32_t profile_id = thread_data->next_cpu_profile_id++;
+        while (profile_id == 0 || thread_data->cpu_profiles.count(profile_id) != 0) {
+          profile_id = thread_data->next_cpu_profile_id++;
         }
-        task->wrap->cpu_profiles.emplace(profile_id, profile);
+        thread_data->cpu_profiles.emplace(profile_id, profile);
         task->started_profile_id = profile_id;
         task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStopCpuProfile: {
-      auto profile_it = task->wrap->cpu_profiles.find(task->profile_id);
-      if (profile_it == task->wrap->cpu_profiles.end()) {
+      auto profile_it = thread_data->cpu_profiles.find(task->profile_id);
+      if (profile_it == thread_data->cpu_profiles.end()) {
         SetTaskError(task, "ERR_CPU_PROFILE_NOT_STARTED", "CPU profile not started");
         break;
       }
       unofficial_napi_profile profile = profile_it->second;
-      task->wrap->cpu_profiles.erase(profile_it);
+      thread_data->cpu_profiles.erase(profile_it);
       napi_value json = nullptr;
       if (unofficial_napi_profile_stop(worker_env, profile, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop CPU profile");
@@ -840,18 +849,18 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       } else if (profile == nullptr) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Heap profile session was not created");
       } else {
-        task->wrap->heap_profile = profile;
+        thread_data->heap_profile = profile;
         task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStopHeapProfile: {
-      unofficial_napi_profile profile = task->wrap->heap_profile;
+      unofficial_napi_profile profile = thread_data->heap_profile;
       if (profile == nullptr) {
         SetTaskError(task, "ERR_HEAP_PROFILE_NOT_STARTED", "heap profile not started");
         break;
       }
-      task->wrap->heap_profile = nullptr;
+      thread_data->heap_profile = nullptr;
       napi_value json = nullptr;
       if (unofficial_napi_profile_stop(worker_env, profile, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop heap profile");
@@ -1310,8 +1319,12 @@ cleanup_worker_env:
   if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
   EdgeWorkerEnvForget(worker_env);
   (void)unofficial_napi_release_env(worker_owner, shutdown_loop);
-  wrap->cpu_profiles.clear();
-  wrap->heap_profile = nullptr;
+  if (wrap->thread_data != nullptr) {
+    // release_env has stopped and reclaimed any sessions the worker did not
+    // explicitly consume; these are now invalid bookkeeping tokens.
+    wrap->thread_data->cpu_profiles.clear();
+    wrap->thread_data->heap_profile = nullptr;
+  }
   EdgeWorkerEnvDestroyReleasedEventLoop(shutdown_loop);
   wrap->worker_config.external_event_loop = nullptr;
   FinalizeWorkerThread(wrap, exit_code, custom_err, custom_err_reason);

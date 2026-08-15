@@ -558,7 +558,7 @@ bool TakePendingExceptionInfo(napi_env env,
         if (unofficial_napi_get_error_metadata(
                 env,
                 out->exception,
-                unofficial_napi_error_metadata_current,
+                unofficial_napi_error_metadata_thrown_at_only,
                 &metadata) == napi_ok &&
             metadata.thrown_at != nullptr) {
           out->thrown_at = NapiValueToUtf8(env, metadata.thrown_at);
@@ -680,7 +680,7 @@ std::string FormatUncaughtExceptionForStderr(napi_env env,
       if (unofficial_napi_get_error_metadata(
               env,
               exception,
-              unofficial_napi_error_metadata_current,
+              unofficial_napi_error_metadata_thrown_at_only,
               &metadata) == napi_ok &&
           metadata.thrown_at != nullptr) {
         thrown_at = NapiValueToUtf8(env, metadata.thrown_at);
@@ -1130,6 +1130,47 @@ bool ShouldAbortOnUncaughtException() {
          EdgeExecArgvHasFlag("--abort_on_uncaught_exception");
 }
 
+bool HasUncaughtExceptionCaptureCallback(napi_env env) {
+  if (env == nullptr) return false;
+  napi_value global = nullptr;
+  napi_value process_obj = nullptr;
+  napi_value has_capture_callback = nullptr;
+  napi_valuetype callback_type = napi_undefined;
+  if (napi_get_global(env, &global) != napi_ok || global == nullptr ||
+      napi_get_named_property(env, global, "process", &process_obj) != napi_ok ||
+      process_obj == nullptr ||
+      napi_get_named_property(env,
+                              process_obj,
+                              "hasUncaughtExceptionCaptureCallback",
+                              &has_capture_callback) != napi_ok ||
+      has_capture_callback == nullptr ||
+      napi_typeof(env, has_capture_callback, &callback_type) != napi_ok ||
+      callback_type != napi_function) {
+    return false;
+  }
+
+  napi_value result = nullptr;
+  if (napi_call_function(
+          env, process_obj, has_capture_callback, 0, nullptr, &result) != napi_ok ||
+      result == nullptr) {
+    bool pending = false;
+    if (napi_is_exception_pending(env, &pending) == napi_ok && pending) {
+      napi_value ignored = nullptr;
+      (void)napi_get_and_clear_last_exception(env, &ignored);
+    }
+    return false;
+  }
+  bool active = false;
+  return napi_get_value_bool(env, result, &active) == napi_ok && active;
+}
+
+bool ShouldAbortThisUncaughtException(napi_env env,
+                                      bool may_be_handled_by_domain = true) {
+  return ShouldAbortOnUncaughtException() &&
+         (!may_be_handled_by_domain || !HasActiveDomainErrorHandler(env)) &&
+         !HasUncaughtExceptionCaptureCallback(env);
+}
+
 std::string FormatFatalExceptionMessage(napi_env env,
                                         napi_value exception,
                                         const std::string& pending_exception_line = {},
@@ -1303,6 +1344,19 @@ bool DispatchUncaughtException(napi_env env,
       *fatal_exit_code_out = kExitCodeExceptionInFatalExceptionHandler;
     }
     if (handled_out != nullptr) *handled_out = false;
+    // A domain may intercept the original exception, but an exception thrown
+    // by its error handler is a new fatal exception. It cannot be handled by
+    // that same domain again. Apply the same abort policy while explicitly
+    // excluding the exhausted domain path.
+    const napi_value fatal_exception =
+        pending.has_exception && pending.exception != nullptr
+            ? pending.exception
+            : exception;
+    if (ShouldAbortThisUncaughtException(
+            env, /*may_be_handled_by_domain=*/false)) {
+      AbortOnUncaughtException(
+          env, fatal_exception, pending.exception_line, "");
+    }
     return true;
   }
 
@@ -1328,7 +1382,10 @@ int HandleExtractedException(napi_env env,
                              std::string* error_out,
   const std::string& pending_exception_line = {},
   const std::string& pending_thrown_at = {}) {
-  const bool abort_on_uncaught = ShouldAbortOnUncaughtException();
+  if (ShouldAbortThisUncaughtException(env)) {
+    AbortOnUncaughtException(
+        env, exception, pending_exception_line, pending_thrown_at);
+  }
 
   bool handled = false;
   napi_value effective_exception = exception;
@@ -1347,11 +1404,6 @@ int HandleExtractedException(napi_env env,
       std::cerr << "[edge-exc] handled async exception, continue loop\n";
     }
     return -1;
-  }
-
-  if (abort_on_uncaught) {
-    AbortOnUncaughtException(
-        env, effective_exception, effective_exception_line, effective_exception_thrown_at);
   }
 
   return FinalizeFatalException(
@@ -3658,6 +3710,11 @@ bool EdgeHandlePendingExceptionNow(napi_env env, bool* handled_out) {
     return false;
   }
 
+  if (ShouldAbortThisUncaughtException(env)) {
+    AbortOnUncaughtException(
+        env, pending.exception, pending.exception_line, pending.thrown_at);
+  }
+
   bool handled = false;
   napi_value effective_exception = pending.exception;
   std::string effective_exception_line = pending.exception_line;
@@ -3685,8 +3742,7 @@ bool EdgeFinalizeFatalExceptionNow(napi_env env,
                                    const std::string& thrown_at) {
   if (env == nullptr || exception == nullptr) return false;
 
-  const bool abort_on_uncaught = ShouldAbortOnUncaughtException();
-  if (abort_on_uncaught && !HasActiveDomainErrorHandler(env)) {
+  if (ShouldAbortThisUncaughtException(env)) {
     AbortOnUncaughtException(env, exception, exception_line, thrown_at);
   }
 

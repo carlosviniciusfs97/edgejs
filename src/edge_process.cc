@@ -1818,6 +1818,9 @@ JavascriptHeapMetrics GetJavascriptHeapMetrics(napi_env env,
       unofficial_napi_get_heap_statistics(env, &stats) != napi_ok) {
     return {.memory_limit = fallback_heap_limit};
   }
+  const bool has_heap_limit =
+      (stats.valid_fields & unofficial_napi_heap_stat_heap_size_limit) != 0;
+  unofficial_napi_heap_statistics_normalize(&stats);
   return {
       .total_memory = stats.total_heap_size,
       .executable_memory = stats.total_heap_size_executable,
@@ -1826,10 +1829,8 @@ JavascriptHeapMetrics GetJavascriptHeapMetrics(napi_env env,
       .total_global_handles_memory = stats.total_global_handles_size,
       .used_global_handles_memory = stats.used_global_handles_size,
       .used_memory = stats.used_heap_size,
-      .memory_limit =
-          (stats.valid_fields & unofficial_napi_heap_stat_heap_size_limit) != 0
-              ? stats.heap_size_limit
-              : fallback_heap_limit,
+      .memory_limit = has_heap_limit ? stats.heap_size_limit
+                                     : fallback_heap_limit,
       .malloced_memory = stats.malloced_memory,
       .external_memory = stats.external_memory,
       .peak_malloced_memory = stats.peak_malloced_memory,
@@ -4577,6 +4578,7 @@ napi_value ProcessMethodsMemoryUsageBufferCallback(napi_env env, napi_callback_i
   const napi_status memory_status =
       unofficial_napi_get_heap_statistics(env, &heap_statistics);
   if (memory_status != napi_ok) return nullptr;
+  unofficial_napi_heap_statistics_normalize(&heap_statistics);
   values[0] = static_cast<double>(rss);
   values[1] = static_cast<double>(heap_statistics.total_heap_size);
   values[2] = static_cast<double>(heap_statistics.used_heap_size);

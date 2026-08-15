@@ -16,13 +16,31 @@ int getgroups(int size, gid_t* list) {
 
 namespace {
 constexpr uint64_t kWasixMemoryLimit = uint64_t{1024} * 1024 * 1024;
+constexpr uint64_t kWasmPageSize = uint64_t{64} * 1024;
+
+uint64_t WasixCommittedLinearMemory() {
+#if defined(__wasm__)
+  return static_cast<uint64_t>(__builtin_wasm_memory_size(0)) * kWasmPageSize;
+#else
+  return 0;
+#endif
 }
 
-extern "C" uint64_t uv_get_available_memory(void) { return kWasixMemoryLimit; }
+uint64_t WasixRemainingLinearMemory() {
+  const uint64_t committed = WasixCommittedLinearMemory();
+  return committed < kWasixMemoryLimit ? kWasixMemoryLimit - committed : 0;
+}
+}
+
+extern "C" uint64_t uv_get_available_memory(void) {
+  return WasixRemainingLinearMemory();
+}
 
 extern "C" uint64_t uv_get_constrained_memory(void) { return kWasixMemoryLimit; }
 
-extern "C" uint64_t uv_get_free_memory(void) { return kWasixMemoryLimit; }
+extern "C" uint64_t uv_get_free_memory(void) {
+  return WasixRemainingLinearMemory();
+}
 
 extern "C" uint64_t uv_get_total_memory(void) { return kWasixMemoryLimit; }
 

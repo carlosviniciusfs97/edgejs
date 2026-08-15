@@ -36,7 +36,6 @@ constexpr int32_t kPromisePending = 0;
 constexpr int32_t kPromiseFulfilled = 1;
 constexpr int32_t kPromiseRejected = 2;
 constexpr uint32_t kMaxCallSitesFrames = 200;
-constexpr uint32_t kMaxRawCallSitesFrames = kMaxCallSitesFrames + 1;
 // The provider omits its own capture frame. The binding callback is native and
 // therefore does not add a JavaScript frame, so the first returned call site is
 // already the caller visible to util.getCallSites().
@@ -243,9 +242,7 @@ bool CreateLocationFromCallSite(napi_env env, napi_value callsite, napi_value* l
 }
 
 uint32_t RawCallSiteFramesForEdge(uint32_t frames) {
-  if (frames == 0) return 0;
-  if (frames >= kMaxCallSitesFrames) return kMaxRawCallSitesFrames;
-  return frames + kEdgeInternalCallSiteFrames;
+  return std::min(frames, kMaxCallSitesFrames);
 }
 
 bool CreateSkippedCallSitesArray(napi_env env,

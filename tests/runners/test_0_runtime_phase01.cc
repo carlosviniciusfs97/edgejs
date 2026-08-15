@@ -433,6 +433,47 @@ TEST_F(Test0RuntimePhase01, TickCallbackDoesNotDependOnMutableDispatchGlobals) {
   EXPECT_TRUE(receiver_matches);
 }
 
+TEST_F(Test0RuntimePhase01, TickCallbackAddsNoSyntheticJavascriptFrame) {
+  EnvScope s(runtime_.get());
+
+  napi_value binding = EdgeGetOrCreateTaskQueueBinding(s.env);
+  ASSERT_NE(binding, nullptr);
+  napi_value set_tick_callback = nullptr;
+  ASSERT_EQ(napi_get_named_property(
+                s.env, binding, "setTickCallback", &set_tick_callback),
+            napi_ok);
+
+  napi_value source = nullptr;
+  napi_value callback = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "(function processTicksAndRejections() { "
+                "throw new Error('tick stack'); })",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &callback), napi_ok);
+  napi_value ignored = nullptr;
+  ASSERT_EQ(napi_call_function(
+                s.env, binding, set_tick_callback, 1, &callback, &ignored),
+            napi_ok);
+
+  bool called = false;
+  EXPECT_EQ(EdgeRunTaskQueueTickCallback(s.env, &called), napi_pending_exception);
+  EXPECT_FALSE(called);
+  napi_value exception = nullptr;
+  ASSERT_EQ(napi_get_and_clear_last_exception(s.env, &exception), napi_ok);
+  napi_value stack = nullptr;
+  ASSERT_EQ(napi_get_named_property(s.env, exception, "stack", &stack), napi_ok);
+  const std::string stack_text = ValueToUtf8(s.env, stack);
+  const std::string frame_name = "processTicksAndRejections";
+  const size_t first = stack_text.find(frame_name);
+  ASSERT_NE(first, std::string::npos) << stack_text;
+  EXPECT_EQ(stack_text.find(frame_name, first + frame_name.size()),
+            std::string::npos)
+      << stack_text;
+}
+
 TEST_F(Test0RuntimePhase01, NativeImmediateQueueRunsBeforeJsImmediatesAndDrainsNestedTasks) {
   EnvScope s(runtime_.get());
 

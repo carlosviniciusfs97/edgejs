@@ -14,7 +14,7 @@ struct TaskQueueBindingState {
   explicit TaskQueueBindingState(napi_env env_in) : env(env_in) {}
   ~TaskQueueBindingState() {
     DeleteRefIfAny(env, &binding_ref);
-    DeleteRefIfAny(env, &tick_entry_ref);
+    DeleteRefIfAny(env, &tick_callback_ref);
     DeleteRefIfAny(env, &tick_receiver_ref);
     DeleteRefIfAny(env, &promise_reject_callback_ref);
     tick_info_fields = nullptr;
@@ -26,7 +26,7 @@ struct TaskQueueBindingState {
 
   napi_env env = nullptr;
   napi_ref binding_ref = nullptr;
-  napi_ref tick_entry_ref = nullptr;
+  napi_ref tick_callback_ref = nullptr;
   napi_ref tick_receiver_ref = nullptr;
   napi_ref promise_reject_callback_ref = nullptr;
   int32_t* tick_info_fields = nullptr;
@@ -41,6 +41,15 @@ void DeleteRefIfAny(napi_env env, napi_ref* ref_slot) {
 TaskQueueBindingState& GetTaskQueueState(napi_env env) {
   return EdgeEnvironmentGetOrCreateSlotData<TaskQueueBindingState>(
       env, kEdgeEnvironmentSlotTaskQueueBindingState);
+}
+
+napi_value FailTickCallbackSetup(napi_env env) {
+  bool pending = false;
+  if (napi_is_exception_pending(env, &pending) != napi_ok || !pending) {
+    (void)napi_throw_error(
+        env, "ERR_INTERNAL_ASSERTION", "Failed to install tick callback");
+  }
+  return nullptr;
 }
 
 static napi_value TaskQueueEnqueueMicrotask(napi_env env, napi_callback_info info) {
@@ -87,55 +96,39 @@ static napi_value TaskQueueSetTickCallback(napi_env env, napi_callback_info info
 
   napi_valuetype t = napi_undefined;
   if (napi_typeof(env, argv[0], &t) == napi_ok && t == napi_function) {
-    // Capture the callback and pristine Reflect.apply during Node bootstrap.
-    // The process receiver is retained separately: V8 uses it for the native
-    // process.processTicksAndRejections stack label even though the closure
-    // does not otherwise depend on its dynamic `this` value.
-    static constexpr char kTickEntryFactorySource[] =
-        "((apply) => (recv, callback) => "
-        "function processTicksAndRejections() {"
-        "  return apply(callback, recv, []);"
-        "})(Reflect.apply)";
-    napi_value source = nullptr;
-    napi_value factory = nullptr;
+    // The C++ checkpoint is the trampoline. Retain the original JavaScript
+    // callback and receiver directly so dispatch adds no synthetic JS frame
+    // and performs no runtime source compilation.
     napi_value global = nullptr;
     napi_value process = nullptr;
-    napi_value entry = nullptr;
-    if (napi_create_string_utf8(
-            env, kTickEntryFactorySource, NAPI_AUTO_LENGTH, &source) != napi_ok ||
-        source == nullptr ||
-        napi_run_script(env, source, &factory) != napi_ok ||
-        factory == nullptr ||
-        napi_get_global(env, &global) != napi_ok ||
-        global == nullptr) {
-      return nullptr;
+    if (napi_get_global(env, &global) != napi_ok || global == nullptr) {
+      return FailTickCallbackSetup(env);
     }
     if (napi_get_named_property(env, global, "process", &process) != napi_ok ||
         process == nullptr) {
+      bool pending = false;
+      if (napi_is_exception_pending(env, &pending) == napi_ok && pending) {
+        return nullptr;
+      }
       process = global;
     }
-    napi_value factory_argv[2] = {process, argv[0]};
-    if (napi_call_function(env, global, factory, 2, factory_argv, &entry) != napi_ok ||
-        entry == nullptr) {
-      return nullptr;
-    }
-    napi_ref new_entry_ref = nullptr;
-    if (napi_create_reference(env, entry, 1, &new_entry_ref) != napi_ok ||
-        new_entry_ref == nullptr) {
-      return nullptr;
+    napi_ref new_callback_ref = nullptr;
+    if (napi_create_reference(env, argv[0], 1, &new_callback_ref) != napi_ok ||
+        new_callback_ref == nullptr) {
+      return FailTickCallbackSetup(env);
     }
     napi_ref new_receiver_ref = nullptr;
     if (napi_create_reference(env, process, 1, &new_receiver_ref) != napi_ok ||
         new_receiver_ref == nullptr) {
-      DeleteRefIfAny(env, &new_entry_ref);
-      return nullptr;
+      DeleteRefIfAny(env, &new_callback_ref);
+      return FailTickCallbackSetup(env);
     }
-    DeleteRefIfAny(env, &st.tick_entry_ref);
+    DeleteRefIfAny(env, &st.tick_callback_ref);
     DeleteRefIfAny(env, &st.tick_receiver_ref);
-    st.tick_entry_ref = new_entry_ref;
+    st.tick_callback_ref = new_callback_ref;
     st.tick_receiver_ref = new_receiver_ref;
   } else {
-    DeleteRefIfAny(env, &st.tick_entry_ref);
+    DeleteRefIfAny(env, &st.tick_callback_ref);
     DeleteRefIfAny(env, &st.tick_receiver_ref);
   }
 
@@ -246,7 +239,7 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
 
   auto* state = EdgeEnvironmentGetSlotData<TaskQueueBindingState>(
       env, kEdgeEnvironmentSlotTaskQueueBindingState);
-  if (state == nullptr || state->tick_entry_ref == nullptr) {
+  if (state == nullptr || state->tick_callback_ref == nullptr) {
     return napi_ok;
   }
   if (state->tick_receiver_ref == nullptr) {
@@ -255,9 +248,10 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
 
   edge::HandleScope scope(env);
 
-  napi_value tick_entry = nullptr;
-  napi_status status = napi_get_reference_value(env, state->tick_entry_ref, &tick_entry);
-  if (status != napi_ok || tick_entry == nullptr) {
+  napi_value tick_callback = nullptr;
+  napi_status status =
+      napi_get_reference_value(env, state->tick_callback_ref, &tick_callback);
+  if (status != napi_ok || tick_callback == nullptr) {
     return status == napi_ok ? napi_generic_failure : status;
   }
 
@@ -268,11 +262,11 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
     return status == napi_ok ? napi_generic_failure : status;
   }
 
-  // Both the closure and its receiver were captured at setup time, so dispatch
-  // is independent of mutable user globals.
+  // Both callback and receiver were captured at setup time, so dispatch is
+  // independent of mutable user globals and introduces no JavaScript wrapper.
   napi_value ignored = nullptr;
   status = napi_call_function(
-      env, tick_receiver, tick_entry, 0, nullptr, &ignored);
+      env, tick_receiver, tick_callback, 0, nullptr, &ignored);
   if (status == napi_ok && called != nullptr) {
     *called = true;
   }

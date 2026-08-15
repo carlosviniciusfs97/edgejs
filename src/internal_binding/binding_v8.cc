@@ -212,6 +212,7 @@ napi_value V8UpdateHeapStatisticsBuffer(napi_env env, napi_callback_info /*info*
   if (unofficial_napi_get_heap_statistics(env, &stats) != napi_ok) {
     return MakeUndefined(env);
   }
+  unofficial_napi_heap_statistics_normalize(&stats);
 
   buffer[0] = static_cast<double>(stats.total_heap_size);
   buffer[1] = static_cast<double>(stats.total_heap_size_executable);

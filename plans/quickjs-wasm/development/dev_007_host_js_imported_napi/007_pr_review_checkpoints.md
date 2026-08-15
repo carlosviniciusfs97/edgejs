@@ -2,7 +2,7 @@
 
 | | | Remarks |
 | --- | --- | --- |
-| **Status** | ✅ | Checkpoint A is implemented and verified locally on the Edge.js and N-API `codex/napi-surface-reduction` branches. |
+| **Status** | ✅ | Checkpoints A and B are implemented and verified locally on the Edge.js and N-API `codex/napi-surface-reduction` branches. |
 | **PRs** | [napi#59](https://github.com/wasmerio/napi/pull/59), [edgejs#147](https://github.com/wasmerio/edgejs/pull/147) | Review feedback is handled by ownership boundary, not comment order. |
 | **Invariant** | Provider-neutral Edge logic | `edgejs/lib` remains unchanged; Edge must not select providers with `#ifdef __wasi__`. |
 
@@ -139,6 +139,41 @@ Checkpoint B fixes behavior changed while adopting the reduced protocol:
 - honest WASIX total/free/available memory reporting.
 
 Each fix requires a targeted regression test before the wider suites run.
+
+### Checkpoint B implementation status
+
+| Behavior | Status | Root-cause fix |
+| --- | --- | --- |
+| Heap statistics | ✅ | Providers declare measured fields and consumers normalize unsupported fields once at the N-API boundary. QuickJS reports its current allocator value as the only honest peak lower bound and accounts for binary-object memory consistently. |
+| Profiling start | ✅ | A provider which does not support profiling fails without writing contradictory success outputs. Worker-owned profiler tokens now live exclusively on the worker engine thread. |
+| Error metadata | ✅ | Callers request a side-effect-free thrown-at-only snapshot when source and position metadata are not needed; V8 no longer invokes source-map JavaScript for that query. |
+| Fatal exception policy | ✅ | Sync, async, capture-callback, domain-handler, and domain-handler-failure paths share one abort decision. A domain may handle the original exception, but cannot recapture an exception thrown by its own handler. |
+| HTTP/2 input | ✅ | Parser pause/resume consumption is iterative and preserves reentrant input ownership without recursive tail calls. |
+| Task queue | ✅ | The native checkpoint retains and invokes the original tick callback and receiver directly; reference replacement is transactional and no JavaScript wrapper is compiled at runtime. |
+| Call sites | ✅ | Edge asks the provider for exactly the requested bounded frame count, including the 200-frame limit. |
+| DOMException bootstrap | ✅ | A configurable late-binding accessor survives early bootstrap ordering and replaces itself with the final data property after resolution. |
+| Test flags | ✅ | The Node-test runner parses the complete comment/directive metadata prefix and stops at the first executable statement; it has no fixed line limit. |
+| WASIX memory | ✅ | Total/constrained memory remains the runtime ceiling while free/available memory subtracts committed wasm linear memory. |
+
+### Verification for Checkpoint B
+
+Local evidence captured on 2026-08-14:
+
+- The complete N-API suites pass for V8 (91/91) and QuickJS (88/88).
+- Edge runtime and internal-binding suites pass (15/15 and 5/5), including
+  native tick dispatch, exact 200-frame capture, and late DOMException bootstrap.
+- Focused upstream Node regressions pass for HTTP/2 backpressure and domain
+  abort behavior; metadata-prefix parser regressions also pass.
+- Direct process probes abort synchronous and next-tick exceptions with status
+  134, while an installed uncaught-exception capture callback prevents abort.
+- The engine-free WASIX artifact validates 110 standard N-API imports and 67
+  extension imports, and its build leaves `edgejs/lib` unchanged.
+- A clean worktree of Wasmer SDK revision `a79deeff0b3`, with N-API revision
+  `4462d18`, builds and instantiates the artifact with `--experimental-napi`.
+  Version, exact-call-site-count, and total/free-memory smokes pass.
+- The same Wasmer/N-API combination compiles for `wasm32-unknown-unknown` with
+  the host-JavaScript and WASIX features.
+- `git diff --check` passes in both repositories.
 
 ## Checkpoint C: packaging and scope separation
 
