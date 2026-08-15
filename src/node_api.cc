@@ -294,6 +294,7 @@ napi_status EnterAsyncContextScope(napi_env env, napi_async_context async_contex
   } else {
     GetOrCreateDetachedEnvState(env).callback_scope_depth++;
   }
+  EdgeCallbackTrace(env, "napi.async_scope.enter");
   return napi_ok;
 }
 
@@ -301,6 +302,7 @@ void ExitAsyncContextScope(napi_env env,
                            napi_async_context async_context,
                            bool failed) {
   if (!CheckEnv(env) || async_context == nullptr) return;
+  EdgeCallbackTrace(env, "napi.async_scope.exit.begin", failed ? 1 : 0);
 
   if (auto* environment = GetAttachedEnvironment(env); environment != nullptr) {
     environment->DecrementCallbackScopeDepth();
@@ -321,9 +323,15 @@ void ExitAsyncContextScope(napi_env env,
     callback_scope_depth = state->callback_scope_depth;
   }
   if (failed || callback_scope_depth != 0 || HasPendingException(env)) {
+    EdgeCallbackTrace(env,
+                      "napi.async_scope.exit.end",
+                      failed ? 1 : 0,
+                      callback_scope_depth);
     return;
   }
+  EdgeCallbackTrace(env, "napi.async_scope.checkpoint.begin");
   (void)EdgeRunCallbackScopeCheckpoint(env);
+  EdgeCallbackTrace(env, "napi.async_scope.exit.end", 0, 0);
 }
 
 void DeleteAsyncWork(napi_async_work work) {
@@ -723,6 +731,9 @@ napi_status NAPI_CDECL napi_make_callback(napi_env env,
     return handle_scope.status();
   }
   napi_status call_status;
+  EdgeCallbackTrace(env,
+                    "napi.make_callback.begin",
+                    async_context != nullptr ? 1 : 0);
   if (async_context == nullptr) {
     auto* environment = GetAttachedEnvironment(env);
     edge::CallbackScopeDepthGuard callback_scope(environment);
@@ -752,6 +763,7 @@ napi_status NAPI_CDECL napi_make_callback(napi_env env,
     const bool failed = (call_status != napi_ok) || HasPendingException(env);
     ExitAsyncContextScope(env, async_context, failed);
   }
+  EdgeCallbackTrace(env, "napi.make_callback.end", call_status);
   if (result != nullptr && *result != nullptr) {
     *result = handle_scope.Escape(*result);
     if (*result == nullptr && call_status == napi_ok) {

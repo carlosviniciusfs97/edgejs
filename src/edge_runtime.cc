@@ -1445,7 +1445,10 @@ int HandlePendingExceptionAfterLoopStep(napi_env env, std::string* error_out) {
 // Mirrors Node's InternalCallbackScope by invoking the callback retained by
 // task_queue.setTickCallback() during bootstrap.
 napi_status DrainProcessTickCallback(napi_env env) {
-  return EdgeRunTaskQueueTickCallback(env);
+  EdgeCallbackTrace(env, "tick.drain.begin");
+  const napi_status status = EdgeRunTaskQueueTickCallback(env);
+  EdgeCallbackTrace(env, "tick.drain.end", status, 1);
+  return status;
 }
 
 // The provider checkpoint owns engine microtasks and, for a host-JavaScript
@@ -1465,6 +1468,9 @@ napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
   if (made_edge_progress != nullptr) {
     *made_edge_progress = false;
   }
+  EdgeCallbackTrace(env,
+                    "provider.checkpoint.begin",
+                    has_runnable_work ? 1 : 0);
   uint32_t checkpoint_state = unofficial_napi_event_loop_checkpoint_state_none;
   napi_status status =
       unofficial_napi_event_loop_checkpoint(
@@ -1473,6 +1479,10 @@ napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
           has_runnable_work,
           &checkpoint_state);
   if (status != napi_ok) return status;
+  EdgeCallbackTrace(env,
+                    "provider.checkpoint.end",
+                    status,
+                    checkpoint_state);
   if (has_pending_provider_work != nullptr) {
     *has_pending_provider_work =
         (checkpoint_state &
@@ -3480,11 +3490,11 @@ static napi_status EdgeMakeCallbackWithFlagsImpl(napi_env env,
   if (environment == nullptr) {
     detached_callback_scope_depth++;
   }
+  EdgeCallbackTrace(env, "edge.callback.enter", flags);
   napi_status status = EdgeCallCallbackWithDomain(env, recv, callback, argc, argv, result);
+  EdgeCallbackTrace(env, "edge.callback.called", status);
 
-  auto handle_pending_exception = [&](napi_status current_status,
-                                      bool* handled_out) -> napi_status {
-    if (handled_out != nullptr) *handled_out = false;
+  auto handle_pending_exception = [&](napi_status current_status) -> napi_status {
     bool has_pending = false;
     if (napi_is_exception_pending(env, &has_pending) != napi_ok || !has_pending) {
       return current_status;
@@ -3507,7 +3517,6 @@ static napi_status EdgeMakeCallbackWithFlagsImpl(napi_env env,
       return napi_pending_exception;
     }
 
-    if (handled_out != nullptr) *handled_out = true;
     return current_status == napi_pending_exception ? napi_ok : current_status;
   };
 
@@ -3515,7 +3524,7 @@ static napi_status EdgeMakeCallbackWithFlagsImpl(napi_env env,
   const size_t callback_scope_depth =
       environment != nullptr ? callback_scope.depth()
                              : static_cast<size_t>(detached_callback_scope_depth);
-  status = handle_pending_exception(status, nullptr);
+  status = handle_pending_exception(status);
   if (status == napi_pending_exception) {
     if (environment == nullptr) {
       detached_callback_scope_depth--;
@@ -3531,17 +3540,12 @@ static napi_status EdgeMakeCallbackWithFlagsImpl(napi_env env,
   // Use the same depth for Edge callbacks and the public callback-scope APIs so
   // nested native->JS entries produce exactly one checkpoint at the boundary.
   if (status == napi_ok && callback_scope_depth == 1 && !skip_task_queues) {
-    bool handled_checkpoint_exception = false;
-    do {
-      status = EdgeRunCallbackScopeCheckpoint(env);
-      status = handle_pending_exception(status, &handled_checkpoint_exception);
-      // processTicksAndRejections() stops at a throwing callback. If the
-      // uncaught-exception handler accepts that error, resume from this outer
-      // callback boundary instead of recursively checkpointing inside the
-      // tick runner. The retained tickInfo state decides whether another pass
-      // has work; a no-work pass returns immediately.
-    } while (status == napi_ok && handled_checkpoint_exception);
+    EdgeCallbackTrace(env, "edge.callback.checkpoint.begin");
+    status = EdgeRunCallbackScopeCheckpoint(env);
+    EdgeCallbackTrace(env, "edge.callback.checkpoint.end", status);
+    status = handle_pending_exception(status);
   }
+  EdgeCallbackTrace(env, "edge.callback.exit", status);
   return status;
 }
 
@@ -3631,6 +3635,7 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
     return napi_invalid_arg;
   }
 
+  EdgeCallbackTrace(env, "scope.checkpoint.begin");
   edge::HandleScope scope(env);
   if (!scope.is_open()) {
     return scope.status();
@@ -3661,8 +3666,10 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
         false,
         &checkpoint_state);
     if (status != napi_ok) {
+      EdgeCallbackTrace(env, "scope.microtasks.end", status, checkpoint_state);
       return status;
     }
+    EdgeCallbackTrace(env, "scope.microtasks.end", status, checkpoint_state);
     if (napi_is_exception_pending(env, &has_pending) != napi_ok) {
       return napi_generic_failure;
     }
@@ -3670,6 +3677,7 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
       return napi_pending_exception;
     }
     if (!EdgeGetTaskQueueFlags(env, &has_tick_scheduled, &has_rejection_to_warn)) {
+      EdgeCallbackTrace(env, "scope.checkpoint.end", napi_ok, 0);
       return napi_ok;
     }
     if (!has_tick_scheduled && !has_rejection_to_warn) {
@@ -3677,7 +3685,9 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
     }
   }
 
-  return DrainProcessTickCallback(env);
+  const napi_status status = DrainProcessTickCallback(env);
+  EdgeCallbackTrace(env, "scope.checkpoint.end", status, 1);
+  return status;
 }
 
 bool EdgeHandlePendingExceptionNow(napi_env env, bool* handled_out) {

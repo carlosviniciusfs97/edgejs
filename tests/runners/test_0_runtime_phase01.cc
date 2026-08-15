@@ -470,6 +470,75 @@ TEST_F(Test0RuntimePhase01, TickCallbackAddsNoSyntheticJavascriptFrame) {
       << stack_text;
 }
 
+TEST_F(Test0RuntimePhase01, HandledTickExceptionEndsCurrentCallbackBoundary) {
+  EnvScope s(runtime_.get());
+
+  napi_value binding = EdgeGetOrCreateTaskQueueBinding(s.env);
+  ASSERT_NE(binding, nullptr);
+  napi_value set_tick_callback = nullptr;
+  napi_value tick_info = nullptr;
+  ASSERT_EQ(napi_get_named_property(
+                s.env, binding, "setTickCallback", &set_tick_callback),
+            napi_ok);
+  ASSERT_EQ(napi_get_named_property(s.env, binding, "tickInfo", &tick_info),
+            napi_ok);
+  int32_t* tick_fields = GetInt32TypedArrayData(s.env, tick_info, 2);
+  ASSERT_NE(tick_fields, nullptr);
+  tick_fields[0] = 1;
+
+  napi_value global = nullptr;
+  ASSERT_EQ(napi_get_global(s.env, &global), napi_ok);
+  ASSERT_EQ(napi_set_named_property(
+                s.env, global, "__edge_checkpoint_tick_info", tick_info),
+            napi_ok);
+
+  napi_value source = nullptr;
+  napi_value ignored = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "globalThis.__edge_checkpoint_tick_count = 0;"
+                "globalThis.process = { _fatalException() { return true; } };",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &ignored), napi_ok);
+
+  napi_value tick_callback = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "(function processTicksAndRejections() {"
+                "  const count = ++globalThis.__edge_checkpoint_tick_count;"
+                "  if (count < 3) throw new Error('handled tick failure');"
+                "  globalThis.__edge_checkpoint_tick_info[0] = 0;"
+                "})",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &tick_callback), napi_ok);
+  ASSERT_EQ(napi_call_function(s.env,
+                               binding,
+                               set_tick_callback,
+                               1,
+                               &tick_callback,
+                               &ignored),
+            napi_ok);
+
+  napi_value callback = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env, "(function callback() {})", NAPI_AUTO_LENGTH, &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &callback), napi_ok);
+  ASSERT_EQ(EdgeMakeCallback(
+                s.env, global, callback, 0, nullptr, &ignored),
+            napi_ok);
+
+  // Handling the error completes this native->JS turn. The event loop may
+  // schedule another checkpoint, but the callback boundary must not spin by
+  // immediately re-entering a provider-owned task queue.
+  EXPECT_EQ(GetGlobalUtf8(s.env, "__edge_checkpoint_tick_count"), "1");
+  tick_fields[0] = 0;
+}
+
 TEST_F(Test0RuntimePhase01, NativeImmediateQueueRunsBeforeJsImmediatesAndDrainsNestedTasks) {
   EnvScope s(runtime_.get());
 

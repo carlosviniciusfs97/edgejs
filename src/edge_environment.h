@@ -460,6 +460,11 @@ void EdgeEnvironmentRegisterCleanupStage(napi_env env,
 void EdgeEnvironmentUnregisterCleanupStage(napi_env env,
                                            edge::Environment::CleanupStageCallback callback,
                                            void* arg);
+bool EdgeCallbackTraceEnabled();
+void EdgeCallbackTrace(napi_env env,
+                       const char* event,
+                       int64_t detail_a = -1,
+                       int64_t detail_b = -1);
 
 template <typename T>
 T* EdgeEnvironmentGetSlotData(napi_env env, size_t slot_id) {

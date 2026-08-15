@@ -231,6 +231,7 @@ napi_value EdgeGetOrCreateTaskQueueBinding(napi_env env) {
 }
 
 napi_status EdgeRunTaskQueueTickCallback(napi_env env) {
+  EdgeCallbackTrace(env, "tick.retained.begin");
   if (env == nullptr) {
     return napi_invalid_arg;
   }
@@ -270,6 +271,7 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env) {
   status = napi_call_function(
       env, tick_receiver, tick_callback, 0, nullptr, &ignored);
   callback_scope.Close();
+  EdgeCallbackTrace(env, "tick.retained.end", status);
   return status;
 }
 

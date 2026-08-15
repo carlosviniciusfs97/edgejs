@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <new>
 #include <utility>
@@ -28,6 +30,7 @@ struct DetachedSlotState {
 };
 
 std::unordered_map<napi_env, DetachedSlotState> g_detached_slots;
+std::atomic<uint64_t> g_callback_trace_sequence{0};
 
 void AttachedEnvAssignContextToken(napi_env env, void* token, void* /*data*/) {
   if (auto* environment = edge::Environment::Get(env); environment != nullptr) {
@@ -174,6 +177,37 @@ void StopLoopOnJsError(edge::Environment* env) {
 }
 
 }  // namespace
+
+bool EdgeCallbackTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("EDGE_TRACE_CALLBACKS");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return enabled;
+}
+
+void EdgeCallbackTrace(napi_env env,
+                       const char* event,
+                       int64_t detail_a,
+                       int64_t detail_b) {
+  if (!EdgeCallbackTraceEnabled()) return;
+  const uint64_t sequence =
+      g_callback_trace_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  size_t callback_depth = 0;
+  if (auto* environment = edge::Environment::Get(env); environment != nullptr) {
+    callback_depth = environment->callback_scope_depth();
+  }
+  std::fprintf(stderr,
+               "[edge-callback] seq=%llu event=%s env=%p depth=%zu "
+               "a=%lld b=%lld\n",
+               static_cast<unsigned long long>(sequence),
+               event != nullptr ? event : "unknown",
+               static_cast<void*>(env),
+               callback_depth,
+               static_cast<long long>(detail_a),
+               static_cast<long long>(detail_b));
+  std::fflush(stderr);
+}
 
 namespace edge {
 

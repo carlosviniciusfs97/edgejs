@@ -200,6 +200,23 @@ top-level execution, and tick dispatch all observe the same nesting depth.
 That makes the rule local and testable: closing the outermost successful
 native-to-JS boundary performs at most one task-queue checkpoint.
 
+A handled exception also ends that callback boundary. Acceptance by
+`process._fatalException` says that the process may continue; it is not a
+progress signal and does not authorize Edge to re-enter the provider checkpoint
+in a native retry loop. Any remaining task-queue state is observed by the next
+event-loop turn. `EDGE_TRACE_CALLBACKS=1` traces callback depth, retained-tick
+dispatch, microtask checkpoints, and provider checkpoints when this ownership
+needs to be diagnosed without changing scheduling.
+
+This distinction was verified by replaying the callback-scope changes one at a
+time from the last working package. Callback-depth unification, entry/timer
+guards, retained task-queue state, and public `napi_make_callback` checkpointing
+all preserved progress. Only immediate checkpoint retry after a handled worker
+exception caused Next.js trace collection to monopolize the browser thread.
+With one checkpoint per boundary, the native regression suite and WASIX async
+filesystem stress pass, and a Next.js 16.3 production build completes browser
+trace collection in 9.3 seconds before `next start` serves the result.
+
 ## Checkpoint C: packaging and scope separation
 
 - Keep the intentional package identity `syrusakbary/edgejs` and the `edge`,
