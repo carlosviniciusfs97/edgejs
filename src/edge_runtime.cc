@@ -1442,33 +1442,10 @@ int HandlePendingExceptionAfterLoopStep(napi_env env, std::string* error_out) {
       env, pending.exception, error_out, pending.exception_line, pending.thrown_at);
 }
 
-// Mirrors Node's native tick dispatch by preferring the task_queue callback
-// registered through setTickCallback(), and falling back to process._tickCallback.
+// Mirrors Node's InternalCallbackScope by invoking the callback retained by
+// task_queue.setTickCallback() during bootstrap.
 napi_status DrainProcessTickCallback(napi_env env) {
-  edge::HandleScope scope(env);
-
-  bool called_task_queue_tick = false;
-  const napi_status task_queue_status = EdgeRunTaskQueueTickCallback(env, &called_task_queue_tick);
-  if (task_queue_status != napi_ok) {
-    return task_queue_status;
-  }
-  if (called_task_queue_tick) {
-    return napi_ok;
-  }
-
-  napi_value global = nullptr;
-  napi_value process = nullptr;
-  napi_value tick_cb = nullptr;
-  if (napi_get_global(env, &global) != napi_ok || global == nullptr) return napi_ok;
-  if (napi_get_named_property(env, global, "process", &process) != napi_ok || process == nullptr) return napi_ok;
-  if (napi_get_named_property(env, process, "_tickCallback", &tick_cb) != napi_ok || tick_cb == nullptr) {
-    return napi_ok;
-  }
-  napi_valuetype type = napi_undefined;
-  napi_typeof(env, tick_cb, &type);
-  if (type != napi_function) return napi_ok;
-  napi_value ignored = nullptr;
-  return napi_call_function(env, process, tick_cb, 0, nullptr, &ignored);
+  return EdgeRunTaskQueueTickCallback(env);
 }
 
 // The provider checkpoint owns engine microtasks and, for a host-JavaScript
@@ -3306,6 +3283,10 @@ int RunScriptWithGlobals(napi_env env,
   }
 
   napi_value result = nullptr;
+  // User entry execution is itself the outer native->JS callback boundary.
+  // Keep it open while the entry source runs so a nested napi_make_callback()
+  // cannot drain nextTick or microtasks in the middle of that source.
+  edge::CallbackScopeDepthGuard entry_callback_scope(EdgeEnvironmentGet(env));
   if (selected_main_builtin_id != nullptr && selected_main_builtin_id[0] != '\0') {
     if (EdgeExecuteBuiltin(env, selected_main_builtin_id, &result)) {
       status = napi_ok;
@@ -3331,6 +3312,7 @@ int RunScriptWithGlobals(napi_env env,
     }
     status = napi_run_script(env, script, &result);
   }
+  entry_callback_scope.Close();
   if (status == napi_ok) {
     napi_value wait_target = result;
     if (DebugExceptionsEnabled()) {
@@ -3494,14 +3476,15 @@ static napi_status EdgeMakeCallbackWithFlagsImpl(napi_env env,
                                                  int flags) {
   thread_local int detached_callback_scope_depth = 0;
   edge::Environment* environment = EdgeEnvironmentGet(env);
-  if (environment != nullptr) {
-    environment->IncrementAsyncCallbackScopeDepth();
-  } else {
+  edge::CallbackScopeDepthGuard callback_scope(environment);
+  if (environment == nullptr) {
     detached_callback_scope_depth++;
   }
   napi_status status = EdgeCallCallbackWithDomain(env, recv, callback, argc, argv, result);
 
-  auto handle_pending_exception = [&](napi_status current_status) -> napi_status {
+  auto handle_pending_exception = [&](napi_status current_status,
+                                      bool* handled_out) -> napi_status {
+    if (handled_out != nullptr) *handled_out = false;
     bool has_pending = false;
     if (napi_is_exception_pending(env, &has_pending) != napi_ok || !has_pending) {
       return current_status;
@@ -3524,30 +3507,40 @@ static napi_status EdgeMakeCallbackWithFlagsImpl(napi_env env,
       return napi_pending_exception;
     }
 
+    if (handled_out != nullptr) *handled_out = true;
     return current_status == napi_pending_exception ? napi_ok : current_status;
   };
 
   const bool skip_task_queues = (flags & kEdgeMakeCallbackSkipTaskQueues) != 0;
   const size_t callback_scope_depth =
-      environment != nullptr ? environment->async_callback_scope_depth()
+      environment != nullptr ? callback_scope.depth()
                              : static_cast<size_t>(detached_callback_scope_depth);
-  status = handle_pending_exception(status);
+  status = handle_pending_exception(status, nullptr);
   if (status == napi_pending_exception) {
-    if (environment != nullptr) {
-      environment->DecrementAsyncCallbackScopeDepth();
-    } else {
+    if (environment == nullptr) {
       detached_callback_scope_depth--;
     }
     return status;
-  } else if (status == napi_ok && callback_scope_depth == 1 && !skip_task_queues) {
-    status = EdgeRunCallbackScopeCheckpoint(env);
-    status = handle_pending_exception(status);
   }
 
-  if (environment != nullptr) {
-    environment->DecrementAsyncCallbackScopeDepth();
-  } else {
+  callback_scope.Close();
+  if (environment == nullptr) {
     detached_callback_scope_depth--;
+  }
+  // Node closes the async context before the outer callback-scope checkpoint.
+  // Use the same depth for Edge callbacks and the public callback-scope APIs so
+  // nested native->JS entries produce exactly one checkpoint at the boundary.
+  if (status == napi_ok && callback_scope_depth == 1 && !skip_task_queues) {
+    bool handled_checkpoint_exception = false;
+    do {
+      status = EdgeRunCallbackScopeCheckpoint(env);
+      status = handle_pending_exception(status, &handled_checkpoint_exception);
+      // processTicksAndRejections() stops at a throwing callback. If the
+      // uncaught-exception handler accepts that error, resume from this outer
+      // callback boundary instead of recursively checkpointing inside the
+      // tick runner. The retained tickInfo state decides whether another pass
+      // has work; a no-work pass returns immediately.
+    } while (status == napi_ok && handled_checkpoint_exception);
   }
   return status;
 }

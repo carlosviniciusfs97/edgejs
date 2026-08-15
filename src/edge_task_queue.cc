@@ -17,7 +17,6 @@ struct TaskQueueBindingState {
     DeleteRefIfAny(env, &tick_callback_ref);
     DeleteRefIfAny(env, &tick_receiver_ref);
     DeleteRefIfAny(env, &promise_reject_callback_ref);
-    tick_info_fields = nullptr;
     if (auto* environment = EdgeEnvironmentGet(env); environment != nullptr) {
       environment->tick_info()->fields = nullptr;
       DeleteRefIfAny(env, &environment->tick_info()->ref);
@@ -29,7 +28,6 @@ struct TaskQueueBindingState {
   napi_ref tick_callback_ref = nullptr;
   napi_ref tick_receiver_ref = nullptr;
   napi_ref promise_reject_callback_ref = nullptr;
-  int32_t* tick_info_fields = nullptr;
 };
 
 void DeleteRefIfAny(napi_env env, napi_ref* ref_slot) {
@@ -190,20 +188,23 @@ napi_value EdgeGetOrCreateTaskQueueBinding(napi_env env) {
     return nullptr;
   }
 
+  auto* environment = EdgeEnvironmentGet(env);
+  if (environment == nullptr) return nullptr;
+
   int32_t* fields = nullptr;
   napi_value tick_info = EdgeCreateSharedInt32Array(env, 2, &fields);
   if (tick_info == nullptr || fields == nullptr) return nullptr;
   fields[0] = 0;
   fields[1] = 0;
-  st.tick_info_fields = fields;
-  if (auto* environment = EdgeEnvironmentGet(env); environment != nullptr) {
-    environment->tick_info()->fields = fields;
-  }
+  environment->tick_info()->fields = fields;
 
   if (napi_set_named_property(env, binding, "tickInfo", tick_info) != napi_ok) return nullptr;
-  if (auto* environment = EdgeEnvironmentGet(env); environment != nullptr) {
-    DeleteRefIfAny(env, &environment->tick_info()->ref);
-    napi_create_reference(env, tick_info, 1, &environment->tick_info()->ref);
+  DeleteRefIfAny(env, &environment->tick_info()->ref);
+  if (napi_create_reference(env, tick_info, 1, &environment->tick_info()->ref) !=
+          napi_ok ||
+      environment->tick_info()->ref == nullptr) {
+    environment->tick_info()->fields = nullptr;
+    return nullptr;
   }
 
   napi_value promise_events = nullptr;
@@ -229,10 +230,7 @@ napi_value EdgeGetOrCreateTaskQueueBinding(napi_env env) {
   return binding;
 }
 
-napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
-  if (called != nullptr) {
-    *called = false;
-  }
+napi_status EdgeRunTaskQueueTickCallback(napi_env env) {
   if (env == nullptr) {
     return napi_invalid_arg;
   }
@@ -240,7 +238,7 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
   auto* state = EdgeEnvironmentGetSlotData<TaskQueueBindingState>(
       env, kEdgeEnvironmentSlotTaskQueueBindingState);
   if (state == nullptr || state->tick_callback_ref == nullptr) {
-    return napi_ok;
+    return napi_generic_failure;
   }
   if (state->tick_receiver_ref == nullptr) {
     return napi_generic_failure;
@@ -264,12 +262,14 @@ napi_status EdgeRunTaskQueueTickCallback(napi_env env, bool* called) {
 
   // Both callback and receiver were captured at setup time, so dispatch is
   // independent of mutable user globals and introduces no JavaScript wrapper.
+  // The tick runner is already the task-queue checkpoint; mark its JavaScript
+  // execution as nested so napi_make_callback() cannot recursively checkpoint
+  // the queue while processTicksAndRejections is still draining it.
+  edge::CallbackScopeDepthGuard callback_scope(EdgeEnvironmentGet(env));
   napi_value ignored = nullptr;
   status = napi_call_function(
       env, tick_receiver, tick_callback, 0, nullptr, &ignored);
-  if (status == napi_ok && called != nullptr) {
-    *called = true;
-  }
+  callback_scope.Close();
   return status;
 }
 
@@ -284,16 +284,11 @@ bool EdgeGetTaskQueueFlags(napi_env env, bool* has_tick_scheduled, bool* has_rej
     return false;
   }
 
-  int32_t* tick_info_fields = nullptr;
-  if (auto* environment = EdgeEnvironmentGet(env); environment != nullptr) {
-    tick_info_fields = environment->tick_info()->fields;
-  }
-  auto* state = EdgeEnvironmentGetSlotData<TaskQueueBindingState>(
-      env, kEdgeEnvironmentSlotTaskQueueBindingState);
-  if (tick_info_fields == nullptr && (state == nullptr || state->tick_info_fields == nullptr)) {
+  auto* environment = EdgeEnvironmentGet(env);
+  if (environment == nullptr || environment->tick_info()->fields == nullptr) {
     return false;
   }
-  if (tick_info_fields == nullptr) tick_info_fields = state->tick_info_fields;
+  int32_t* tick_info_fields = environment->tick_info()->fields;
 
   if (has_tick_scheduled != nullptr) {
     *has_tick_scheduled = tick_info_fields[0] != 0;

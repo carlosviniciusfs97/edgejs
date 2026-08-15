@@ -16,7 +16,11 @@
 #include "edge_cli.h"
 #include "edge_version.h"
 
-class Test1CliPhase01 : public FixtureTestBase {};
+// These tests exercise EdgeRunCli, which owns runtime configuration itself.
+// Preconfiguring the process-wide provider through FixtureTestBase makes that
+// ownership ambiguous and causes the CLI's supported engine flags to look like
+// an incompatible second configuration.
+class Test1CliPhase01 : public ::testing::Test {};
 
 namespace {
 

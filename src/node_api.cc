@@ -724,8 +724,25 @@ napi_status NAPI_CDECL napi_make_callback(napi_env env,
   }
   napi_status call_status;
   if (async_context == nullptr) {
+    auto* environment = GetAttachedEnvironment(env);
+    edge::CallbackScopeDepthGuard callback_scope(environment);
+    if (environment == nullptr) {
+      GetOrCreateDetachedEnvState(env).callback_scope_depth++;
+    }
     call_status = EdgeCallCallbackWithDomain(
         env, recv, func, argc, const_cast<napi_value*>(argv), result);
+    size_t remaining_depth = 0;
+    if (environment != nullptr) {
+      callback_scope.Close();
+      remaining_depth = environment->callback_scope_depth();
+    } else if (auto* state = GetDetachedEnvState(env); state != nullptr) {
+      if (state->callback_scope_depth > 0) state->callback_scope_depth--;
+      remaining_depth = state->callback_scope_depth;
+    }
+    if (call_status == napi_ok && remaining_depth == 0 &&
+        !HasPendingException(env)) {
+      call_status = EdgeRunCallbackScopeCheckpoint(env);
+    }
   } else {
     const napi_status scope_status = EnterAsyncContextScope(env, async_context);
     if (scope_status != napi_ok) return scope_status;

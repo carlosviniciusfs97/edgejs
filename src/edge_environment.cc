@@ -1216,21 +1216,6 @@ void Environment::DecrementOpenCallbackScopes() {
   if (open_callback_scopes_ > 0) open_callback_scopes_ -= 1;
 }
 
-size_t Environment::async_callback_scope_depth() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return async_callback_scope_depth_;
-}
-
-void Environment::IncrementAsyncCallbackScopeDepth() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  async_callback_scope_depth_ += 1;
-}
-
-void Environment::DecrementAsyncCallbackScopeDepth() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (async_callback_scope_depth_ > 0) async_callback_scope_depth_ -= 1;
-}
-
 std::vector<napi_async_cleanup_hook_handle> Environment::async_cleanup_hooks() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return async_cleanup_hooks_;
@@ -1407,7 +1392,9 @@ void Environment::OnTimer(uv_timer_t* handle) {
   if (env == nullptr || !env->can_call_into_js()) return;
 
   const double now_ms = env->GetNowMs();
+  CallbackScopeDepthGuard callback_scope(env);
   const double next_expiry = EdgeTimersHostCallTimersCallback(env->env(), now_ms);
+  callback_scope.Close();
   // processTimers() expresses the next deadline against libuv's clock at the
   // start of the callback. Re-read that clock after user callbacks complete so
   // their duration is not added to a repeating timer's interval.
@@ -1443,12 +1430,14 @@ void Environment::OnImmediateCheck(uv_check_t* handle) {
     // processImmediate() preserves the unprocessed tail in outstandingQueue
     // when a callback throws. Match Node's check-phase loop by re-entering the
     // callback after uncaught/domain handling until that tail is consumed.
+    CallbackScopeDepthGuard callback_scope(env);
     do {
       if (!EdgeTimersHostCallImmediateCallback(env->env())) {
         StopLoopOnJsError(env);
         return;
       }
     } while (env->immediate_has_outstanding() && env->can_call_into_js());
+    callback_scope.Close();
 
     // This is the callback-scope checkpoint for the complete native check
     // callback, not for each re-entry above. It must run after a handled throw

@@ -149,7 +149,7 @@ Each fix requires a targeted regression test before the wider suites run.
 | Error metadata | ✅ | Callers request a side-effect-free thrown-at-only snapshot when source and position metadata are not needed; V8 no longer invokes source-map JavaScript for that query. |
 | Fatal exception policy | ✅ | Sync, async, capture-callback, domain-handler, and domain-handler-failure paths share one abort decision. A domain may handle the original exception, but cannot recapture an exception thrown by its own handler. |
 | HTTP/2 input | ✅ | Parser pause/resume consumption is iterative and preserves reentrant input ownership without recursive tail calls. |
-| Task queue | ✅ | The native checkpoint retains and invokes the original tick callback and receiver directly; reference replacement is transactional and no JavaScript wrapper is compiled at runtime. |
+| Task queue | ✅ | Edge retains and invokes the original tick callback and receiver directly. All native-to-JS entries share one callback-scope nesting counter, so only the outer boundary checkpoints. The provider no longer rewrites formatted stacks, and no JavaScript wrapper is compiled at runtime. |
 | Call sites | ✅ | Edge asks the provider for exactly the requested bounded frame count, including the 200-frame limit. |
 | DOMException bootstrap | ✅ | A configurable late-binding accessor survives early bootstrap ordering and replaces itself with the final data property after resolution. |
 | Test flags | ✅ | The Node-test runner parses the complete comment/directive metadata prefix and stops at the first executable statement; it has no fixed line limit. |
@@ -157,9 +157,9 @@ Each fix requires a targeted regression test before the wider suites run.
 
 ### Verification for Checkpoint B
 
-Local evidence captured on 2026-08-14:
+Local evidence captured on 2026-08-14 and 2026-08-15:
 
-- The complete N-API suites pass for V8 (91/91) and QuickJS (88/88).
+- The complete N-API suites pass for V8 (92/92) and QuickJS (88/88).
 - Edge runtime and internal-binding suites pass (15/15 and 5/5), including
   native tick dispatch, exact 200-frame capture, and late DOMException bootstrap.
 - Focused upstream Node regressions pass for HTTP/2 backpressure and domain
@@ -173,7 +173,32 @@ Local evidence captured on 2026-08-14:
   Version, exact-call-site-count, and total/free-memory smokes pass.
 - The same Wasmer/N-API combination compiles for `wasm32-unknown-unknown` with
   the host-JavaScript and WASIX features.
+- The full native Edge suites pass for V8 (1749/1749) and QuickJS
+  (1741/1741). The complete WASIX V8 lane passes 1673 tests; its three
+  load-sensitive failures each pass in isolation.
+- The unmodified wasmer-sh browser smoke passes DNS, curl, nested `node`,
+  `execSync`, symlink shebangs, V8 heap statistics, fork IPC, and a real pnpm
+  install. The pnpm worker exposed a provider-lifecycle defect: runtime flags
+  were process-global by contract but thread-local in the host-JS provider.
+  Synchronizing that configuration across guest pthreads allows worker N-API
+  environments to be created without any pnpm-specific workaround.
 - `git diff --check` passes in both repositories.
+
+### Task-queue ownership model
+
+The task queue is deliberately split across two owners:
+
+1. Edge owns Node semantics: callback-scope nesting, `tickInfo`, the retained
+   `processTicksAndRejections` callback, and the decision to drain it.
+2. The N-API provider owns engine and host progress through the single
+   `unofficial_napi_event_loop_checkpoint` operation.
+
+There is no provider tick operation, provider-kind branch, dynamic lookup of
+`process._tickCallback`, runtime-compiled trampoline, or provider-side stack
+filter. `napi_make_callback`, explicit callback scopes, Edge event callbacks,
+top-level execution, and tick dispatch all observe the same nesting depth.
+That makes the rule local and testable: closing the outermost successful
+native-to-JS boundary performs at most one task-queue checkpoint.
 
 ## Checkpoint C: packaging and scope separation
 

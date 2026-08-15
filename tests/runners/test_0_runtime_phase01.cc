@@ -419,9 +419,7 @@ TEST_F(Test0RuntimePhase01, TickCallbackDoesNotDependOnMutableDispatchGlobals) {
             napi_ok);
   ASSERT_EQ(napi_run_script(s.env, source, &ignored), napi_ok);
 
-  bool called = false;
-  EXPECT_EQ(EdgeRunTaskQueueTickCallback(s.env, &called), napi_ok);
-  EXPECT_TRUE(called);
+  EXPECT_EQ(EdgeRunTaskQueueTickCallback(s.env), napi_ok);
   napi_value global = nullptr;
   napi_value receiver_ok = nullptr;
   bool receiver_matches = false;
@@ -458,9 +456,7 @@ TEST_F(Test0RuntimePhase01, TickCallbackAddsNoSyntheticJavascriptFrame) {
                 s.env, binding, set_tick_callback, 1, &callback, &ignored),
             napi_ok);
 
-  bool called = false;
-  EXPECT_EQ(EdgeRunTaskQueueTickCallback(s.env, &called), napi_pending_exception);
-  EXPECT_FALSE(called);
+  EXPECT_EQ(EdgeRunTaskQueueTickCallback(s.env), napi_pending_exception);
   napi_value exception = nullptr;
   ASSERT_EQ(napi_get_and_clear_last_exception(s.env, &exception), napi_ok);
   napi_value stack = nullptr;
