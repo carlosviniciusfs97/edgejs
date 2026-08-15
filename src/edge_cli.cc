@@ -233,8 +233,17 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
   const std::string engine_flags = BuildSupportedV8Flags(
       options.raw_exec_argv != nullptr ? *options.raw_exec_argv
                                        : std::vector<std::string>{});
-  create_options.engine_flags = engine_flags.data();
-  create_options.engine_flags_length = engine_flags.size();
+  unofficial_napi_runtime_options runtime_options{};
+  runtime_options.size = sizeof(runtime_options);
+  runtime_options.version = UNOFFICIAL_NAPI_RUNTIME_OPTIONS_VERSION;
+  runtime_options.engine_flags = engine_flags.data();
+  runtime_options.engine_flags_length = engine_flags.size();
+  if (unofficial_napi_configure_runtime(&runtime_options) != napi_ok) {
+    if (error_out != nullptr) {
+      *error_out = "Failed to configure JavaScript runtime";
+    }
+    return 1;
+  }
 
   napi_env env = nullptr;
   unofficial_napi_env_owner env_owner = nullptr;
@@ -273,6 +282,7 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
   }
   EdgeEnvironmentRunCleanup(env);
   EdgeEnvironmentRunAtExitCallbacks(env);
+  EdgeEnvironmentDetach(env);
   edge_builtin_bytecode::FlushIfDirty();
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.cleanup");
   const napi_status release_status = unofficial_napi_release_env(env_owner, nullptr);

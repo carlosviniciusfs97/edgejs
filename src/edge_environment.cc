@@ -29,17 +29,6 @@ struct DetachedSlotState {
 
 std::unordered_map<napi_env, DetachedSlotState> g_detached_slots;
 
-void AttachedEnvCleanup(napi_env env, void* /*data*/) {
-  if (auto* environment = edge::Environment::Get(env); environment != nullptr) {
-    environment->RunCleanup();
-    environment->RunAtExitCallbacks();
-  }
-}
-
-void AttachedEnvDestroy(napi_env env, void* /*data*/) {
-  edge::Environment::Detach(env);
-}
-
 void AttachedEnvAssignContextToken(napi_env env, void* token, void* /*data*/) {
   if (auto* environment = edge::Environment::Get(env); environment != nullptr) {
     environment->AssignToContext(token);
@@ -56,14 +45,18 @@ bool RegisterAttachedEnvHooks(napi_env env) {
   unofficial_napi_env_hooks hooks{};
   hooks.size = sizeof(hooks);
   hooks.version = UNOFFICIAL_NAPI_ENV_HOOKS_VERSION;
-  hooks.cleanup_callback = AttachedEnvCleanup;
-  hooks.destroy_callback = AttachedEnvDestroy;
   hooks.context_token_assign_callback = AttachedEnvAssignContextToken;
   hooks.context_token_unassign_callback = AttachedEnvUnassignContextToken;
   hooks.fatal_error_callback = EdgeFatalErrorReportCallback;
   hooks.oom_error_callback = EdgeOomErrorReportCallback;
   if (EdgeRuntimePlatformPrepareEnvHooks(env, &hooks) != napi_ok) return false;
-  if (unofficial_napi_attach_env(env, &hooks) == napi_ok) return true;
+  uint64_t accepted_hooks = 0;
+  if (unofficial_napi_attach_env(env, &hooks, &accepted_hooks) == napi_ok) {
+    // Edge owns cleanup and detachment. This transaction contains only events
+    // which originate inside the provider; unsupported optional events remain
+    // absent from the accepted capability mask.
+    return true;
+  }
   EdgeRunRuntimePlatformEnvCleanup(env);
   return false;
 }

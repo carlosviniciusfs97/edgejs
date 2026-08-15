@@ -3609,7 +3609,12 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
   // task-queue work appeared as a result. Before task_queue is initialized,
   // fall back to running the microtask checkpoint only.
   if (!have_task_queue_flags || !has_tick_scheduled) {
-    napi_status status = unofficial_napi_process_microtasks(env);
+    uint32_t checkpoint_state = unofficial_napi_event_loop_checkpoint_state_none;
+    napi_status status = unofficial_napi_event_loop_checkpoint(
+        env,
+        unofficial_napi_event_loop_checkpoint_microtasks,
+        false,
+        &checkpoint_state);
     if (status != napi_ok) {
       return status;
     }

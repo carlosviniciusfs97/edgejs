@@ -1308,6 +1308,7 @@ cleanup_worker_env:
   }
   shutdown_loop = EdgeWorkerEnvReleaseEventLoop(worker_env);
   if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
+  EdgeWorkerEnvForget(worker_env);
   (void)unofficial_napi_release_env(worker_owner, shutdown_loop);
   wrap->cpu_profiles.clear();
   wrap->heap_profile = nullptr;
