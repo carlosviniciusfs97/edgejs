@@ -1,4 +1,3 @@
-#include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <cstdlib>
@@ -23,11 +22,6 @@ namespace {
 
 constexpr unsigned kMaxSignal = 32;
 constexpr int kStdioCount = 1 + STDERR_FILENO;
-
-using SignalHandler =
-    void (*)(int signal, siginfo_t* info, void* ucontext);
-std::atomic<SignalHandler> g_signal_handlers[kMaxSignal];
-std::atomic<bool> g_reset_signal_handlers[kMaxSignal];
 
 struct StdioSnapshot {
   int flags = 0;
@@ -81,49 +75,18 @@ void ResetStdioImpl() {
   }
 }
 
-void DispatchSignal(int signal) {
-  if (signal <= 0 || static_cast<unsigned>(signal) >= kMaxSignal) return;
-  const bool reset =
-      g_reset_signal_handlers[signal].load(std::memory_order_relaxed);
-  SignalHandler handler = reset
-                              ? g_signal_handlers[signal].exchange(
-                                    nullptr, std::memory_order_relaxed)
-                              : g_signal_handlers[signal].load(
-                                    std::memory_order_relaxed);
-  if (reset) {
-    struct sigaction sa;
-    std::memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = SIG_DFL;
-    sigemptyset(&sa.sa_mask);
-    (void)sigaction(signal, &sa, nullptr);
-  }
-  if (handler != nullptr) handler(signal, nullptr, nullptr);
-}
-
 }  // namespace
 
 __attribute__((visibility("default"))) void RegisterSignalHandler(
     int signal,
-    SignalHandler handler,
+    void (*handler)(int signal, siginfo_t* info, void* ucontext),
     bool reset_handler) {
-  if (handler == nullptr || signal <= 0 ||
-      static_cast<unsigned>(signal) >= kMaxSignal) {
-    return;
-  }
-
-  g_signal_handlers[signal].store(handler, std::memory_order_relaxed);
-  g_reset_signal_handlers[signal].store(reset_handler,
-                                        std::memory_order_relaxed);
+  if (handler == nullptr) return;
 
   struct sigaction sa;
   std::memset(&sa, 0, sizeof(sa));
-  // The registered Node callback shape includes siginfo and ucontext, but the
-  // callbacks Edge installs do not consume either value. Register a correctly
-  // typed POSIX handler and forward explicitly instead of depending on an ABI
-  // to tolerate a mismatched indirect function call. The trampoline also owns
-  // one-shot reset behavior so it does not depend on SA_RESETHAND support.
-  sa.sa_handler = DispatchSignal;
-  sa.sa_flags = 0;
+  sa.sa_sigaction = handler;
+  sa.sa_flags = SA_SIGINFO | (reset_handler ? SA_RESETHAND : 0);
   sigfillset(&sa.sa_mask);
   (void)sigaction(signal, &sa, nullptr);
 }

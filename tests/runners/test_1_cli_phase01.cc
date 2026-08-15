@@ -16,6 +16,15 @@
 #include "edge_cli.h"
 #include "edge_version.h"
 
+#if !defined(_WIN32)
+namespace node {
+void RegisterSignalHandler(
+    int signal,
+    void (*handler)(int signal, siginfo_t* info, void* ucontext),
+    bool reset_handler);
+}  // namespace node
+#endif
+
 // These tests exercise EdgeRunCli, which owns runtime configuration itself.
 // Preconfiguring the process-wide provider through FixtureTestBase makes that
 // ownership ambiguous and causes the CLI's supported engine flags to look like
@@ -23,6 +32,12 @@
 class Test1CliPhase01 : public ::testing::Test {};
 
 namespace {
+
+#if !defined(_WIN32)
+void TestSiginfoHandler(int /*signal*/,
+                        siginfo_t* /*info*/,
+                        void* /*ucontext*/) {}
+#endif
 
 std::string WriteTempScript(const std::string& stem, const std::string& contents) {
   const auto temp_dir = std::filesystem::temp_directory_path();
@@ -2014,6 +2029,24 @@ TEST_F(Test1CliPhase01, SignalWrapCloseMatchesHandleWrapCallbackSemantics) {
     EXPECT_NE(result.stderr_output.find("internal/test/binding"), std::string::npos) << result.stderr_output;
   }
   EXPECT_NE(result.stdout_output.find("signal-wrap-close:ok"), std::string::npos) << result.stdout_output;
+#endif
+}
+
+TEST_F(Test1CliPhase01, RegisterSignalHandlerUsesPosixSiginfoContract) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "sigaction contract check is POSIX-only";
+#else
+  struct sigaction previous;
+  ASSERT_EQ(sigaction(SIGUSR1, nullptr, &previous), 0);
+
+  node::RegisterSignalHandler(SIGUSR1, TestSiginfoHandler, true);
+
+  struct sigaction installed;
+  ASSERT_EQ(sigaction(SIGUSR1, nullptr, &installed), 0);
+  EXPECT_NE(installed.sa_flags & SA_SIGINFO, 0);
+  EXPECT_EQ(installed.sa_sigaction, TestSiginfoHandler);
+
+  ASSERT_EQ(sigaction(SIGUSR1, &previous, nullptr), 0);
 #endif
 }
 
