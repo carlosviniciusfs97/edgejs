@@ -32,7 +32,6 @@ namespace {
 
 constexpr uint8_t kGzipHeaderId1 = 0x1f;
 constexpr uint8_t kGzipHeaderId2 = 0x8b;
-uint8_t g_empty_buffer = 0;
 constexpr size_t kTrackedAllocationHeader =
     std::max(sizeof(size_t), alignof(std::max_align_t));
 constexpr int kZDefaultMemLevel = 8;
@@ -73,12 +72,6 @@ struct CompressionError {
   std::string message;
   std::string code;
   int err = 0;
-};
-
-struct ByteSpan {
-  uint8_t* data = nullptr;
-  size_t len = 0;
-  unofficial_napi_buffer_lease lease = nullptr;
 };
 
 class CompressionContextBase {
@@ -823,25 +816,8 @@ struct CompressionHandle {
   napi_ref wrapper_ref = nullptr;
   napi_ref process_callback_ref = nullptr;
   napi_ref write_result_ref = nullptr;
-  void* input_access_data = nullptr;
-  void* output_access_data = nullptr;
-  unofficial_napi_buffer_lease input_access_lease = nullptr;
-  unofficial_napi_buffer_lease output_access_lease = nullptr;
-  bool input_access_active = false;
-  bool output_access_active = false;
-  // processChunkSync() continues immediately with the same input whenever the
-  // output buffer fills. Keep that read-only snapshot until the continuation
-  // supplies the exact next offset and remaining length. The lease itself owns
-  // the original JavaScript value, so the in-progress write state—not a second
-  // napi_ref—is the authority for the continuation. Any range mismatch,
-  // asynchronous write, error, or close releases it.
-  void* sync_input_access_data = nullptr;
-  unofficial_napi_buffer_lease sync_input_lease = nullptr;
-  napi_ref sync_input_source_ref = nullptr;
-  uint32_t sync_input_base_offset = 0;
-  uint32_t sync_input_total_length = 0;
-  uint32_t sync_input_next_offset = 0;
-  uint32_t sync_input_remaining = 0;
+  EdgeBufferLease input_access;
+  EdgeBufferLease output_access;
   napi_async_work async_work = nullptr;
   std::unique_ptr<CompressionContextBase> context;
   HandleKind kind = HandleKind::kZlib;
@@ -855,29 +831,6 @@ struct CompressionHandle {
   bool pending_close = false;
   bool closed = false;
 };
-
-size_t TypedArrayElementSize(napi_typedarray_type type) {
-  switch (type) {
-    case napi_int8_array:
-    case napi_uint8_array:
-    case napi_uint8_clamped_array:
-      return 1;
-    case napi_int16_array:
-    case napi_uint16_array:
-    case napi_float16_array:
-      return 2;
-    case napi_int32_array:
-    case napi_uint32_array:
-    case napi_float32_array:
-      return 4;
-    case napi_float64_array:
-    case napi_bigint64_array:
-    case napi_biguint64_array:
-      return 8;
-    default:
-      return 1;
-  }
-}
 
 bool IsNullOrUndefined(napi_env env, napi_value value) {
   if (value == nullptr) return true;
@@ -905,107 +858,10 @@ napi_value GetRefValue(napi_env env, napi_ref ref) {
   return value;
 }
 
-napi_status ReleaseBufferAccess(napi_env env,
-                                unofficial_napi_buffer_lease lease,
-                                bool modified) {
-  if (lease == nullptr) return napi_invalid_arg;
-  return unofficial_napi_release_buffer_lease(env, lease, modified);
-}
-
-void ClearSyncInputSnapshot(CompressionHandle* handle) {
-  if (handle == nullptr) return;
-  if (handle->sync_input_lease != nullptr) {
-    (void)ReleaseBufferAccess(handle->env, handle->sync_input_lease, false);
-  }
-  handle->sync_input_access_data = nullptr;
-  handle->sync_input_lease = nullptr;
-  DeleteRefIfPresent(handle->env, &handle->sync_input_source_ref);
-  handle->sync_input_base_offset = 0;
-  handle->sync_input_total_length = 0;
-  handle->sync_input_next_offset = 0;
-  handle->sync_input_remaining = 0;
-}
-
-bool ReuseSyncInputSnapshot(CompressionHandle* handle,
-                            napi_value input_value,
-                            uint32_t input_offset,
-                            uint32_t input_length,
-                            ByteSpan* span) {
-  if (handle == nullptr || span == nullptr ||
-      handle->sync_input_access_data == nullptr ||
-      handle->sync_input_lease == nullptr ||
-      handle->sync_input_source_ref == nullptr ||
-      input_offset != handle->sync_input_next_offset ||
-      input_length != handle->sync_input_remaining) {
-    return false;
-  }
-  napi_value retained_input = GetRefValue(handle->env, handle->sync_input_source_ref);
-  bool same_input = false;
-  if (retained_input == nullptr ||
-      napi_strict_equals(handle->env, retained_input, input_value, &same_input) != napi_ok ||
-      !same_input) {
-    return false;
-  }
-  const uint32_t relative_offset = input_offset - handle->sync_input_base_offset;
-  if (relative_offset > handle->sync_input_total_length ||
-      input_length > handle->sync_input_total_length - relative_offset) {
-    return false;
-  }
-  span->data = static_cast<uint8_t*>(handle->sync_input_access_data) + relative_offset;
-  span->len = input_length;
-  span->lease = handle->sync_input_lease;
-  return true;
-}
-
-bool RetainSyncInputSnapshot(CompressionHandle* handle,
-                             napi_value input_value,
-                             const ByteSpan& access,
-                             uint32_t input_offset,
-                             uint32_t input_length,
-                             uint32_t remaining) {
-  if (handle == nullptr || input_value == nullptr || access.data == nullptr ||
-      access.lease == nullptr ||
-      remaining == 0 || remaining > input_length) {
-    return false;
-  }
-  napi_ref source_ref = nullptr;
-  if (napi_create_reference(handle->env, input_value, 1, &source_ref) != napi_ok ||
-      source_ref == nullptr) {
-    return false;
-  }
-  handle->sync_input_access_data = access.data;
-  handle->sync_input_lease = access.lease;
-  handle->sync_input_source_ref = source_ref;
-  handle->sync_input_base_offset = input_offset;
-  handle->sync_input_total_length = input_length;
-  handle->sync_input_next_offset = input_offset + (input_length - remaining);
-  handle->sync_input_remaining = remaining;
-  return true;
-}
-
-void AdvanceSyncInputSnapshot(CompressionHandle* handle,
-                              uint32_t input_length,
-                              uint32_t remaining) {
-  if (handle == nullptr || remaining > input_length) return;
-  handle->sync_input_next_offset += input_length - remaining;
-  handle->sync_input_remaining = remaining;
-}
-
 void EndWriteBufferAccess(CompressionHandle* handle, bool output_modified) {
   if (handle == nullptr || handle->env == nullptr) return;
-  if (handle->input_access_active) {
-    (void)ReleaseBufferAccess(handle->env, handle->input_access_lease, false);
-    handle->input_access_data = nullptr;
-    handle->input_access_lease = nullptr;
-    handle->input_access_active = false;
-  }
-  if (handle->output_access_active) {
-    (void)ReleaseBufferAccess(
-        handle->env, handle->output_access_lease, output_modified);
-    handle->output_access_data = nullptr;
-    handle->output_access_lease = nullptr;
-    handle->output_access_active = false;
-  }
+  (void)handle->input_access.Release(false);
+  (void)handle->output_access.Release(output_modified);
 }
 
 void ClearPendingException(napi_env env) {
@@ -1035,92 +891,25 @@ bool CoerceToInt32(napi_env env, napi_value value, int32_t* out) {
          napi_get_value_int32(env, number, out) == napi_ok;
 }
 
-bool ExtractByteSpan(napi_env env, napi_value value, ByteSpan* out) {
-  if (out == nullptr) return false;
-  out->data = nullptr;
-  out->len = 0;
-  if (env == nullptr || value == nullptr) return false;
-
-  size_t byte_length = 0;
-  if (!EdgeGetBinaryByteLength(env, value, &byte_length)) return false;
-  void* data = nullptr;
-  if (unofficial_napi_acquire_buffer_lease(env,
-                                           value,
-                                           0,
-                                           byte_length,
-                                           unofficial_napi_buffer_access_read,
-                                           &out->lease,
-                                           &data) != napi_ok) {
-    return false;
-  }
-  out->data = data != nullptr ? static_cast<uint8_t*>(data) : &g_empty_buffer;
-  out->len = byte_length;
-  return true;
-}
-
-bool ByteLengthOfBinaryValue(napi_env env, napi_value value, size_t* length_out) {
-  if (length_out == nullptr) return false;
-  *length_out = 0;
-  if (env == nullptr || value == nullptr) return false;
-
-  bool is_buffer = false;
-  if (napi_is_buffer(env, value, &is_buffer) == napi_ok && is_buffer) {
-    return napi_get_buffer_info(env, value, nullptr, length_out) == napi_ok;
-  }
-  bool is_typedarray = false;
-  if (napi_is_typedarray(env, value, &is_typedarray) == napi_ok && is_typedarray) {
-    napi_typedarray_type type = napi_uint8_array;
-    size_t length = 0;
-    if (napi_get_typedarray_info(
-            env, value, &type, &length, nullptr, nullptr, nullptr) != napi_ok) {
-      return false;
-    }
-    *length_out = length * TypedArrayElementSize(type);
-    return true;
-  }
-  bool is_dataview = false;
-  if (napi_is_dataview(env, value, &is_dataview) == napi_ok && is_dataview) {
-    return napi_get_dataview_info(env, value, length_out, nullptr, nullptr, nullptr) == napi_ok;
-  }
-  bool is_arraybuffer = false;
-  if (napi_is_arraybuffer(env, value, &is_arraybuffer) == napi_ok && is_arraybuffer) {
-    return napi_get_arraybuffer_info(env, value, nullptr, length_out) == napi_ok;
-  }
-  return false;
-}
-
-bool AcquireBufferAccess(napi_env env,
-                         napi_value value,
-                         size_t byte_offset,
-                         size_t byte_length,
-                         unofficial_napi_buffer_access_mode mode,
-                         ByteSpan* out) {
-  if (out == nullptr) return false;
-  out->data = nullptr;
-  out->len = 0;
-  void* data = nullptr;
-  unofficial_napi_buffer_lease lease = nullptr;
-  if (unofficial_napi_acquire_buffer_lease(
-          env, value, byte_offset, byte_length, mode, &lease, &data) != napi_ok) {
-    return false;
-  }
-  out->data = data != nullptr ? static_cast<uint8_t*>(data) : &g_empty_buffer;
-  out->len = byte_length;
-  out->lease = lease;
-  return true;
-}
-
 bool ExtractBinarySequence(napi_env env,
                            napi_value value,
-                           ByteSpan* span,
+                           EdgeBufferLease* lease,
+                           const uint8_t** data,
+                           size_t* length,
                            std::string* temp_utf8) {
-  if (span == nullptr || temp_utf8 == nullptr) return false;
-  span->data = nullptr;
-  span->len = 0;
-  span->lease = nullptr;
+  if (lease == nullptr || data == nullptr || length == nullptr ||
+      temp_utf8 == nullptr) {
+    return false;
+  }
+  *data = nullptr;
+  *length = 0;
   temp_utf8->clear();
 
-  if (ExtractByteSpan(env, value, span)) return true;
+  if (lease->Acquire(env, value, unofficial_napi_buffer_access_read)) {
+    *data = lease->data();
+    *length = lease->size();
+    return true;
+  }
 
   napi_valuetype type = napi_undefined;
   if (napi_typeof(env, value, &type) == napi_ok && type == napi_string) {
@@ -1134,16 +923,19 @@ bool ExtractBinarySequence(napi_env env,
       return false;
     }
     temp_utf8->resize(written);
-    span->data = reinterpret_cast<uint8_t*>(temp_utf8->data());
-    span->len = temp_utf8->size();
+    *data = reinterpret_cast<const uint8_t*>(temp_utf8->data());
+    *length = temp_utf8->size();
     return true;
   }
 
   return false;
 }
 
-bool AcquireUint32Array(napi_env env, napi_value value, ByteSpan* data, size_t* len) {
-  if (data == nullptr || len == nullptr) return false;
+bool AcquireUint32Array(napi_env env,
+                        napi_value value,
+                        EdgeBufferLease* lease,
+                        size_t* len) {
+  if (lease == nullptr || len == nullptr) return false;
   *len = 0;
   bool is_typedarray = false;
   if (napi_is_typedarray(env, value, &is_typedarray) != napi_ok || !is_typedarray) return false;
@@ -1155,12 +947,11 @@ bool AcquireUint32Array(napi_env env, napi_value value, ByteSpan* data, size_t* 
     return false;
   }
   *len = array_len;
-  return AcquireBufferAccess(env,
-                             value,
-                             0,
-                             array_len * sizeof(uint32_t),
-                             unofficial_napi_buffer_access_read,
-                             data);
+  return lease->Acquire(env,
+                        value,
+                        0,
+                        array_len * sizeof(uint32_t),
+                        unofficial_napi_buffer_access_read);
 }
 
 bool StoreWriteResultRef(CompressionHandle* handle, napi_value value) {
@@ -1303,7 +1094,6 @@ void CloseHandle(CompressionHandle* handle) {
   if (handle->context != nullptr) {
     handle->context->Close();
   }
-  ClearSyncInputSnapshot(handle);
   EndWriteBufferAccess(handle, false);
   DeleteRefIfPresent(handle->env, &handle->write_result_ref);
   ReportExternalMemory(handle);
@@ -1599,11 +1389,13 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
 
       std::vector<unsigned char> dictionary;
       if (argc >= 7 && !IsNullOrUndefined(env, argv[6])) {
-        ByteSpan span;
-        if (ExtractByteSpan(env, argv[6], &span) && span.data != nullptr && span.len > 0) {
-          dictionary.assign(span.data, span.data + span.len);
+        EdgeBufferLease dictionary_access;
+        if (dictionary_access.Acquire(
+                env, argv[6], unofficial_napi_buffer_access_read) &&
+            dictionary_access.size() > 0) {
+          dictionary.assign(dictionary_access.data(),
+                            dictionary_access.data() + dictionary_access.size());
         }
-        if (span.lease != nullptr) (void)ReleaseBufferAccess(env, span.lease, false);
       }
 
       auto* zlib_context = dynamic_cast<ZlibContext*>(handle->context.get());
@@ -1623,20 +1415,19 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
     case HandleKind::kBrotliEncoder:
     case HandleKind::kBrotliDecoder: {
       if (argc < 3) return Undefined(env);
-      ByteSpan init_params_span;
+      EdgeBufferLease init_params_access;
       size_t init_params_len = 0;
-      if (!AcquireUint32Array(env, argv[0], &init_params_span, &init_params_len) ||
+      if (!AcquireUint32Array(env, argv[0], &init_params_access, &init_params_len) ||
           !StoreWriteResultRef(handle, argv[1])) {
-        if (init_params_span.lease != nullptr) {
-          (void)ReleaseBufferAccess(env, init_params_span.lease, false);
-        }
         return Undefined(env);
       }
       std::vector<uint32_t> init_params(init_params_len);
       if (init_params_len != 0) {
-        std::memcpy(init_params.data(), init_params_span.data, init_params_span.len);
+        std::memcpy(init_params.data(),
+                    init_params_access.data(),
+                    init_params_access.size());
       }
-      (void)ReleaseBufferAccess(env, init_params_span.lease, false);
+      (void)init_params_access.Release(false);
       StoreProcessCallback(handle, argv[2]);
 
       CompressionError init_error;
@@ -1668,20 +1459,19 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
     case HandleKind::kZstdCompress:
     case HandleKind::kZstdDecompress: {
       if (argc < 4) return Undefined(env);
-      ByteSpan init_params_span;
+      EdgeBufferLease init_params_access;
       size_t init_params_len = 0;
-      if (!AcquireUint32Array(env, argv[0], &init_params_span, &init_params_len) ||
+      if (!AcquireUint32Array(env, argv[0], &init_params_access, &init_params_len) ||
           !StoreWriteResultRef(handle, argv[2])) {
-        if (init_params_span.lease != nullptr) {
-          (void)ReleaseBufferAccess(env, init_params_span.lease, false);
-        }
         return Undefined(env);
       }
       std::vector<uint32_t> init_params(init_params_len);
       if (init_params_len != 0) {
-        std::memcpy(init_params.data(), init_params_span.data, init_params_span.len);
+        std::memcpy(init_params.data(),
+                    init_params_access.data(),
+                    init_params_access.size());
       }
-      (void)ReleaseBufferAccess(env, init_params_span.lease, false);
+      (void)init_params_access.Release(false);
       StoreProcessCallback(handle, argv[3]);
 
       uint64_t pledged_src_size = ZSTD_CONTENTSIZE_UNKNOWN;
@@ -1698,12 +1488,13 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
       }
 
       std::string_view dictionary;
-      ByteSpan dictionary_span;
+      EdgeBufferLease dictionary_access;
       if (argc >= 5 && !IsNullOrUndefined(env, argv[4]) &&
-          ExtractByteSpan(env, argv[4], &dictionary_span) &&
-          dictionary_span.data != nullptr) {
+          dictionary_access.Acquire(
+              env, argv[4], unofficial_napi_buffer_access_read)) {
         dictionary = std::string_view(
-            reinterpret_cast<const char*>(dictionary_span.data), dictionary_span.len);
+            reinterpret_cast<const char*>(dictionary_access.data()),
+            dictionary_access.size());
       }
 
       CompressionError init_error;
@@ -1712,9 +1503,7 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
       } else if (auto* decompress = dynamic_cast<ZstdDecompressContext*>(handle->context.get())) {
         init_error = decompress->Init(pledged_src_size, dictionary);
       }
-      if (dictionary_span.lease != nullptr) {
-        (void)ReleaseBufferAccess(env, dictionary_span.lease, false);
-      }
+      (void)dictionary_access.Release(false);
       ReportExternalMemory(handle);
 
       if (init_error.IsError()) {
@@ -1800,20 +1589,13 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
   napi_value argv[7] = {nullptr};
   size_t argc = 7;
   CompressionHandle* handle = UnwrapHandle(env, info, nullptr, 7, &argc, argv);
-  if (handle == nullptr || handle->context == nullptr || argc < 7) {
-    if (handle != nullptr) ClearSyncInputSnapshot(handle);
-    return Undefined(env);
-  }
-  const auto invalid_write = [&]() -> napi_value {
-    ClearSyncInputSnapshot(handle);
-    return Undefined(env);
-  };
+  if (handle == nullptr || handle->context == nullptr || argc < 7) return Undefined(env);
   if (!handle->init_done || handle->closed || handle->write_in_progress) {
-    return invalid_write();
+    return Undefined(env);
   }
 
   uint32_t flush = 0;
-  if (!CoerceToUint32(env, argv[0], &flush)) return invalid_write();
+  if (!CoerceToUint32(env, argv[0], &flush)) return Undefined(env);
 
   uint32_t in_off = 0;
   uint32_t in_len = 0;
@@ -1826,58 +1608,43 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
 
   size_t input_length = 0;
   if (!IsNullOrUndefined(env, argv[1]) &&
-      !ByteLengthOfBinaryValue(env, argv[1], &input_length)) {
-    return invalid_write();
+      !EdgeGetBinaryByteLength(env, argv[1], &input_length)) {
+    return Undefined(env);
   }
   size_t output_length = 0;
-  if (!ByteLengthOfBinaryValue(env, argv[4], &output_length)) return invalid_write();
-  if (in_off > input_length || in_len > input_length - in_off) return invalid_write();
-  if (out_off > output_length || out_len > output_length - out_off) return invalid_write();
+  if (!EdgeGetBinaryByteLength(env, argv[4], &output_length)) return Undefined(env);
+  if (in_off > input_length || in_len > input_length - in_off) return Undefined(env);
+  if (out_off > output_length || out_len > output_length - out_off) return Undefined(env);
 
-  ByteSpan input;
-  bool reused_sync_input = false;
+  EdgeBufferLease sync_input_access;
+  EdgeBufferLease sync_output_access;
+  EdgeBufferLease* input_access =
+      async ? &handle->input_access : &sync_input_access;
+  EdgeBufferLease* output_access =
+      async ? &handle->output_access : &sync_output_access;
   if (!IsNullOrUndefined(env, argv[1])) {
-    if (!async) {
-      reused_sync_input =
-          ReuseSyncInputSnapshot(handle, argv[1], in_off, in_len, &input);
-      if (!reused_sync_input) ClearSyncInputSnapshot(handle);
-    } else {
-      ClearSyncInputSnapshot(handle);
+    if (!input_access->Acquire(env,
+                               argv[1],
+                               in_off,
+                               in_len,
+                               unofficial_napi_buffer_access_read)) {
+      return Undefined(env);
     }
-    if (!reused_sync_input &&
-        !AcquireBufferAccess(env,
-                             argv[1],
-                             in_off,
-                             in_len,
-                             unofficial_napi_buffer_access_read,
-                             &input)) {
-      return invalid_write();
-    }
-  } else {
-    // A pure flush cannot continue a prior input snapshot. Release it before
-    // acquiring output so stale source identity/ranges never remain armed.
-    ClearSyncInputSnapshot(handle);
   }
-  ByteSpan output;
-  if (!AcquireBufferAccess(env,
-                           argv[4],
-                           out_off,
-                           out_len,
-                           unofficial_napi_buffer_access_readwrite,
-                           &output)) {
-    if (reused_sync_input) {
-      ClearSyncInputSnapshot(handle);
-    } else if (!IsNullOrUndefined(env, argv[1])) {
-      (void)ReleaseBufferAccess(env, input.lease, false);
-    }
-    return invalid_write();
+  if (!output_access->Acquire(env,
+                              argv[4],
+                              out_off,
+                              out_len,
+                              unofficial_napi_buffer_access_readwrite)) {
+    (void)input_access->Release(false);
+    return Undefined(env);
   }
 
   handle->write_in_progress = true;
   handle->context->SetBuffers(
-      input.data,
+      input_access->active() ? input_access->data() : nullptr,
       in_len,
-      output.data,
+      output_access->data(),
       out_len);
   handle->context->SetFlush(flush);
 
@@ -1885,51 +1652,18 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
     handle->context->DoWork();
     ReportExternalMemory(handle);
     const CompressionError err = handle->context->GetErrorInfo();
+    (void)input_access->Release(false);
+    (void)output_access->Release(true);
     if (err.IsError()) {
-      if (reused_sync_input) {
-        ClearSyncInputSnapshot(handle);
-      } else if (!IsNullOrUndefined(env, argv[1])) {
-        (void)ReleaseBufferAccess(env, input.lease, false);
-      }
-      (void)ReleaseBufferAccess(env, output.lease, true);
       EmitError(handle, err);
       return Undefined(env);
     }
 
-    uint32_t remaining_input = 0;
-    uint32_t remaining_output = 0;
-    handle->context->GetAfterWriteOffsets(&remaining_input, &remaining_output);
-    const bool continues_with_same_input =
-        !IsNullOrUndefined(env, argv[1]) &&
-        remaining_output == 0 && remaining_input > 0;
-    if (reused_sync_input) {
-      if (continues_with_same_input) {
-        AdvanceSyncInputSnapshot(handle, in_len, remaining_input);
-      } else {
-        ClearSyncInputSnapshot(handle);
-      }
-    } else if (!IsNullOrUndefined(env, argv[1])) {
-      if (!continues_with_same_input ||
-          !RetainSyncInputSnapshot(
-              handle, argv[1], input, in_off, in_len, remaining_input)) {
-        (void)ReleaseBufferAccess(env, input.lease, false);
-      }
-    }
-    (void)ReleaseBufferAccess(env, output.lease, true);
     UpdateWriteResult(handle);
     handle->write_in_progress = false;
     if (handle->pending_close) CloseHandle(handle);
     return Undefined(env);
   }
-
-  if (!IsNullOrUndefined(env, argv[1])) {
-    handle->input_access_data = input.data;
-    handle->input_access_lease = input.lease;
-    handle->input_access_active = true;
-  }
-  handle->output_access_data = output.data;
-  handle->output_access_lease = output.lease;
-  handle->output_access_active = true;
 
   if (!StartAsyncWork(handle)) {
     EndWriteBufferAccess(handle, false);
@@ -1955,9 +1689,14 @@ napi_value ZlibCrc32(napi_env env, napi_callback_info info) {
 
   if (argc < 1 || argv[0] == nullptr) return Undefined(env);
 
-  ByteSpan data;
+  EdgeBufferLease data_access;
+  const uint8_t* data = nullptr;
+  size_t data_length = 0;
   std::string temp_utf8;
-  if (!ExtractBinarySequence(env, argv[0], &data, &temp_utf8)) return Undefined(env);
+  if (!ExtractBinarySequence(
+          env, argv[0], &data_access, &data, &data_length, &temp_utf8)) {
+    return Undefined(env);
+  }
 
   uint32_t initial = 0;
   if (argc >= 2 && argv[1] != nullptr) {
@@ -1965,8 +1704,8 @@ napi_value ZlibCrc32(napi_env env, napi_callback_info info) {
   }
 
   const uint32_t checksum =
-      static_cast<uint32_t>(crc32(initial, reinterpret_cast<const Bytef*>(data.data), data.len));
-  if (data.lease != nullptr) (void)ReleaseBufferAccess(env, data.lease, false);
+      static_cast<uint32_t>(
+          crc32(initial, reinterpret_cast<const Bytef*>(data), data_length));
   napi_value out = nullptr;
   napi_create_uint32(env, checksum, &out);
   return out != nullptr ? out : Undefined(env);

@@ -83,10 +83,23 @@ const input = Buffer.from('edge-zlib-roundtrip');
 const syncCompressed = zlib.gzipSync(input);
 assert.strictEqual(zlib.gunzipSync(syncCompressed).toString(), 'edge-zlib-roundtrip');
 
-zlib.gzip(input, (err, compressed) => {
+// Force processChunkSync() to continue with progressively smaller input ranges.
+// Each native call must own only the exact range it consumes; no lease may be
+// retained implicitly between calls.
+const multiChunkInput = Buffer.alloc(64 * 1024, 0x61);
+const multiChunkCompressed = zlib.gzipSync(multiChunkInput);
+assert.deepStrictEqual(
+  zlib.gunzipSync(multiChunkCompressed, { chunkSize: 64 }),
+  multiChunkInput,
+);
+
+zlib.gzip(multiChunkInput, { chunkSize: 1024 }, (err, compressed) => {
   if (err) throw err;
-  const inflated = zlib.gunzipSync(compressed);
-  globalThis.__edge_zlib_roundtrip = inflated.toString();
+  zlib.gunzip(compressed, { chunkSize: 1024 }, (inflateErr, inflated) => {
+    if (inflateErr) throw inflateErr;
+    assert.deepStrictEqual(inflated, multiChunkInput);
+    globalThis.__edge_zlib_roundtrip = 'edge-zlib-roundtrip';
+  });
 });
 )JS";
 
