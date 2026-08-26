@@ -811,11 +811,46 @@ class ZstdDecompressContext final : public ZstdContextBase {
   std::unique_ptr<ZSTD_DCtx, DecompressDeleter> dctx_;
 };
 
+// processChunkSync() may call writeSync() repeatedly while draining one input
+// into fixed-size output buffers. Keep the provider snapshot for that logical
+// operation, but only while the same value and exact contiguous range continue.
+class SyncInputAccess {
+ public:
+  SyncInputAccess() = default;
+  SyncInputAccess(const SyncInputAccess&) = delete;
+  SyncInputAccess& operator=(const SyncInputAccess&) = delete;
+
+  ~SyncInputAccess() { Reset(); }
+
+  bool AcquireOrContinue(napi_env env,
+                         napi_value value,
+                         uint32_t byte_offset,
+                         uint32_t byte_length,
+                         const uint8_t** data);
+  void FinishWrite(uint32_t byte_length,
+                   uint32_t remaining_input,
+                   uint32_t remaining_output);
+  void Reset();
+
+ private:
+  bool MatchesContinuation(napi_env env,
+                           napi_value value,
+                           uint32_t byte_offset,
+                           uint32_t byte_length) const;
+
+  EdgeBufferLease lease_;
+  napi_env env_ = nullptr;
+  napi_ref source_ref_ = nullptr;
+  uint32_t base_offset_ = 0;
+  uint32_t next_offset_ = 0;
+};
+
 struct CompressionHandle {
   napi_env env = nullptr;
   napi_ref wrapper_ref = nullptr;
   napi_ref process_callback_ref = nullptr;
   napi_ref write_result_ref = nullptr;
+  SyncInputAccess sync_input_access;
   EdgeBufferLease input_access;
   EdgeBufferLease output_access;
   napi_async_work async_work = nullptr;
@@ -856,6 +891,92 @@ napi_value GetRefValue(napi_env env, napi_ref ref) {
   napi_value value = nullptr;
   if (napi_get_reference_value(env, ref, &value) != napi_ok) return nullptr;
   return value;
+}
+
+bool SyncInputAccess::MatchesContinuation(napi_env env,
+                                          napi_value value,
+                                          uint32_t byte_offset,
+                                          uint32_t byte_length) const {
+  if (!lease_.active() || env_ != env || source_ref_ == nullptr ||
+      byte_offset != next_offset_ || byte_offset < base_offset_) {
+    return false;
+  }
+
+  const uint32_t relative_offset = byte_offset - base_offset_;
+  if (relative_offset > lease_.size() ||
+      byte_length != lease_.size() - relative_offset) {
+    return false;
+  }
+
+  napi_value source = GetRefValue(env, source_ref_);
+  bool equal = false;
+  return source != nullptr &&
+         napi_strict_equals(env, source, value, &equal) == napi_ok && equal;
+}
+
+bool SyncInputAccess::AcquireOrContinue(napi_env env,
+                                        napi_value value,
+                                        uint32_t byte_offset,
+                                        uint32_t byte_length,
+                                        const uint8_t** data) {
+  if (env == nullptr || value == nullptr || data == nullptr) return false;
+  *data = nullptr;
+
+  if (MatchesContinuation(env, value, byte_offset, byte_length)) {
+    *data = lease_.data() + (byte_offset - base_offset_);
+    return true;
+  }
+
+  Reset();
+  if (!lease_.Acquire(env,
+                      value,
+                      byte_offset,
+                      byte_length,
+                      unofficial_napi_buffer_access_read)) {
+    return false;
+  }
+
+  napi_ref source_ref = nullptr;
+  if (napi_create_reference(env, value, 1, &source_ref) != napi_ok ||
+      source_ref == nullptr) {
+    if (source_ref != nullptr) (void)napi_delete_reference(env, source_ref);
+    (void)lease_.Release(false);
+    return false;
+  }
+
+  env_ = env;
+  source_ref_ = source_ref;
+  base_offset_ = byte_offset;
+  next_offset_ = byte_offset;
+  *data = lease_.data();
+  return true;
+}
+
+void SyncInputAccess::FinishWrite(uint32_t byte_length,
+                                  uint32_t remaining_input,
+                                  uint32_t remaining_output) {
+  if (!lease_.active() || remaining_output != 0 || remaining_input == 0 ||
+      remaining_input > byte_length) {
+    Reset();
+    return;
+  }
+  const uint32_t consumed = byte_length - remaining_input;
+  if (consumed > std::numeric_limits<uint32_t>::max() - next_offset_) {
+    Reset();
+    return;
+  }
+  next_offset_ += consumed;
+}
+
+void SyncInputAccess::Reset() {
+  (void)lease_.Release(false);
+  if (env_ != nullptr && source_ref_ != nullptr) {
+    (void)napi_delete_reference(env_, source_ref_);
+  }
+  env_ = nullptr;
+  source_ref_ = nullptr;
+  base_offset_ = 0;
+  next_offset_ = 0;
 }
 
 void EndWriteBufferAccess(CompressionHandle* handle, bool output_modified) {
@@ -1094,6 +1215,7 @@ void CloseHandle(CompressionHandle* handle) {
   if (handle->context != nullptr) {
     handle->context->Close();
   }
+  handle->sync_input_access.Reset();
   EndWriteBufferAccess(handle, false);
   DeleteRefIfPresent(handle->env, &handle->write_result_ref);
   ReportExternalMemory(handle);
@@ -1357,6 +1479,7 @@ napi_value CompressionInit(napi_env env, napi_callback_info info) {
   CompressionHandle* handle = UnwrapHandle(env, info, &self, 7, &argc, argv);
   if (handle == nullptr || handle->context == nullptr) return Undefined(env);
 
+  handle->sync_input_access.Reset();
   handle->closed = false;
   handle->pending_close = false;
   handle->init_done = true;
@@ -1535,6 +1658,7 @@ napi_value CompressionParams(napi_env env, napi_callback_info info) {
   CompressionHandle* handle = UnwrapHandle(env, info, nullptr, 2, &argc, argv);
   if (handle == nullptr || handle->context == nullptr || argc < 2) return Undefined(env);
 
+  handle->sync_input_access.Reset();
   int32_t first = 0;
   int32_t second = 0;
   CoerceToInt32(env, argv[0], &first);
@@ -1548,6 +1672,7 @@ napi_value CompressionParams(napi_env env, napi_callback_info info) {
 napi_value CompressionReset(napi_env env, napi_callback_info info) {
   CompressionHandle* handle = UnwrapHandle(env, info);
   if (handle == nullptr || handle->context == nullptr) return Undefined(env);
+  handle->sync_input_access.Reset();
   const CompressionError err = handle->context->ResetStream();
   ReportExternalMemory(handle);
   if (err.IsError()) EmitError(handle, err);
@@ -1589,13 +1714,20 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
   napi_value argv[7] = {nullptr};
   size_t argc = 7;
   CompressionHandle* handle = UnwrapHandle(env, info, nullptr, 7, &argc, argv);
-  if (handle == nullptr || handle->context == nullptr || argc < 7) return Undefined(env);
-  if (!handle->init_done || handle->closed || handle->write_in_progress) {
+  if (handle == nullptr || handle->context == nullptr || argc < 7) {
+    if (handle != nullptr) handle->sync_input_access.Reset();
     return Undefined(env);
+  }
+  const auto invalid_write = [&]() -> napi_value {
+    handle->sync_input_access.Reset();
+    return Undefined(env);
+  };
+  if (!handle->init_done || handle->closed || handle->write_in_progress) {
+    return invalid_write();
   }
 
   uint32_t flush = 0;
-  if (!CoerceToUint32(env, argv[0], &flush)) return Undefined(env);
+  if (!CoerceToUint32(env, argv[0], &flush)) return invalid_write();
 
   uint32_t in_off = 0;
   uint32_t in_len = 0;
@@ -1609,40 +1741,47 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
   size_t input_length = 0;
   if (!IsNullOrUndefined(env, argv[1]) &&
       !EdgeGetBinaryByteLength(env, argv[1], &input_length)) {
-    return Undefined(env);
+    return invalid_write();
   }
   size_t output_length = 0;
-  if (!EdgeGetBinaryByteLength(env, argv[4], &output_length)) return Undefined(env);
-  if (in_off > input_length || in_len > input_length - in_off) return Undefined(env);
-  if (out_off > output_length || out_len > output_length - out_off) return Undefined(env);
+  if (!EdgeGetBinaryByteLength(env, argv[4], &output_length)) return invalid_write();
+  if (in_off > input_length || in_len > input_length - in_off) return invalid_write();
+  if (out_off > output_length || out_len > output_length - out_off) return invalid_write();
 
-  EdgeBufferLease sync_input_access;
   EdgeBufferLease sync_output_access;
-  EdgeBufferLease* input_access =
-      async ? &handle->input_access : &sync_input_access;
   EdgeBufferLease* output_access =
       async ? &handle->output_access : &sync_output_access;
+  const uint8_t* input_data = nullptr;
   if (!IsNullOrUndefined(env, argv[1])) {
-    if (!input_access->Acquire(env,
-                               argv[1],
-                               in_off,
-                               in_len,
-                               unofficial_napi_buffer_access_read)) {
-      return Undefined(env);
+    if (async) {
+      handle->sync_input_access.Reset();
+      if (!handle->input_access.Acquire(env,
+                                        argv[1],
+                                        in_off,
+                                        in_len,
+                                        unofficial_napi_buffer_access_read)) {
+        return Undefined(env);
+      }
+      input_data = handle->input_access.data();
+    } else if (!handle->sync_input_access.AcquireOrContinue(
+                   env, argv[1], in_off, in_len, &input_data)) {
+      return invalid_write();
     }
+  } else {
+    handle->sync_input_access.Reset();
   }
   if (!output_access->Acquire(env,
                               argv[4],
                               out_off,
                               out_len,
                               unofficial_napi_buffer_access_readwrite)) {
-    (void)input_access->Release(false);
-    return Undefined(env);
+    if (async) (void)handle->input_access.Release(false);
+    return invalid_write();
   }
 
   handle->write_in_progress = true;
   handle->context->SetBuffers(
-      input_access->active() ? input_access->data() : nullptr,
+      input_data,
       in_len,
       output_access->data(),
       out_len);
@@ -1652,13 +1791,19 @@ napi_value CompressionWriteCommon(napi_env env, napi_callback_info info, bool as
     handle->context->DoWork();
     ReportExternalMemory(handle);
     const CompressionError err = handle->context->GetErrorInfo();
-    (void)input_access->Release(false);
     (void)output_access->Release(true);
     if (err.IsError()) {
+      handle->sync_input_access.Reset();
       EmitError(handle, err);
       return Undefined(env);
     }
 
+    uint32_t remaining_input = 0;
+    uint32_t remaining_output = 0;
+    handle->context->GetAfterWriteOffsets(
+        &remaining_input, &remaining_output);
+    handle->sync_input_access.FinishWrite(
+        in_len, remaining_input, remaining_output);
     UpdateWriteResult(handle);
     handle->write_in_progress = false;
     if (handle->pending_close) CloseHandle(handle);

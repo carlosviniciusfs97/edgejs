@@ -83,13 +83,22 @@ const input = Buffer.from('edge-zlib-roundtrip');
 const syncCompressed = zlib.gzipSync(input);
 assert.strictEqual(zlib.gunzipSync(syncCompressed).toString(), 'edge-zlib-roundtrip');
 
-// Force processChunkSync() to continue with progressively smaller input ranges.
-// Each native call must own only the exact range it consumes; no lease may be
-// retained implicitly between calls.
-const multiChunkInput = Buffer.alloc(64 * 1024, 0x61);
+// Force processChunkSync() to continue with progressively smaller ranges of
+// the same incompressible input. A host-JS provider copies host buffers into
+// guest memory when a lease is acquired, so the native binding must retain one
+// input lease for this logical operation instead of recopying the remaining
+// input for every output chunk.
+const multiChunkInput = Buffer.allocUnsafe(1024 * 1024);
+let randomState = 0x12345678;
+for (let i = 0; i < multiChunkInput.length; ++i) {
+  randomState ^= randomState << 13;
+  randomState ^= randomState >>> 17;
+  randomState ^= randomState << 5;
+  multiChunkInput[i] = randomState;
+}
 const multiChunkCompressed = zlib.gzipSync(multiChunkInput);
 assert.deepStrictEqual(
-  zlib.gunzipSync(multiChunkCompressed, { chunkSize: 64 }),
+  zlib.gunzipSync(multiChunkCompressed, { chunkSize: 4 * 1024 }),
   multiChunkInput,
 );
 
