@@ -63,6 +63,12 @@ be validated together against that SDK revision rather than bypassing
 - Updated N-API to the Wasmer 7.3/0.703 package line and applied the SDK
   branch's static-memory API adaptations in the resource-budget and guest-heap
   code.
+- Kept the memory-tunables adapter explicitly native: every `wasm32` build uses
+  Wasmer's JavaScript backend, so `BudgetedTunables` and its `wasmer::sys`
+  imports are now gated on `not(target_arch = "wasm32")`. The helper no longer
+  accepts an unused engine target. Host-JavaScript builds retain only the
+  shared provider budget used for environment, value-handle, and declared
+  external-memory limits.
 - Moved the N-API toolchain from Rust 1.94 to 1.95, the minimum version declared
   by the pinned Wasmer SDK crates.
 - Published the complete standalone-runner update as N-API commit
@@ -124,6 +130,9 @@ provider under `.wasmer-src`.
   release mode on Rust 1.95.
 - Cargo metadata resolved the same lockfile for
   `x86_64-unknown-linux-gnu`, covering the platform from the failing CI job.
+- The simplified sys boundary passes both the locked native release CLI build
+  and `cargo check --locked --target wasm32-unknown-unknown --features
+  js,wasix --lib`; the latter does not compile or install budgeted tunables.
 - The rebuilt runner executed `build-wasix/edgejs.wasm` and printed
   `hello world!`.
 - Provider validation still reports 110 standard N-API imports and 67
