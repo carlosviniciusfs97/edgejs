@@ -24,5 +24,12 @@ uint64_t EdgeGetProcessStartTimeNanoseconds();
 napi_value EdgeGetProcessMethodsBinding(napi_env env);
 napi_value EdgeGetReportBinding(napi_env env);
 bool EdgeWriteReportForUncaughtException(napi_env env, napi_value exception);
+[[noreturn]] void EdgeFatalErrorReportCallback(napi_env env,
+                                               const char* location,
+                                               const char* message);
+[[noreturn]] void EdgeOomErrorReportCallback(napi_env env,
+                                             const char* location,
+                                             bool is_heap_oom,
+                                             const char* detail);
 
 #endif  // EDGE_PROCESS_H_

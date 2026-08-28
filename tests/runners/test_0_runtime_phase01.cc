@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -74,6 +75,7 @@ std::string GetGlobalUtf8(napi_env env, const char* name) {
 }
 
 constexpr const char* kZlibRoundTripScript = R"JS(
+require('internal/util/debuglog').initializeDebugEnv(process.env.NODE_DEBUG);
 const assert = require('assert');
 const zlib = require('zlib');
 
@@ -81,10 +83,32 @@ const input = Buffer.from('edge-zlib-roundtrip');
 const syncCompressed = zlib.gzipSync(input);
 assert.strictEqual(zlib.gunzipSync(syncCompressed).toString(), 'edge-zlib-roundtrip');
 
-zlib.gzip(input, (err, compressed) => {
+// Force processChunkSync() to continue with progressively smaller ranges of
+// the same incompressible input. A host-JS provider copies host buffers into
+// guest memory when a lease is acquired, so the native binding must retain one
+// input lease for this logical operation instead of recopying the remaining
+// input for every output chunk.
+const multiChunkInput = Buffer.allocUnsafe(1024 * 1024);
+let randomState = 0x12345678;
+for (let i = 0; i < multiChunkInput.length; ++i) {
+  randomState ^= randomState << 13;
+  randomState ^= randomState >>> 17;
+  randomState ^= randomState << 5;
+  multiChunkInput[i] = randomState;
+}
+const multiChunkCompressed = zlib.gzipSync(multiChunkInput);
+assert.deepStrictEqual(
+  zlib.gunzipSync(multiChunkCompressed, { chunkSize: 4 * 1024 }),
+  multiChunkInput,
+);
+
+zlib.gzip(multiChunkInput, { chunkSize: 1024 }, (err, compressed) => {
   if (err) throw err;
-  const inflated = zlib.gunzipSync(compressed);
-  globalThis.__edge_zlib_roundtrip = inflated.toString();
+  zlib.gunzip(compressed, { chunkSize: 1024 }, (inflateErr, inflated) => {
+    if (inflateErr) throw inflateErr;
+    assert.deepStrictEqual(inflated, multiChunkInput);
+    globalThis.__edge_zlib_roundtrip = 'edge-zlib-roundtrip';
+  });
 });
 )JS";
 
@@ -154,8 +178,6 @@ TEST_F(Test0RuntimePhase01, SyntaxErrorReturnsNonZero) {
 }
 
 TEST_F(Test0RuntimePhase01, EsmImportOfThrowingCjsReturnsJsErrorInsteadOfCrashing) {
-  EnvScope s(runtime_.get());
-
   const auto temp_dir = std::filesystem::temp_directory_path() / "edge_phase01_esm_import_cjs_throw";
   std::error_code mkdir_ec;
   std::filesystem::create_directories(temp_dir, mkdir_ec);
@@ -174,10 +196,22 @@ TEST_F(Test0RuntimePhase01, EsmImportOfThrowingCjsReturnsJsErrorInsteadOfCrashin
     out << "globalThis.__should_not_run = true;\n";
   }
 
-  std::string error;
-  const int exit_code = EdgeRunScriptFile(s.env, esm_path.c_str(), &error);
-  EXPECT_EQ(exit_code, 1);
-  EXPECT_NE(error.find("boom from cjs"), std::string::npos) << error;
+  // A failed static module graph is an uncaught main-module exception and may
+  // terminate the process. Exercise that boundary in a child so the test can
+  // distinguish the expected JavaScript exit from a native crash.
+  EXPECT_EXIT(
+      {
+        EnvScope s(runtime_.get());
+        std::string error;
+        const int exit_code =
+            EdgeRunScriptFileWithLoop(s.env, esm_path.c_str(), &error, true);
+        if (exit_code != 1 || error.find("boom from cjs") == std::string::npos) {
+          std::_Exit(2);
+        }
+        std::_Exit(exit_code);
+      },
+      ::testing::ExitedWithCode(1),
+      "boom from cjs");
 
   std::error_code remove_ec;
   std::filesystem::remove_all(temp_dir, remove_ec);
@@ -205,6 +239,37 @@ TEST_F(Test0RuntimePhase01, EmptySourceReturnsNonZero) {
   const int exit_code = EdgeRunScriptSource(s.env, "", &error);
   EXPECT_EQ(exit_code, 1);
   EXPECT_EQ(error, "Empty script source");
+}
+
+TEST_F(Test0RuntimePhase01, AsyncFsPromiseChainReachesQuiescence) {
+  EnvScope s(runtime_.get());
+  constexpr const char* kSource = R"JS(
+const fs = require('fs');
+globalThis.__edge_fs_chain_count = 0;
+globalThis.__edge_fs_chain_done = false;
+(async () => {
+  for (let i = 0; i < 64; i++) {
+    await new Promise((resolve, reject) => {
+      fs.stat('.', (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        globalThis.__edge_fs_chain_count++;
+        resolve();
+      });
+    });
+  }
+  globalThis.__edge_fs_chain_done = true;
+})();
+)JS";
+
+  std::string error;
+  const int exit_code = EdgeRunScriptSourceWithLoop(s.env, kSource, &error, true);
+  EXPECT_EQ(exit_code, 0) << "error=" << error;
+  EXPECT_TRUE(error.empty()) << "error=" << error;
+  EXPECT_EQ(GetGlobalUtf8(s.env, "__edge_fs_chain_count"), "64");
+  EXPECT_EQ(GetGlobalUtf8(s.env, "__edge_fs_chain_done"), "true");
 }
 
 TEST_F(Test0RuntimePhase01, NativePathResolveNormalizesDotSegments) {
@@ -337,6 +402,163 @@ TEST_F(Test0RuntimePhase01, TaskQueueStateIsIsolatedPerEnv) {
   EXPECT_FALSE(first_has_rejection_to_warn);
   EXPECT_FALSE(second_has_tick_scheduled);
   EXPECT_TRUE(second_has_rejection_to_warn);
+}
+
+TEST_F(Test0RuntimePhase01, TickCallbackDoesNotDependOnMutableDispatchGlobals) {
+  EnvScope s(runtime_.get());
+
+  napi_value binding = EdgeGetOrCreateTaskQueueBinding(s.env);
+  ASSERT_NE(binding, nullptr);
+  napi_value set_tick_callback = nullptr;
+  ASSERT_EQ(napi_get_named_property(
+                s.env, binding, "setTickCallback", &set_tick_callback),
+            napi_ok);
+  ASSERT_NE(set_tick_callback, nullptr);
+
+  napi_value source = nullptr;
+  napi_value callback = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "(function processTicksAndRejections() { "
+                "globalThis.__edge_tick_receiver_ok = (this === globalThis); })",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &callback), napi_ok);
+  ASSERT_NE(callback, nullptr);
+  napi_value ignored = nullptr;
+  ASSERT_EQ(napi_call_function(
+                s.env, binding, set_tick_callback, 1, &callback, &ignored),
+            napi_ok);
+
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "globalThis.Reflect = undefined; "
+                "Object.defineProperty(globalThis, 'process', { "
+                "configurable: true, get() { throw new Error('process read during tick'); } });",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &ignored), napi_ok);
+
+  EXPECT_EQ(EdgeRunTaskQueueTickCallback(s.env), napi_ok);
+  napi_value global = nullptr;
+  napi_value receiver_ok = nullptr;
+  bool receiver_matches = false;
+  ASSERT_EQ(napi_get_global(s.env, &global), napi_ok);
+  ASSERT_EQ(napi_get_named_property(
+                s.env, global, "__edge_tick_receiver_ok", &receiver_ok),
+            napi_ok);
+  ASSERT_EQ(napi_get_value_bool(s.env, receiver_ok, &receiver_matches), napi_ok);
+  EXPECT_TRUE(receiver_matches);
+}
+
+TEST_F(Test0RuntimePhase01, TickCallbackAddsNoSyntheticJavascriptFrame) {
+  EnvScope s(runtime_.get());
+
+  napi_value binding = EdgeGetOrCreateTaskQueueBinding(s.env);
+  ASSERT_NE(binding, nullptr);
+  napi_value set_tick_callback = nullptr;
+  ASSERT_EQ(napi_get_named_property(
+                s.env, binding, "setTickCallback", &set_tick_callback),
+            napi_ok);
+
+  napi_value source = nullptr;
+  napi_value callback = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "(function processTicksAndRejections() { "
+                "throw new Error('tick stack'); })",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &callback), napi_ok);
+  napi_value ignored = nullptr;
+  ASSERT_EQ(napi_call_function(
+                s.env, binding, set_tick_callback, 1, &callback, &ignored),
+            napi_ok);
+
+  EXPECT_EQ(EdgeRunTaskQueueTickCallback(s.env), napi_pending_exception);
+  napi_value exception = nullptr;
+  ASSERT_EQ(napi_get_and_clear_last_exception(s.env, &exception), napi_ok);
+  napi_value stack = nullptr;
+  ASSERT_EQ(napi_get_named_property(s.env, exception, "stack", &stack), napi_ok);
+  const std::string stack_text = ValueToUtf8(s.env, stack);
+  const std::string frame_name = "processTicksAndRejections";
+  const size_t first = stack_text.find(frame_name);
+  ASSERT_NE(first, std::string::npos) << stack_text;
+  EXPECT_EQ(stack_text.find(frame_name, first + frame_name.size()),
+            std::string::npos)
+      << stack_text;
+}
+
+TEST_F(Test0RuntimePhase01, HandledTickExceptionEndsCurrentCallbackBoundary) {
+  EnvScope s(runtime_.get());
+
+  napi_value binding = EdgeGetOrCreateTaskQueueBinding(s.env);
+  ASSERT_NE(binding, nullptr);
+  napi_value set_tick_callback = nullptr;
+  napi_value tick_info = nullptr;
+  ASSERT_EQ(napi_get_named_property(
+                s.env, binding, "setTickCallback", &set_tick_callback),
+            napi_ok);
+  ASSERT_EQ(napi_get_named_property(s.env, binding, "tickInfo", &tick_info),
+            napi_ok);
+  int32_t* tick_fields = GetInt32TypedArrayData(s.env, tick_info, 2);
+  ASSERT_NE(tick_fields, nullptr);
+  tick_fields[0] = 1;
+
+  napi_value global = nullptr;
+  ASSERT_EQ(napi_get_global(s.env, &global), napi_ok);
+  ASSERT_EQ(napi_set_named_property(
+                s.env, global, "__edge_checkpoint_tick_info", tick_info),
+            napi_ok);
+
+  napi_value source = nullptr;
+  napi_value ignored = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "globalThis.__edge_checkpoint_tick_count = 0;"
+                "globalThis.process = { _fatalException() { return true; } };",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &ignored), napi_ok);
+
+  napi_value tick_callback = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env,
+                "(function processTicksAndRejections() {"
+                "  const count = ++globalThis.__edge_checkpoint_tick_count;"
+                "  if (count < 3) throw new Error('handled tick failure');"
+                "  globalThis.__edge_checkpoint_tick_info[0] = 0;"
+                "})",
+                NAPI_AUTO_LENGTH,
+                &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &tick_callback), napi_ok);
+  ASSERT_EQ(napi_call_function(s.env,
+                               binding,
+                               set_tick_callback,
+                               1,
+                               &tick_callback,
+                               &ignored),
+            napi_ok);
+
+  napi_value callback = nullptr;
+  ASSERT_EQ(napi_create_string_utf8(
+                s.env, "(function callback() {})", NAPI_AUTO_LENGTH, &source),
+            napi_ok);
+  ASSERT_EQ(napi_run_script(s.env, source, &callback), napi_ok);
+  ASSERT_EQ(EdgeMakeCallback(
+                s.env, global, callback, 0, nullptr, &ignored),
+            napi_ok);
+
+  // Handling the error completes this native->JS turn. The event loop may
+  // schedule another checkpoint, but the callback boundary must not spin by
+  // immediately re-entering a provider-owned task queue.
+  EXPECT_EQ(GetGlobalUtf8(s.env, "__edge_checkpoint_tick_count"), "1");
+  tick_fields[0] = 0;
 }
 
 TEST_F(Test0RuntimePhase01, NativeImmediateQueueRunsBeforeJsImmediatesAndDrainsNestedTasks) {

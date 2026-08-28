@@ -74,9 +74,7 @@ struct SyncPipe {
   uv_pipe_t pipe{};
   bool readable = false;
   bool writable = false;
-  bool shutdown_pending = false;
   uv_write_t write_req{};
-  uv_shutdown_t shutdown_req{};
   std::vector<uint8_t> input_storage;
   uv_buf_t input_buf{};
   std::unique_ptr<OutputChunk> first_output;
@@ -652,42 +650,12 @@ void KillAndClose(SpawnSyncRunner* runner) {
   CloseTimerIfNeeded(runner);
 }
 
-void StartPipeShutdown(SyncPipe* pipe);
-
-void PipeShutdownCallback(uv_shutdown_t* req, int status) {
-  if (req == nullptr) return;
-  auto* pipe = static_cast<SyncPipe*>(req->data);
-  if (pipe == nullptr || pipe->runner == nullptr) return;
-  pipe->shutdown_pending = false;
-  if (status < 0 && status != UV_ENOTCONN) {
-    SetPipeErrorIfUnset(pipe->runner, status);
-  }
-  if (!pipe->writable) {
-    ClosePipeIfNeeded(pipe);
-  }
-}
-
-void StartPipeShutdown(SyncPipe* pipe) {
+void CloseInputPipe(SyncPipe* pipe) {
   if (pipe == nullptr) return;
-  if (pipe->lifecycle != PipeLifecycle::kInitialized && pipe->lifecycle != PipeLifecycle::kStarted) return;
-  uv_handle_t* handle = reinterpret_cast<uv_handle_t*>(&pipe->pipe);
-  if (uv_is_closing(handle) || pipe->shutdown_pending) return;
-
-  pipe->shutdown_req.data = pipe;
-  pipe->shutdown_pending = true;
-  int rc = uv_shutdown(&pipe->shutdown_req,
-                       reinterpret_cast<uv_stream_t*>(&pipe->pipe),
-                       PipeShutdownCallback);
-  if (rc == UV_ENOTCONN) {
-    pipe->shutdown_pending = false;
-    if (!pipe->writable) ClosePipeIfNeeded(pipe);
-    return;
-  }
-  if (rc < 0) {
-    pipe->shutdown_pending = false;
-    SetPipeErrorIfUnset(pipe->runner, rc);
-    if (!pipe->writable) ClosePipeIfNeeded(pipe);
-  }
+  // Child stdin is a one-way pipe. Once the final write has completed, closing
+  // the parent handle is sufficient to deliver EOF; a socket-style half-close
+  // adds no useful state and can turn a successful spawn into a pipe error.
+  if (pipe->readable && !pipe->writable) ClosePipeIfNeeded(pipe);
 }
 
 void PipeWriteCallback(uv_write_t* req, int status) {
@@ -695,7 +663,7 @@ void PipeWriteCallback(uv_write_t* req, int status) {
   auto* pipe = static_cast<SyncPipe*>(req->data);
   if (pipe == nullptr || pipe->runner == nullptr) return;
   if (status < 0) SetPipeErrorIfUnset(pipe->runner, status);
-  StartPipeShutdown(pipe);
+  CloseInputPipe(pipe);
 }
 
 void AllocReadBuffer(uv_handle_t* handle, size_t /*suggested_size*/, uv_buf_t* buf) {
@@ -972,10 +940,10 @@ napi_value SpawnSync(napi_env env, napi_callback_info info) {
                         PipeWriteCallback);
           if (rc < 0) {
             SetPipeErrorIfUnset(&runner, rc);
-            StartPipeShutdown(&pipe);
+            CloseInputPipe(&pipe);
           }
         } else {
-          StartPipeShutdown(&pipe);
+          CloseInputPipe(&pipe);
         }
       }
     }

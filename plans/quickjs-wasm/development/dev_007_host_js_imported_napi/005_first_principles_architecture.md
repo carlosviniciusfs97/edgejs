@@ -171,6 +171,16 @@ Files under `lib/` must remain unchanged.
   and 71/71 QuickJS N-API tests; 1,749/1,749 V8 and 1,741/1,741 QuickJS native
   Edge tests; 1,676/1,676 V8 and 1,675/1,675 QuickJS serial WASIX tests; the
   wasmer-sh browser smoke; and the browser Next.js install/dev/preview flow.
+- [x] Made Edge's quiescence test distinguish an empty post-drain queue from a
+  checkpoint that made progress. A drained nextTick/filesystem callback can
+  settle a Promise whose continuation schedules the next operation only after
+  another host checkpoint. Edge now continues until the combined provider and
+  Edge queues reach a fixed point instead of exhausting an arbitrary idle
+  grace window. A 64-operation async filesystem chain is the focused native
+  regression; the rebuilt browser WebC completes an ordinary Next 16.3.0
+  production build, writes `.next/BUILD_ID`, starts on port 3000, and renders
+  the production preview without a keepalive, target branch,
+  `NEXT_TEST_WASM_DIR`, or explicit SWC dependency.
 
 ## PR review closure plan (2026-08-12)
 

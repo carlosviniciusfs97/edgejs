@@ -36,8 +36,10 @@ constexpr int32_t kPromisePending = 0;
 constexpr int32_t kPromiseFulfilled = 1;
 constexpr int32_t kPromiseRejected = 2;
 constexpr uint32_t kMaxCallSitesFrames = 200;
-constexpr uint32_t kMaxRawCallSitesFrames = kMaxCallSitesFrames + 1;
-constexpr uint32_t kEdgeInternalCallSiteFrames = 1;
+// The provider omits its own capture frame. The binding callback is native and
+// therefore does not add a JavaScript frame, so the first returned call site is
+// already the caller visible to util.getCallSites().
+constexpr uint32_t kEdgeInternalCallSiteFrames = 0;
 
 constexpr int32_t kExitInfoKExiting = 0;
 constexpr int32_t kExitInfoKExitCode = 1;
@@ -240,9 +242,7 @@ bool CreateLocationFromCallSite(napi_env env, napi_value callsite, napi_value* l
 }
 
 uint32_t RawCallSiteFramesForEdge(uint32_t frames) {
-  if (frames == 0) return 0;
-  if (frames >= kMaxCallSitesFrames) return kMaxRawCallSitesFrames;
-  return frames + kEdgeInternalCallSiteFrames;
+  return std::min(frames, kMaxCallSitesFrames);
 }
 
 bool CreateSkippedCallSitesArray(napi_env env,
@@ -798,7 +798,7 @@ napi_value GetOwnNonIndexPropertiesCallback(napi_env env, napi_callback_info inf
   }
 
   napi_value keys = nullptr;
-  if (unofficial_napi_get_own_non_index_properties(env, source, filter_bits, &keys) != napi_ok ||
+  if (EdgeGetOwnNonIndexProperties(env, source, filter_bits, &keys) != napi_ok ||
       keys == nullptr) {
     return Undefined(env);
   }
@@ -1434,6 +1434,14 @@ bool InstallTypesBinding(napi_env env) {
 }
 
 }  // namespace
+
+napi_status EdgeGetOwnNonIndexProperties(napi_env env,
+                                         napi_value value,
+                                         uint32_t filter_bits,
+                                         napi_value* result_out) {
+  return unofficial_napi_get_own_non_index_properties(
+      env, value, filter_bits, result_out);
+}
 
 napi_value EdgeCreateSharedTypedArray(napi_env env,
                                       napi_typedarray_type type,

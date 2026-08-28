@@ -1,5 +1,4 @@
 #include "edge_os.h"
-#include "edge_napi_embedder_hooks.h"
 
 #include <array>
 #include <cerrno>
@@ -208,11 +207,7 @@ napi_value BindingGetFreeMem(napi_env env, napi_callback_info info) {
   (void)info;
   napi_value out = nullptr;
 
-#ifdef DUMMY_UV_STUBS
-  uint64_t free_memory = EdgeGetTotalMemory();
-#else
   uint64_t free_memory = uv_get_free_memory();
-#endif
 
   if (napi_create_double(env, static_cast<double>(free_memory), &out) != napi_ok) return nullptr;
   return out;
@@ -221,11 +216,7 @@ napi_value BindingGetFreeMem(napi_env env, napi_callback_info info) {
 napi_value BindingGetTotalMem(napi_env env, napi_callback_info info) {
   (void)info;
   napi_value out = nullptr;
-#ifdef DUMMY_UV_STUBS
-  uint64_t total_memory = EdgeGetTotalMemory();
-#else
   uint64_t total_memory = uv_get_total_memory();
-#endif
 
   if (napi_create_double(env, static_cast<double>(total_memory), &out) != napi_ok) return nullptr;
   return out;

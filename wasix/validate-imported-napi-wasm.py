@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import sys
 
 
@@ -143,6 +144,75 @@ def validate_cmake_cache(path: Path) -> None:
         )
 
 
+def read_provider_operations(napi_root: Path) -> tuple[set[str], set[str]]:
+    provider_sets: list[tuple[set[str], set[str]]] = []
+    for relative in ("src/guest/napi.rs", "src/guest/napi_js.rs"):
+        path = napi_root / relative
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise ValidationError(f"unable to read provider source {path}: {error}") from error
+        operation_sets: list[set[str]] = []
+        for namespace_name, pattern in (
+            ("napi_namespace", r'"((?:napi_|node_api_)[^"]+)"\s*=>'),
+            ("napi_extension_wasmer_namespace", r'"(unofficial_napi_[^"]+)"\s*=>'),
+        ):
+            match = re.search(
+                rf"let {namespace_name} = namespace!\s*\{{(.*?)\n\s*\}};",
+                source,
+                re.DOTALL,
+            )
+            if match is None:
+                raise ValidationError(f"provider {namespace_name} not found in {path}")
+            operations = set(re.findall(pattern, match.group(1)))
+            if not operations:
+                raise ValidationError(f"provider {namespace_name} is empty in {path}")
+            operation_sets.append(operations)
+        provider_sets.append((operation_sets[0], operation_sets[1]))
+    if provider_sets[0] != provider_sets[1]:
+        raise ValidationError(
+            "native and host-JavaScript provider operation inventories differ"
+        )
+    return provider_sets[0]
+
+
+def read_provider_extension_operations(napi_root: Path) -> set[str]:
+    return read_provider_operations(napi_root)[1]
+
+
+def validate_provider_operations(imports: list[WasmImport], operations: set[str]) -> None:
+    required = {
+        item.name
+        for item in imports
+        if item.kind == 0 and item.module == EXTENSION_MODULE
+    }
+    missing = sorted(required - operations)
+    if missing:
+        raise ValidationError(
+            "Wasmer provider does not implement Edge extension imports: "
+            + ", ".join(missing[:12])
+        )
+
+
+def validate_provider_imports(
+    imports: list[WasmImport],
+    standard_operations: set[str],
+    extension_operations: set[str],
+) -> None:
+    required_standard = {
+        item.name
+        for item in imports
+        if item.kind == 0 and item.module == NAPI_MODULE and is_napi_name(item.name)
+    }
+    missing_standard = sorted(required_standard - standard_operations)
+    if missing_standard:
+        raise ValidationError(
+            "Wasmer provider does not implement Edge standard imports: "
+            + ", ".join(missing_standard[:12])
+        )
+    validate_provider_operations(imports, extension_operations)
+
+
 def validate_artifact(data: bytes) -> list[WasmImport]:
     imports = parse_imports(data)
     function_imports = [item for item in imports if item.kind == 0]
@@ -192,6 +262,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wasm", type=Path)
     parser.add_argument("--cmake-cache", type=Path)
+    parser.add_argument(
+        "--provider-napi-root",
+        type=Path,
+        help="N-API source tree used by the Wasmer provider",
+    )
     parser.add_argument("--print-imports", action="store_true")
     args = parser.parse_args()
     try:
@@ -199,6 +274,9 @@ def main() -> int:
             validate_cmake_cache(args.cmake_cache)
         data = args.wasm.read_bytes()
         imports = validate_artifact(data)
+        if args.provider_napi_root:
+            standard, extension = read_provider_operations(args.provider_napi_root)
+            validate_provider_imports(imports, standard, extension)
     except (OSError, ValidationError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

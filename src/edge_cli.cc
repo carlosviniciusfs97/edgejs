@@ -146,6 +146,9 @@ struct RuntimeInitOptions {
   bool validate_openssl_csprng = true;
 };
 
+std::string BuildSupportedV8Flags(
+    const std::vector<std::string>& raw_exec_argv);
+
 void ResetSignalHandlersLikeNode() {
 #if !defined(_WIN32)
   struct sigaction act;
@@ -225,13 +228,28 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
     EDGE_STARTUP_TRACE(startup_trace, "cli.env.openssl.skip");
   }
 
-  EdgeInstallNapiEmbedderHooks();
-  EDGE_STARTUP_TRACE(startup_trace, "cli.env.install-napi-hooks");
+  unofficial_napi_env_create_options create_options{};
+  EdgeInitializeNapiEnvCreateOptions(&create_options);
+  const std::string engine_flags = BuildSupportedV8Flags(
+      options.raw_exec_argv != nullptr ? *options.raw_exec_argv
+                                       : std::vector<std::string>{});
+  unofficial_napi_runtime_options runtime_options{};
+  runtime_options.size = sizeof(runtime_options);
+  runtime_options.version = UNOFFICIAL_NAPI_RUNTIME_OPTIONS_VERSION;
+  runtime_options.engine_flags = engine_flags.data();
+  runtime_options.engine_flags_length = engine_flags.size();
+  if (unofficial_napi_configure_runtime(&runtime_options) != napi_ok) {
+    if (error_out != nullptr) {
+      *error_out = "Failed to configure JavaScript runtime";
+    }
+    return 1;
+  }
 
   napi_env env = nullptr;
-  void* env_scope = nullptr;
-  const napi_status create_status = unofficial_napi_create_env(8, &env, &env_scope);
-  if (create_status != napi_ok || env == nullptr || env_scope == nullptr) {
+  unofficial_napi_env_owner env_owner = nullptr;
+  const napi_status create_status =
+      unofficial_napi_create_env(8, &create_options, &env, &env_owner);
+  if (create_status != napi_ok || env == nullptr || env_owner == nullptr) {
     if (error_out != nullptr) {
       *error_out = "Failed to initialize runtime environment";
     }
@@ -246,22 +264,13 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
                                        &startup_trace
 #endif
                                        )) {
-    (void)unofficial_napi_release_env(env_scope);
+    (void)unofficial_napi_release_env(env_owner, nullptr);
     if (error_out != nullptr) {
       *error_out = "Failed to attach runtime environment";
     }
     return 1;
   }
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.attach-runtime");
-
-  if (EdgeRuntimePlatformInstallHooks(env) != napi_ok) {
-    (void)unofficial_napi_release_env(env_scope);
-    if (error_out != nullptr) {
-      *error_out = "Failed to attach runtime platform hooks";
-    }
-    return 1;
-  }
-  EDGE_STARTUP_TRACE(startup_trace, "cli.env.install-runtime-hooks");
 
   const int exit_code = runner(env);
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.runner-returned");
@@ -273,9 +282,10 @@ int RunWithFreshEnv(const std::function<int(napi_env)>& runner,
   }
   EdgeEnvironmentRunCleanup(env);
   EdgeEnvironmentRunAtExitCallbacks(env);
+  EdgeEnvironmentDetach(env);
   edge_builtin_bytecode::FlushIfDirty();
   EDGE_STARTUP_TRACE(startup_trace, "cli.env.cleanup");
-  const napi_status release_status = unofficial_napi_release_env(env_scope);
+  const napi_status release_status = unofficial_napi_release_env(env_owner, nullptr);
   if (release_status != napi_ok) {
     if (error_out != nullptr) {
       *error_out = "Failed to release runtime environment";
@@ -393,7 +403,8 @@ bool IsSupportedV8ProfilerFlag(const std::string& token) {
          token.rfind("--prof-sampling-interval=", 0) == 0;
 }
 
-void ApplySupportedV8Flags(const std::vector<std::string>& raw_exec_argv) {
+std::string BuildSupportedV8Flags(
+    const std::vector<std::string>& raw_exec_argv) {
   std::string flags;
   bool has_js_source_phase_imports = false;
   bool has_no_js_source_phase_imports = false;
@@ -417,9 +428,7 @@ void ApplySupportedV8Flags(const std::vector<std::string>& raw_exec_argv) {
     if (!flags.empty()) flags.push_back(' ');
     flags += "--harmony-import-attributes";
   }
-  if (!flags.empty()) {
-    (void)unofficial_napi_set_flags_from_string(flags.c_str(), flags.size());
-  }
+  return flags;
 }
 
 bool OptionConsumesNextToken(const std::string& token) {
@@ -1602,9 +1611,6 @@ int EdgeRunCli(int argc, const char* const* argv, std::string* error_out) {
   EDGE_STARTUP_TRACE(startup_trace, "cli.build-effective-state");
 
   EdgeSetExecArgv(raw_exec_argv);
-  ApplySupportedV8Flags(raw_exec_argv);
-  EDGE_STARTUP_TRACE(startup_trace, "cli.apply-v8-flags");
-
   // Bytecode cache defaults: builtins ON, per-file user sidecars OFF.
   //   --no-bytecode-cache / --check  -> kill switch (builtins + sidecars off)
   //   --bytecode-cache / --precompile -> opt user sidecars in

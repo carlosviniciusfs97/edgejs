@@ -2,7 +2,7 @@
 
 | | | Remarks |
 | --- | --- | --- |
-| **Status** | ▶️ | Active: the clean main-based port must restore the provider-level Buffer ownership boundary without Edge-specific copy hooks. |
+| **Status** | ✅ | Resolved: pnpm install, synchronous child execution, and unmodified Next.js development startup pass in the browser. |
 | **Severity** | High | After the failure, subsequent shell commands such as `ls` produce no terminal output. |
 
 ## Failure
@@ -26,7 +26,109 @@ an arbitrary subrange of WebAssembly linear memory, so pooled Buffers require a
 mirror. The JS-backed N-API provider must synchronize that mirror whenever
 control crosses between native guest code and observable host JavaScript.
 
-## Current action plan
+## 2026-08-14 Next.js WebContainer follow-up
+
+The remaining Next.js startup failure was not caused by its SWC WebAssembly
+fallback. Next asks the active package manager for its registry during that
+fallback. pnpm 10 implements `config get registry` by invoking
+`npm config get registry`, but the Edge package exported both `pnpm` and `npm`
+through the same pnpm bundle. The result was an unbounded
+`pnpm -> npm-as-pnpm -> npm-as-pnpm` process chain.
+
+The Edge package now mounts the real npm 11.8.0 distribution pinned by the
+Node test dependency and exposes its npm CLI as the `npm` command. No Next.js
+or pnpm source is patched, and the WebContainer compatibility marker remains.
+
+Removing the recursion exposed two independent runtime defects:
+
+1. Edge's synchronous spawn runner used `uv_shutdown()` for a one-way child
+   stdin pipe. WASIX could return `UV_EACCES` after the child had completed,
+   incorrectly converting successful `execSync()` calls into spawn failures.
+   The provider-neutral implementation now closes the stdin handle after its
+   final write, which is the complete lifecycle for a unidirectional pipe.
+2. A JSPI worker could report itself idle when one blocking job completed even
+   if another suspended blocking job was still active. Worker busy state is now
+   transition-based on an active-job count. The generic browser SDK retains a
+   two-way default, while wasmer-sh explicitly advertises four-way guest
+   parallelism because its supported synchronous process chain can be
+   `node -> sh -> pnpm -> npm`.
+
+These changes are in native Edge code, the Edge package manifest, and Wasmer
+SDK scheduling. Edge files under `lib/` remain unchanged.
+
+The focused browser smoke, including `execSync("pnpm config get registry")`,
+passes. A clean Next 16.3.0 fixture using the ordinary script
+`WATCHPACK_POLLING=true next dev --webpack -H 0.0.0.0 -p 3000` also passes:
+
+```text
+shell ready:   7.7 s
+pnpm install: 10.8 s
+Next ready:    2.0 s
+preview:       7.8 s
+total:        28.3 s
+```
+
+`NEXT_TEST_WASM_DIR` is not used by the development script.
+
+The WebContainer module-resolution compatibility path is a WASIX build
+capability. Native code no longer discovers that capability by repeatedly
+reading the mutable `process.versions.webcontainer` property during every
+dynamic import. WASIX builds define `EDGE_WEBCONTAINER_COMPAT`; the JavaScript
+property remains the public capability marker, while native builds omit the
+compatibility fallback entirely.
+
+## 2026-08-14 Next.js production-build quiescence follow-up
+
+The ordinary production sequence initially reported a successful `next build`
+but produced no `.next/BUILD_ID`, so `next start` correctly rejected the
+incomplete output. SWC loaded and transformed successfully. Instrumentation
+localized the early exit to Next's output-file tracing phase, where
+`@vercel/nft` repeatedly awaits filesystem callbacks.
+
+The minimal runtime reproduction was independent of Next:
+
+```js
+const fs = require('fs');
+let completed = 0;
+(async () => {
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => {
+      fs.readlink('/workspace/next', () => {
+        completed++;
+        resolve();
+      });
+    });
+  }
+})();
+process.on('beforeExit', () => console.log(completed));
+```
+
+The browser runtime exited after 18 callbacks. Every individual filesystem
+operation and `process.nextTick` callback worked; the defect was Edge's outer
+event-loop quiescence test. A provider checkpoint could drain one Edge task,
+leaving the task queue empty at that instant. Edge then counted the turn as
+idle even though the drained callback's Promise continuation would schedule
+the next operation at the following host checkpoint. A chain longer than the
+fixed idle grace window therefore exited cleanly but prematurely.
+
+`CompleteProviderEventLoopCheckpoint` now reports two different facts:
+
+- whether Edge work remains pending after the drain; and
+- whether the checkpoint drained Edge work and therefore made progress.
+
+The outer loop resets its idle decision on either pending work or progress and
+continues until the combined provider/Edge queues reach a fixed point. This is
+provider-neutral Node event-loop behavior: there is no `__wasi__` branch,
+Next-specific keepalive, timer, or new N-API operation.
+
+Verification with a rebuilt exnref host-N-API WebC used the fixture's ordinary
+commands, without `NEXT_TEST_WASM_DIR` or an explicit SWC package. `pnpm build`
+completed with status 0 and wrote `.next/BUILD_ID`; `pnpm start` reached ready,
+opened port 3000, and rendered `Welcome to Next.js on Wasmer.` in the browser.
+The source-map warning for the generated host-N-API function URL is separate
+diagnostic noise and was not involved in the missing build.
+
+## Buffer ownership action plan (completed)
 
 1. Keep mirror coherence and mirror lifetime as separate mechanisms in the
    JS-backed N-API provider.

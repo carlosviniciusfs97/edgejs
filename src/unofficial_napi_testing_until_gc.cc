@@ -135,8 +135,8 @@ napi_value UnofficialNapiTestingUntilGc(napi_env env, napi_callback_info info) {
       remaining--;
     }
 
-    if (unofficial_napi_request_gc_for_testing(env) != napi_ok) {
-      napi_value err = MakeError(env, "unofficial_napi_request_gc_for_testing failed");
+    if (unofficial_napi_collect_garbage(env) != napi_ok) {
+      napi_value err = MakeError(env, "explicit full garbage collection failed");
       napi_reject_deferred(env, deferred, err);
       return promise;
     }

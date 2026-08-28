@@ -262,6 +262,7 @@ add_library(edge_runtime_core OBJECT EXCLUDE_FROM_ALL
 edge_apply_runtime_compile_surface(edge_runtime_core)
 if(EDGE_IS_WASIX_TARGET)
   target_compile_definitions(edge_runtime_core PRIVATE
+    EDGE_WEBCONTAINER_COMPAT=1
     EDGE_WEBCONTAINER_VERSION=\"${EDGE_WEBCONTAINER_VERSION}\"
   )
 endif()
@@ -274,6 +275,9 @@ add_library(edge_bindings OBJECT EXCLUDE_FROM_ALL
   ${EDGE_NATIVE_BINDING_SOURCES}
 )
 edge_apply_runtime_compile_surface(edge_bindings)
+if(EDGE_IS_WASIX_TARGET)
+  target_compile_definitions(edge_bindings PRIVATE EDGE_WEBCONTAINER_COMPAT=1)
+endif()
 
 add_library(edge_crypto OBJECT EXCLUDE_FROM_ALL
   ${EDGE_CRYPTO_SOURCES}

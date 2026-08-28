@@ -3,10 +3,17 @@
 #include "test_env.h"
 #include "edge_version.h"
 #include "edge_runtime.h"
+#include "internal_binding/binding_initializers.h"
 
 class Test5InternalBindingParityPhase03 : public FixtureTestBase {};
 
 namespace {
+
+napi_value TestDOMExceptionConstructor(napi_env env, napi_callback_info) {
+  napi_value undefined = nullptr;
+  napi_get_undefined(env, &undefined);
+  return undefined;
+}
 
 constexpr const char* kParityWaveScript = R"JS(
 const assert = require('assert');
@@ -68,9 +75,12 @@ asyncWrap.setupHooks({
 });
 asyncWrap.queueDestroyAsyncId(321);
 // Destroy hooks are dispatched through a deferred platform task, matching
-// Node's deferred queueDestroyAsyncId semantics. The drained result is
-// asserted by a follow-up script after the event loop goes idle.
+// Node's deferred queueDestroyAsyncId semantics. The JS immediate keeps the
+// loop alive and observes the platform task after it drains.
 globalThis.__edge_destroy_calls = destroyCalls;
+setImmediate(() => {
+  assert.deepStrictEqual(destroyCalls, [321]);
+});
 asyncWrap.setPromiseHooks(() => {}, undefined, () => {}, undefined);
 const promiseHooks = asyncWrap.getPromiseHooks();
 assert.ok(Array.isArray(promiseHooks));
@@ -197,6 +207,13 @@ if (callSites.length > 0) {
   assert.strictEqual(typeof callSites[0].scriptId, 'string');
   assert.ok(!String(callSites[0].scriptName).includes('node:util'));
 }
+function captureMaximumCallSites(depth) {
+  if (depth === 0) return utilBinding.getCallSites(200);
+  return captureMaximumCallSites(depth - 1);
+}
+const maximumCallSites = captureMaximumCallSites(220);
+assert.strictEqual(maximumCallSites.length, 200);
+assert.strictEqual(maximumCallSites[0].functionName, 'captureMaximumCallSites');
 
 const messagingBinding = internalBinding('messaging');
 assert.ok(messagingBinding && typeof messagingBinding === 'object');
@@ -226,11 +243,22 @@ assert.strictEqual(utilBinding.getProxyDetails(revocable.proxy, false), null);
 
 const errorsBinding = internalBinding('errors');
 errorsBinding.setSourceMapsEnabled(true);
-errorsBinding.setGetSourceMapErrorSource((file, line, column) =>
-  `mapped:${file}:${line}:${column}`);
-const syntheticError = { stack: 'Error: boom\n    at fn (/tmp/example.js:7:9)' };
+let sourceMapCallbackCalls = 0;
+errorsBinding.setGetSourceMapErrorSource(() => {
+  sourceMapCallbackCalls++;
+  return 'mapped';
+});
+const syntheticError = new Error('boom');
 const sourcePos = errorsBinding.getErrorSourcePositions(syntheticError);
-assert.strictEqual(sourcePos.sourceLine, 'mapped:/tmp/example.js:7:9');
+assert.match(sourcePos.sourceLine, /const syntheticError = new Error\('boom'\);/);
+assert.strictEqual(
+  sourcePos.scriptResourceName === undefined ||
+    typeof sourcePos.scriptResourceName === 'string',
+  true,
+);
+assert.strictEqual(sourcePos.lineNumber > 0, true);
+assert.strictEqual(sourcePos.startColumn >= 0, true);
+assert.strictEqual(sourceMapCallbackCalls, 0);
 errorsBinding.setSourceMapsEnabled(false);
 
 const traceEvents = internalBinding('trace_events');
@@ -287,7 +315,7 @@ const sandbox = {};
 const contextified = contextify.makeContext(sandbox, 'ctx', undefined, true, true, false, hdo);
 assert.strictEqual(contextified, sandbox);
 const contextSymbol = utilBinding.privateSymbols.contextify_context_private_symbol;
-assert.strictEqual(contextified[contextSymbol], contextified);
+assert.strictEqual(contextified[contextSymbol], true);
 assert.strictEqual(typeof contextify.watchdogHasPendingSigint(), 'boolean');
 const measureMemoryPromise = contextify.measureMemory(
   contextify.constants.measureMemory.mode.SUMMARY,
@@ -463,7 +491,7 @@ assert.ok(moduleWrap.getStatus() >= moduleWrapBinding.kInstantiated);
 const moduleEval = moduleWrap.evaluate();
 assert.ok(moduleEval && typeof moduleEval.then === 'function');
 const syntheticWrap = new moduleWrapBinding.ModuleWrap('vm:synthetic', undefined, ['x'], () => {});
-syntheticWrap.instantiateSync();
+syntheticWrap.instantiate();
 syntheticWrap.evaluateSync();
 syntheticWrap.setExport('x', 42);
 assert.strictEqual(syntheticWrap.getNamespace().x, 42);
@@ -694,7 +722,7 @@ assert.strictEqual(typeof udpHandle.getProviderType, 'function');
 assert.strictEqual(typeof udpSendWrap.getAsyncId, 'function');
 assert.strictEqual(typeof udpSendWrap.asyncReset, 'function');
 assert.strictEqual(typeof udpSendWrap.getProviderType, 'function');
-assert.strictEqual(udpSendWrap.getAsyncId(), -1);
+assert.strictEqual(udpSendWrap.getAsyncId() >= 0, true);
 const recvBufferContext = {};
 const sendBufferContext = {};
 const recvBufferSize = udpHandle.bufferSize(0, true, recvBufferContext);
@@ -731,14 +759,6 @@ assert.strictEqual(typeof jsUdpHandle.asyncReset, 'function');
 assert.strictEqual(typeof jsUdpHandle.getProviderType, 'function');
 
 globalThis.__edge_internal_binding_parity_ok = 1;
-)JS";
-
-constexpr const char* kParityDestroyDrainScript = R"JS(
-const assert = require('assert');
-
-assert.deepStrictEqual(globalThis.__edge_destroy_calls, [321]);
-
-globalThis.__edge_internal_binding_destroy_drain_ok = 1;
 )JS";
 
 constexpr const char* kSymbolBootstrapParityScript = R"JS(
@@ -803,11 +823,95 @@ globalThis.__edge_binding_cleanup_recreate_ok = 1;
 
 }  // namespace
 
+TEST_F(Test5InternalBindingParityPhase03, OwnNonIndexPropertiesFiltersIndicesInProvider) {
+  EnvScope s(runtime_.get());
+
+  constexpr const char* source = R"JS(
+const assert = require('assert');
+const utilBinding = internalBinding('util');
+const ownSymbol = Symbol('own-symbol');
+const ownSource = { 0: 'index', visible: true, [ownSymbol]: true };
+const ownNonIndex = utilBinding.getOwnNonIndexProperties(
+  ownSource,
+  utilBinding.constants.ALL_PROPERTIES,
+);
+assert.strictEqual(ownNonIndex.length, 2);
+assert.strictEqual(ownNonIndex.includes('visible'), true);
+assert.strictEqual(ownNonIndex.includes(ownSymbol), true);
+)JS";
+
+  std::string error;
+  EXPECT_EQ(EdgeRunScriptSource(s.env, source, &error), 0) << "error=" << error;
+  EXPECT_TRUE(error.empty()) << "error=" << error;
+}
+
+TEST_F(Test5InternalBindingParityPhase03,
+       LazyDOMExceptionPropertySurvivesBootstrapOrdering) {
+  EnvScope s(runtime_.get());
+
+  napi_value binding = internal_binding::InitMessaging(s.env);
+  ASSERT_NE(binding, nullptr);
+  napi_value expose = nullptr;
+  ASSERT_EQ(napi_get_named_property(
+                s.env, binding, "exposeLazyDOMExceptionProperty", &expose),
+            napi_ok);
+
+  napi_value target = nullptr;
+  ASSERT_EQ(napi_create_object(s.env, &target), napi_ok);
+  napi_value argv[1] = {target};
+  napi_value ignored = nullptr;
+  ASSERT_EQ(napi_call_function(s.env, binding, expose, 1, argv, &ignored),
+            napi_ok);
+
+  // The constructor is deliberately installed after the lazy property. This
+  // is the bootstrap order that previously left DOMException absent forever.
+  napi_value global = nullptr;
+  ASSERT_EQ(napi_get_global(s.env, &global), napi_ok);
+  napi_value constructor = nullptr;
+  ASSERT_EQ(napi_create_function(s.env,
+                                 "DOMException",
+                                 NAPI_AUTO_LENGTH,
+                                 TestDOMExceptionConstructor,
+                                 nullptr,
+                                 &constructor),
+            napi_ok);
+  ASSERT_EQ(
+      napi_set_named_property(s.env, global, "DOMException", constructor),
+      napi_ok);
+
+  napi_value resolved = nullptr;
+  ASSERT_EQ(napi_get_named_property(s.env, target, "DOMException", &resolved),
+            napi_ok);
+  bool equal = false;
+  ASSERT_EQ(napi_strict_equals(s.env, resolved, constructor, &equal), napi_ok);
+  EXPECT_TRUE(equal);
+
+  // The first successful read replaces the accessor with the final data
+  // property, so later reads no longer pay a bootstrap lookup.
+  napi_value replacement = nullptr;
+  ASSERT_EQ(napi_create_function(s.env,
+                                 "ReplacementDOMException",
+                                 NAPI_AUTO_LENGTH,
+                                 TestDOMExceptionConstructor,
+                                 nullptr,
+                                 &replacement),
+            napi_ok);
+  ASSERT_EQ(
+      napi_set_named_property(s.env, global, "DOMException", replacement),
+      napi_ok);
+  napi_value cached = nullptr;
+  ASSERT_EQ(napi_get_named_property(s.env, target, "DOMException", &cached),
+            napi_ok);
+  equal = false;
+  ASSERT_EQ(napi_strict_equals(s.env, cached, constructor, &equal), napi_ok);
+  EXPECT_TRUE(equal);
+}
+
 TEST_F(Test5InternalBindingParityPhase03, WaveOneAndTwoBindingsHaveCriticalParitySurface) {
   EnvScope s(runtime_.get());
 
   std::string error;
-  const int exit_code = EdgeRunScriptSource(s.env, kParityWaveScript, &error);
+  const int exit_code = EdgeRunScriptSourceWithLoop(s.env, kParityWaveScript, &error, true);
   EXPECT_EQ(exit_code, 0) << "error=" << error;
   EXPECT_TRUE(error.empty());
 
@@ -821,21 +925,18 @@ TEST_F(Test5InternalBindingParityPhase03, WaveOneAndTwoBindingsHaveCriticalParit
   ASSERT_EQ(napi_get_value_int32(s.env, ok_value, &ok), napi_ok);
   EXPECT_EQ(ok, 1);
 
-  // The first run drains the event loop, so deferred destroy hooks queued by
-  // queueDestroyAsyncId have fired by the time this second script asserts.
-  const int drain_exit_code = EdgeRunScriptSource(s.env, kParityDestroyDrainScript, &error);
-  EXPECT_EQ(drain_exit_code, 0) << "error=" << error;
-  EXPECT_TRUE(error.empty());
-
-  napi_value drain_ok_value = nullptr;
-  ASSERT_EQ(
-      napi_get_named_property(
-          s.env, global, "__edge_internal_binding_destroy_drain_ok", &drain_ok_value),
-      napi_ok);
-
-  int32_t drain_ok = 0;
-  ASSERT_EQ(napi_get_value_int32(s.env, drain_ok_value, &drain_ok), napi_ok);
-  EXPECT_EQ(drain_ok, 1);
+  // EdgeRunScriptSource drains the event loop before returning, so inspect the
+  // array directly without bootstrapping Node a second time in the same env.
+  napi_value destroy_calls = nullptr;
+  ASSERT_EQ(napi_get_named_property(s.env, global, "__edge_destroy_calls", &destroy_calls), napi_ok);
+  uint32_t destroy_call_count = 0;
+  ASSERT_EQ(napi_get_array_length(s.env, destroy_calls, &destroy_call_count), napi_ok);
+  ASSERT_EQ(destroy_call_count, 1u);
+  napi_value destroyed_async_id = nullptr;
+  ASSERT_EQ(napi_get_element(s.env, destroy_calls, 0, &destroyed_async_id), napi_ok);
+  double destroyed_async_id_number = 0;
+  ASSERT_EQ(napi_get_value_double(s.env, destroyed_async_id, &destroyed_async_id_number), napi_ok);
+  EXPECT_EQ(destroyed_async_id_number, 321);
 }
 
 TEST_F(Test5InternalBindingParityPhase03, BindingCachesCanBeDestroyedAndRecreatedAcrossEnvs) {

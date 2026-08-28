@@ -72,6 +72,7 @@
 #include "edge_spawn_sync.h"
 #include "internal_binding/helpers.h"
 #include "internal_binding/binding_initializers.h"
+#include "internal_binding/binding_module_wrap.h"
 
 #if defined(EDGE_NAPI_QUICKJS) && defined(EDGE_QUICKJS_WEBASSEMBLY)
 #include "webassembly/edge_wasm.h"
@@ -386,38 +387,32 @@ struct PendingExceptionInfo {
   std::string thrown_at;
 };
 
-std::string GetErrorSourceLine(napi_env env,
-                               napi_value exception,
-                               bool align_internal_assert = false) {
-  if (env == nullptr || exception == nullptr) {
-    return {};
-  }
-
-  napi_value stderr_line = nullptr;
-  if (unofficial_napi_get_error_source_line_for_stderr(env, exception, &stderr_line) == napi_ok &&
-      stderr_line != nullptr) {
-    std::string formatted = NapiValueToUtf8(env, stderr_line);
+std::string FormatErrorSourceLine(
+    napi_env env,
+    const unofficial_napi_error_metadata& metadata,
+    bool align_internal_assert = false) {
+  if (metadata.stderr_line != nullptr) {
+    std::string formatted = NapiValueToUtf8(env, metadata.stderr_line);
     if (!formatted.empty() && !align_internal_assert) {
       return formatted;
     }
   }
 
-  unofficial_napi_error_source_positions positions = {};
-  if (unofficial_napi_get_error_source_positions(env, exception, &positions) != napi_ok ||
-      positions.source_line == nullptr ||
-      positions.script_resource_name == nullptr ||
-      positions.line_number <= 0) {
+  if (metadata.source_line == nullptr ||
+      metadata.script_resource_name == nullptr ||
+      metadata.line_number <= 0) {
     return {};
   }
 
-  const std::string source_line = NapiValueToUtf8(env, positions.source_line);
-  const std::string script_resource_name = NapiValueToUtf8(env, positions.script_resource_name);
+  const std::string source_line = NapiValueToUtf8(env, metadata.source_line);
+  const std::string script_resource_name =
+      NapiValueToUtf8(env, metadata.script_resource_name);
   if (source_line.empty() || script_resource_name.empty()) {
     return {};
   }
 
-  int32_t start_column = positions.start_column;
-  int32_t end_column = positions.end_column;
+  int32_t start_column = metadata.start_column;
+  int32_t end_column = metadata.end_column;
   if (align_internal_assert && script_resource_name == "node:internal/assert") {
     start_column = 0;
     while (start_column < static_cast<int32_t>(source_line.size()) &&
@@ -432,9 +427,27 @@ std::string GetErrorSourceLine(napi_env env,
 
   std::string underline(static_cast<size_t>(start_column), ' ');
   underline.append(static_cast<size_t>(std::max<int32_t>(1, end_column - start_column)), '^');
-  return script_resource_name + ":" + std::to_string(positions.line_number) + "\n" +
+  return script_resource_name + ":" + std::to_string(metadata.line_number) + "\n" +
          source_line + "\n" +
          underline + "\n";
+}
+
+std::string GetErrorSourceLine(napi_env env,
+                               napi_value exception,
+                               bool align_internal_assert = false) {
+  if (env == nullptr || exception == nullptr) {
+    return {};
+  }
+
+  unofficial_napi_error_metadata metadata = {};
+  if (unofficial_napi_get_error_metadata(
+          env,
+          exception,
+          unofficial_napi_error_metadata_current,
+          &metadata) != napi_ok) {
+    return {};
+  }
+  return FormatErrorSourceLine(env, metadata, align_internal_assert);
 }
 
 std::string GetArrowMessageFromError(napi_env env, napi_value exception) {
@@ -519,18 +532,17 @@ bool TakePendingExceptionInfo(napi_env env,
     std::cerr << "[edge-exc] pending exception type=" << static_cast<int>(exception_type)
               << " value=" << exception_text << "\n";
   }
-  napi_value preserved_exception_line_value = nullptr;
-  napi_value preserved_thrown_at_value = nullptr;
-  if (unofficial_napi_take_preserved_error_formatting(
+  unofficial_napi_error_metadata preserved_metadata = {};
+  if (unofficial_napi_get_error_metadata(
           env,
           out->exception,
-          &preserved_exception_line_value,
-          &preserved_thrown_at_value) == napi_ok) {
-    if (preserved_exception_line_value != nullptr) {
-      out->exception_line = NapiValueToUtf8(env, preserved_exception_line_value);
+          unofficial_napi_error_metadata_take_preserved,
+          &preserved_metadata) == napi_ok) {
+    if (preserved_metadata.stderr_line != nullptr) {
+      out->exception_line = NapiValueToUtf8(env, preserved_metadata.stderr_line);
     }
-    if (preserved_thrown_at_value != nullptr) {
-      out->thrown_at = NapiValueToUtf8(env, preserved_thrown_at_value);
+    if (preserved_metadata.thrown_at != nullptr) {
+      out->thrown_at = NapiValueToUtf8(env, preserved_metadata.thrown_at);
     }
   }
 
@@ -542,28 +554,39 @@ bool TakePendingExceptionInfo(napi_env env,
         out->exception_line = prior_exception_line;
       }
       if (out->thrown_at.empty()) {
-        napi_value thrown_at_value = nullptr;
-        if (unofficial_napi_get_error_thrown_at(env, out->exception, &thrown_at_value) == napi_ok &&
-            thrown_at_value != nullptr) {
-          out->thrown_at = NapiValueToUtf8(env, thrown_at_value);
+        unofficial_napi_error_metadata metadata = {};
+        if (unofficial_napi_get_error_metadata(
+                env,
+                out->exception,
+                unofficial_napi_error_metadata_thrown_at_only,
+                &metadata) == napi_ok &&
+            metadata.thrown_at != nullptr) {
+          out->thrown_at = NapiValueToUtf8(env, metadata.thrown_at);
         }
       }
       return true;
     }
   }
 
+  unofficial_napi_error_metadata current_metadata = {};
+  bool has_current_metadata = false;
+  if (out->exception_line.empty() || out->thrown_at.empty()) {
+    has_current_metadata = unofficial_napi_get_error_metadata(
+                               env,
+                               out->exception,
+                               unofficial_napi_error_metadata_current,
+                               &current_metadata) == napi_ok;
+  }
   if (out->exception_line.empty()) {
     out->exception_line = GetArrowMessageFromError(env, out->exception);
   }
-  if (out->exception_line.empty()) {
-    out->exception_line = GetErrorSourceLine(env, out->exception);
+  if (out->exception_line.empty() && has_current_metadata) {
+    out->exception_line = FormatErrorSourceLine(env, current_metadata);
   }
-  if (out->thrown_at.empty()) {
-    napi_value thrown_at_value = nullptr;
-    if (unofficial_napi_get_error_thrown_at(env, out->exception, &thrown_at_value) == napi_ok &&
-        thrown_at_value != nullptr) {
-      out->thrown_at = NapiValueToUtf8(env, thrown_at_value);
-    }
+  if (out->thrown_at.empty() &&
+      has_current_metadata &&
+      current_metadata.thrown_at != nullptr) {
+    out->thrown_at = NapiValueToUtf8(env, current_metadata.thrown_at);
   }
   return true;
 }
@@ -653,10 +676,14 @@ std::string FormatUncaughtExceptionForStderr(napi_env env,
   if (EdgeExecArgvHasFlag("--trace-uncaught")) {
     std::string thrown_at = pending_thrown_at;
     if (thrown_at.empty()) {
-      napi_value thrown_at_value = nullptr;
-      if (unofficial_napi_get_error_thrown_at(env, exception, &thrown_at_value) == napi_ok &&
-          thrown_at_value != nullptr) {
-        thrown_at = NapiValueToUtf8(env, thrown_at_value);
+      unofficial_napi_error_metadata metadata = {};
+      if (unofficial_napi_get_error_metadata(
+              env,
+              exception,
+              unofficial_napi_error_metadata_thrown_at_only,
+              &metadata) == napi_ok &&
+          metadata.thrown_at != nullptr) {
+        thrown_at = NapiValueToUtf8(env, metadata.thrown_at);
       }
     }
     if (!thrown_at.empty()) {
@@ -1103,6 +1130,47 @@ bool ShouldAbortOnUncaughtException() {
          EdgeExecArgvHasFlag("--abort_on_uncaught_exception");
 }
 
+bool HasUncaughtExceptionCaptureCallback(napi_env env) {
+  if (env == nullptr) return false;
+  napi_value global = nullptr;
+  napi_value process_obj = nullptr;
+  napi_value has_capture_callback = nullptr;
+  napi_valuetype callback_type = napi_undefined;
+  if (napi_get_global(env, &global) != napi_ok || global == nullptr ||
+      napi_get_named_property(env, global, "process", &process_obj) != napi_ok ||
+      process_obj == nullptr ||
+      napi_get_named_property(env,
+                              process_obj,
+                              "hasUncaughtExceptionCaptureCallback",
+                              &has_capture_callback) != napi_ok ||
+      has_capture_callback == nullptr ||
+      napi_typeof(env, has_capture_callback, &callback_type) != napi_ok ||
+      callback_type != napi_function) {
+    return false;
+  }
+
+  napi_value result = nullptr;
+  if (napi_call_function(
+          env, process_obj, has_capture_callback, 0, nullptr, &result) != napi_ok ||
+      result == nullptr) {
+    bool pending = false;
+    if (napi_is_exception_pending(env, &pending) == napi_ok && pending) {
+      napi_value ignored = nullptr;
+      (void)napi_get_and_clear_last_exception(env, &ignored);
+    }
+    return false;
+  }
+  bool active = false;
+  return napi_get_value_bool(env, result, &active) == napi_ok && active;
+}
+
+bool ShouldAbortThisUncaughtException(napi_env env,
+                                      bool may_be_handled_by_domain = true) {
+  return ShouldAbortOnUncaughtException() &&
+         (!may_be_handled_by_domain || !HasActiveDomainErrorHandler(env)) &&
+         !HasUncaughtExceptionCaptureCallback(env);
+}
+
 std::string FormatFatalExceptionMessage(napi_env env,
                                         napi_value exception,
                                         const std::string& pending_exception_line = {},
@@ -1276,6 +1344,19 @@ bool DispatchUncaughtException(napi_env env,
       *fatal_exit_code_out = kExitCodeExceptionInFatalExceptionHandler;
     }
     if (handled_out != nullptr) *handled_out = false;
+    // A domain may intercept the original exception, but an exception thrown
+    // by its error handler is a new fatal exception. It cannot be handled by
+    // that same domain again. Apply the same abort policy while explicitly
+    // excluding the exhausted domain path.
+    const napi_value fatal_exception =
+        pending.has_exception && pending.exception != nullptr
+            ? pending.exception
+            : exception;
+    if (ShouldAbortThisUncaughtException(
+            env, /*may_be_handled_by_domain=*/false)) {
+      AbortOnUncaughtException(
+          env, fatal_exception, pending.exception_line, "");
+    }
     return true;
   }
 
@@ -1299,11 +1380,11 @@ bool DispatchUncaughtException(napi_env env,
 int HandleExtractedException(napi_env env,
                              napi_value exception,
                              std::string* error_out,
-                             const std::string& pending_exception_line = {},
-                             const std::string& pending_thrown_at = {}) {
-  const bool abort_on_uncaught = ShouldAbortOnUncaughtException();
-  if (abort_on_uncaught && !HasActiveDomainErrorHandler(env)) {
-    AbortOnUncaughtException(env, exception, pending_exception_line, pending_thrown_at);
+  const std::string& pending_exception_line = {},
+  const std::string& pending_thrown_at = {}) {
+  if (ShouldAbortThisUncaughtException(env)) {
+    AbortOnUncaughtException(
+        env, exception, pending_exception_line, pending_thrown_at);
   }
 
   bool handled = false;
@@ -1323,11 +1404,6 @@ int HandleExtractedException(napi_env env,
       std::cerr << "[edge-exc] handled async exception, continue loop\n";
     }
     return -1;
-  }
-
-  if (abort_on_uncaught) {
-    AbortOnUncaughtException(
-        env, effective_exception, effective_exception_line, effective_exception_thrown_at);
   }
 
   return FinalizeFatalException(
@@ -1366,33 +1442,13 @@ int HandlePendingExceptionAfterLoopStep(napi_env env, std::string* error_out) {
       env, pending.exception, error_out, pending.exception_line, pending.thrown_at);
 }
 
-// Mirrors Node's native tick dispatch by preferring the task_queue callback
-// registered through setTickCallback(), and falling back to process._tickCallback.
+// Mirrors Node's InternalCallbackScope by invoking the callback retained by
+// task_queue.setTickCallback() during bootstrap.
 napi_status DrainProcessTickCallback(napi_env env) {
-  edge::HandleScope scope(env);
-
-  bool called_task_queue_tick = false;
-  const napi_status task_queue_status = EdgeRunTaskQueueTickCallback(env, &called_task_queue_tick);
-  if (task_queue_status != napi_ok) {
-    return task_queue_status;
-  }
-  if (called_task_queue_tick) {
-    return napi_ok;
-  }
-
-  napi_value global = nullptr;
-  napi_value process = nullptr;
-  napi_value tick_cb = nullptr;
-  if (napi_get_global(env, &global) != napi_ok || global == nullptr) return napi_ok;
-  if (napi_get_named_property(env, global, "process", &process) != napi_ok || process == nullptr) return napi_ok;
-  if (napi_get_named_property(env, process, "_tickCallback", &tick_cb) != napi_ok || tick_cb == nullptr) {
-    return napi_ok;
-  }
-  napi_valuetype type = napi_undefined;
-  napi_typeof(env, tick_cb, &type);
-  if (type != napi_function) return napi_ok;
-  napi_value ignored = nullptr;
-  return napi_call_function(env, process, tick_cb, 0, nullptr, &ignored);
+  EdgeCallbackTrace(env, "tick.drain.begin");
+  const napi_status status = EdgeRunTaskQueueTickCallback(env);
+  EdgeCallbackTrace(env, "tick.drain.end", status, 1);
+  return status;
 }
 
 // The provider checkpoint owns engine microtasks and, for a host-JavaScript
@@ -1403,7 +1459,18 @@ napi_status DrainProcessTickCallback(napi_env env) {
 napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
                                                 bool has_runnable_work,
                                                 bool* has_pending_provider_work = nullptr,
-                                                bool* host_tasks_admitted = nullptr) {
+                                                bool* host_tasks_admitted = nullptr,
+                                                bool* has_pending_edge_work = nullptr,
+                                                bool* made_edge_progress = nullptr) {
+  if (has_pending_edge_work != nullptr) {
+    *has_pending_edge_work = false;
+  }
+  if (made_edge_progress != nullptr) {
+    *made_edge_progress = false;
+  }
+  EdgeCallbackTrace(env,
+                    "provider.checkpoint.begin",
+                    has_runnable_work ? 1 : 0);
   uint32_t checkpoint_state = unofficial_napi_event_loop_checkpoint_state_none;
   napi_status status =
       unofficial_napi_event_loop_checkpoint(
@@ -1412,6 +1479,10 @@ napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
           has_runnable_work,
           &checkpoint_state);
   if (status != napi_ok) return status;
+  EdgeCallbackTrace(env,
+                    "provider.checkpoint.end",
+                    status,
+                    checkpoint_state);
   if (has_pending_provider_work != nullptr) {
     *has_pending_provider_work =
         (checkpoint_state &
@@ -1429,7 +1500,17 @@ napi_status CompleteProviderEventLoopCheckpoint(napi_env env,
       (!has_tick_scheduled && !has_rejection_to_warn)) {
     return napi_ok;
   }
-  return DrainProcessTickCallback(env);
+  // A drain can settle a Promise even when it leaves no task-queue flags set.
+  // Report that progress separately from work which remains pending.
+  if (made_edge_progress != nullptr) {
+    *made_edge_progress = true;
+  }
+  const napi_status drain_status = DrainProcessTickCallback(env);
+  if (has_pending_edge_work != nullptr &&
+      EdgeGetTaskQueueFlags(env, &has_tick_scheduled, &has_rejection_to_warn)) {
+    *has_pending_edge_work = has_tick_scheduled || has_rejection_to_warn;
+  }
+  return drain_status;
 }
 
 bool IsPromisePending(napi_env env, napi_value promise) {
@@ -1643,9 +1724,13 @@ bool ApplyUnsettledTopLevelAwaitExitCodeIfNeeded(napi_env env) {
   napi_value module = GetEntryPointModuleFromUtilSymbol(env, global);
   if (module == nullptr) return false;
 
+  unofficial_napi_module module_handle =
+      internal_binding::GetModuleWrapHandle(env, module);
+  if (module_handle == nullptr) return false;
+
   bool settled = true;
   if (unofficial_napi_module_wrap_check_unsettled_top_level_await(
-          env, module, AreProcessWarningsEnabled(), &settled) != napi_ok) {
+          env, module_handle, AreProcessWarningsEnabled(), &settled) != napi_ok) {
     return false;
   }
   if (settled) return false;
@@ -1723,11 +1808,15 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
         loop != nullptr && uv_backend_timeout(loop) == 0;
     bool has_pending_provider_work = false;
     bool host_tasks_admitted = false;
+    bool has_pending_edge_work = false;
+    bool made_edge_progress = false;
     const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
         env,
         has_runnable_work,
         &has_pending_provider_work,
-        &host_tasks_admitted);
+        &host_tasks_admitted,
+        &has_pending_edge_work,
+        &made_edge_progress);
     if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider checkpoint while waiting for the top-level Promise";
@@ -1740,7 +1829,8 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
       return checkpoint_async_status;
     }
     const bool loop_alive = loop != nullptr && uv_loop_alive(loop) != 0;
-    if (!loop_alive && !has_pending_provider_work) {
+    if (!loop_alive && !has_pending_provider_work && !has_pending_edge_work &&
+        !made_edge_progress) {
       // A pending top-level Promise with no event-loop or provider work is an
       // unsettled TLA, not work that can make progress by spinning here.
       break;
@@ -1754,6 +1844,7 @@ int WaitForTopLevelPromiseToSettle(napi_env env, napi_value value, std::string* 
     if (!host_tasks_admitted &&
         !has_runnable_work &&
         !has_pending_provider_work &&
+        !has_pending_edge_work &&
         loop_alive) {
       (void)RunUvOnceWithDeadline(loop, remaining_ms);
     }
@@ -1942,32 +2033,51 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
         return 1;
       }
     }
+    const bool loop_was_alive = uv_loop_alive(loop) != 0;
     uv_metrics_t metrics_before{};
     (void)uv_metrics_info(loop, &metrics_before);
     // Start every turn nonblocking. The checkpoint reports whether it admitted
     // an asynchronous host task turn; otherwise Edge waits on libuv's native
     // event source below instead of polling it with scheduler sleeps.
-    uv_run(loop, UV_RUN_NOWAIT);
+    // An unreferenced libuv handle may still be active (notably the check
+    // handle that drains unref'ed setImmediate callbacks). Node does not enter
+    // another libuv turn solely for such a handle, so don't manufacture a turn
+    // after the last referenced handle has gone away.
+    if (loop_was_alive) {
+      uv_run(loop, UV_RUN_NOWAIT);
+    }
     if (IsEnvironmentExitRequested(env)) {
       break;
     }
     if (!EdgeWorkerEnvOwnsProcessState(env) && EdgeWorkerEnvStopRequested(env)) {
       break;
     }
+    int async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
+    if (async_status >= 0) {
+      return async_status;
+    }
     // Match Node's embedder loop shape: libuv callbacks and callback scopes
     // own nextTick draining; the loop turn itself only drains platform tasks.
     (void)EdgeRuntimePlatformDrainTasks(env);
+    async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
+    if (async_status >= 0) {
+      return async_status;
+    }
     uv_metrics_t metrics_after{};
     (void)uv_metrics_info(loop, &metrics_after);
     const bool has_runnable_work =
         metrics_after.events != metrics_before.events || uv_backend_timeout(loop) == 0;
     bool has_pending_provider_work = false;
     bool host_tasks_admitted = false;
+    bool has_pending_edge_work = false;
+    bool made_edge_progress = false;
     const napi_status checkpoint_status = CompleteProviderEventLoopCheckpoint(
         env,
         has_runnable_work,
         &has_pending_provider_work,
-        &host_tasks_admitted);
+        &host_tasks_admitted,
+        &has_pending_edge_work,
+        &made_edge_progress);
     if (checkpoint_status != napi_ok && checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
         *error_out = "Failed to complete the provider event-loop checkpoint";
@@ -1975,7 +2085,7 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       return 1;
     }
 
-    int async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
+    async_status = HandlePendingExceptionAfterLoopStep(env, error_out);
     if (async_status >= 0) {
       return async_status;
     }
@@ -1987,11 +2097,15 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       break;
     }
 
-    bool more = uv_loop_alive(loop) != 0 || has_pending_provider_work;
+    bool more = uv_loop_alive(loop) != 0 ||
+                has_pending_provider_work ||
+                has_pending_edge_work ||
+                made_edge_progress;
     if (more) {
       idle_drain_turns = 0;
       if (!host_tasks_admitted &&
-          !has_runnable_work) {
+          !has_runnable_work &&
+          !has_pending_edge_work) {
         if (uv_loop_alive(loop) != 0) {
           int64_t remaining_ms = 0;
           if (loop_timeout_ms > 0) {
@@ -2018,11 +2132,15 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       (void)EdgeRuntimePlatformDrainTasks(env);
       bool has_pending_idle_provider_work = false;
       bool idle_host_tasks_admitted = false;
+      bool has_pending_idle_edge_work = false;
+      bool made_idle_edge_progress = false;
       const napi_status idle_checkpoint_status = CompleteProviderEventLoopCheckpoint(
           env,
           false,
           &has_pending_idle_provider_work,
-          &idle_host_tasks_admitted);
+          &idle_host_tasks_admitted,
+          &has_pending_idle_edge_work,
+          &made_idle_edge_progress);
       if (idle_checkpoint_status != napi_ok &&
           idle_checkpoint_status != napi_pending_exception) {
         if (error_out != nullptr) {
@@ -2034,13 +2152,18 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       if (async_status >= 0) {
         return async_status;
       }
-      if (!idle_host_tasks_admitted) {
+      if (!idle_host_tasks_admitted &&
+          !has_pending_idle_edge_work &&
+          uv_loop_alive(loop) != 0) {
         // Native providers do not own a host task queue. Pace the grace
         // window with libuv itself so background platform work gets a real
         // scheduling interval without a CPU polling loop.
         (void)RunUvOnceWithDeadline(loop, 1);
       }
-      if (uv_loop_alive(loop) != 0 || has_pending_idle_provider_work) {
+      if (uv_loop_alive(loop) != 0 ||
+          has_pending_idle_provider_work ||
+          has_pending_idle_edge_work ||
+          made_idle_edge_progress) {
         idle_drain_turns = 0;
       }
       continue;
@@ -2052,10 +2175,15 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
     (void)EdgeRuntimePlatformDrainTasks(env);
 
     bool has_pending_before_exit_provider_work = false;
+    bool has_pending_before_exit_edge_work = false;
+    bool made_before_exit_edge_progress = false;
     const napi_status before_exit_checkpoint_status =
         CompleteProviderEventLoopCheckpoint(
             env, uv_backend_timeout(loop) == 0,
-            &has_pending_before_exit_provider_work);
+            &has_pending_before_exit_provider_work,
+            nullptr,
+            &has_pending_before_exit_edge_work,
+            &made_before_exit_edge_progress);
     if (before_exit_checkpoint_status != napi_ok &&
         before_exit_checkpoint_status != napi_pending_exception) {
       if (error_out != nullptr) {
@@ -2069,7 +2197,10 @@ int RunEventLoopUntilQuiescent(napi_env env, std::string* error_out) {
       return async_status;
     }
 
-    more = uv_loop_alive(loop) != 0 || has_pending_before_exit_provider_work;
+    more = uv_loop_alive(loop) != 0 ||
+           has_pending_before_exit_provider_work ||
+           has_pending_before_exit_edge_work ||
+           made_before_exit_edge_progress;
     if (!more) {
       break;
     }
@@ -2447,7 +2578,7 @@ bool ShouldEnableSharedArrayBufferPerContext() {
 }
 
 napi_value GlobalGcCallback(napi_env env, napi_callback_info /*info*/) {
-  if (unofficial_napi_request_gc_for_testing(env) != napi_ok) {
+  if (unofficial_napi_collect_garbage(env) != napi_ok) {
     napi_throw_error(env, nullptr, "Failed to run gc()");
     return nullptr;
   }
@@ -2750,12 +2881,6 @@ int RunScriptWithGlobals(napi_env env,
   auto should_abort_worker_bootstrap = [&]() -> bool {
     return !EdgeWorkerEnvOwnsProcessState(env) && EdgeWorkerEnvStopRequested(env);
   };
-  if (EdgeRuntimePlatformInstallHooks(env) != napi_ok) {
-    if (error_out != nullptr) {
-      *error_out = "Failed to attach runtime platform hooks";
-    }
-    return 1;
-  }
   if (should_abort_worker_bootstrap()) return 1;
   if (EdgeInitializeTimersHost(env) != napi_ok) {
     if (error_out != nullptr) {
@@ -3168,6 +3293,10 @@ int RunScriptWithGlobals(napi_env env,
   }
 
   napi_value result = nullptr;
+  // User entry execution is itself the outer native->JS callback boundary.
+  // Keep it open while the entry source runs so a nested napi_make_callback()
+  // cannot drain nextTick or microtasks in the middle of that source.
+  edge::CallbackScopeDepthGuard entry_callback_scope(EdgeEnvironmentGet(env));
   if (selected_main_builtin_id != nullptr && selected_main_builtin_id[0] != '\0') {
     if (EdgeExecuteBuiltin(env, selected_main_builtin_id, &result)) {
       status = napi_ok;
@@ -3193,6 +3322,7 @@ int RunScriptWithGlobals(napi_env env,
     }
     status = napi_run_script(env, script, &result);
   }
+  entry_callback_scope.Close();
   if (status == napi_ok) {
     napi_value wait_target = result;
     if (DebugExceptionsEnabled()) {
@@ -3356,12 +3486,13 @@ static napi_status EdgeMakeCallbackWithFlagsImpl(napi_env env,
                                                  int flags) {
   thread_local int detached_callback_scope_depth = 0;
   edge::Environment* environment = EdgeEnvironmentGet(env);
-  if (environment != nullptr) {
-    environment->IncrementAsyncCallbackScopeDepth();
-  } else {
+  edge::CallbackScopeDepthGuard callback_scope(environment);
+  if (environment == nullptr) {
     detached_callback_scope_depth++;
   }
+  EdgeCallbackTrace(env, "edge.callback.enter", flags);
   napi_status status = EdgeCallCallbackWithDomain(env, recv, callback, argc, argv, result);
+  EdgeCallbackTrace(env, "edge.callback.called", status);
 
   auto handle_pending_exception = [&](napi_status current_status) -> napi_status {
     bool has_pending = false;
@@ -3391,26 +3522,30 @@ static napi_status EdgeMakeCallbackWithFlagsImpl(napi_env env,
 
   const bool skip_task_queues = (flags & kEdgeMakeCallbackSkipTaskQueues) != 0;
   const size_t callback_scope_depth =
-      environment != nullptr ? environment->async_callback_scope_depth()
+      environment != nullptr ? callback_scope.depth()
                              : static_cast<size_t>(detached_callback_scope_depth);
   status = handle_pending_exception(status);
   if (status == napi_pending_exception) {
-    if (environment != nullptr) {
-      environment->DecrementAsyncCallbackScopeDepth();
-    } else {
+    if (environment == nullptr) {
       detached_callback_scope_depth--;
     }
     return status;
-  } else if (status == napi_ok && callback_scope_depth == 1 && !skip_task_queues) {
-    status = EdgeRunCallbackScopeCheckpoint(env);
-    status = handle_pending_exception(status);
   }
 
-  if (environment != nullptr) {
-    environment->DecrementAsyncCallbackScopeDepth();
-  } else {
+  callback_scope.Close();
+  if (environment == nullptr) {
     detached_callback_scope_depth--;
   }
+  // Node closes the async context before the outer callback-scope checkpoint.
+  // Use the same depth for Edge callbacks and the public callback-scope APIs so
+  // nested native->JS entries produce exactly one checkpoint at the boundary.
+  if (status == napi_ok && callback_scope_depth == 1 && !skip_task_queues) {
+    EdgeCallbackTrace(env, "edge.callback.checkpoint.begin");
+    status = EdgeRunCallbackScopeCheckpoint(env);
+    EdgeCallbackTrace(env, "edge.callback.checkpoint.end", status);
+    status = handle_pending_exception(status);
+  }
+  EdgeCallbackTrace(env, "edge.callback.exit", status);
   return status;
 }
 
@@ -3500,6 +3635,7 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
     return napi_invalid_arg;
   }
 
+  EdgeCallbackTrace(env, "scope.checkpoint.begin");
   edge::HandleScope scope(env);
   if (!scope.is_open()) {
     return scope.status();
@@ -3523,11 +3659,17 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
   // task-queue work appeared as a result. Before task_queue is initialized,
   // fall back to running the microtask checkpoint only.
   if (!have_task_queue_flags || !has_tick_scheduled) {
+    uint32_t checkpoint_state = unofficial_napi_event_loop_checkpoint_state_none;
     napi_status status = unofficial_napi_event_loop_checkpoint(
-        env, unofficial_napi_event_loop_checkpoint_microtasks, true, nullptr);
+        env,
+        unofficial_napi_event_loop_checkpoint_microtasks,
+        false,
+        &checkpoint_state);
     if (status != napi_ok) {
+      EdgeCallbackTrace(env, "scope.microtasks.end", status, checkpoint_state);
       return status;
     }
+    EdgeCallbackTrace(env, "scope.microtasks.end", status, checkpoint_state);
     if (napi_is_exception_pending(env, &has_pending) != napi_ok) {
       return napi_generic_failure;
     }
@@ -3535,6 +3677,7 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
       return napi_pending_exception;
     }
     if (!EdgeGetTaskQueueFlags(env, &has_tick_scheduled, &has_rejection_to_warn)) {
+      EdgeCallbackTrace(env, "scope.checkpoint.end", napi_ok, 0);
       return napi_ok;
     }
     if (!has_tick_scheduled && !has_rejection_to_warn) {
@@ -3542,7 +3685,9 @@ napi_status EdgeRunCallbackScopeCheckpoint(napi_env env) {
     }
   }
 
-  return DrainProcessTickCallback(env);
+  const napi_status status = DrainProcessTickCallback(env);
+  EdgeCallbackTrace(env, "scope.checkpoint.end", status, 1);
+  return status;
 }
 
 bool EdgeHandlePendingExceptionNow(napi_env env, bool* handled_out) {
@@ -3566,6 +3711,11 @@ bool EdgeHandlePendingExceptionNow(napi_env env, bool* handled_out) {
   PendingExceptionInfo pending = {};
   if (!TakePendingExceptionInfo(env, &pending) || !pending.has_exception || pending.exception == nullptr) {
     return false;
+  }
+
+  if (ShouldAbortThisUncaughtException(env)) {
+    AbortOnUncaughtException(
+        env, pending.exception, pending.exception_line, pending.thrown_at);
   }
 
   bool handled = false;
@@ -3595,8 +3745,7 @@ bool EdgeFinalizeFatalExceptionNow(napi_env env,
                                    const std::string& thrown_at) {
   if (env == nullptr || exception == nullptr) return false;
 
-  const bool abort_on_uncaught = ShouldAbortOnUncaughtException();
-  if (abort_on_uncaught && !HasActiveDomainErrorHandler(env)) {
+  if (ShouldAbortThisUncaughtException(env)) {
     AbortOnUncaughtException(env, exception, exception_line, thrown_at);
   }
 

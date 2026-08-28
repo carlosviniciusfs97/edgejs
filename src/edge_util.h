@@ -15,6 +15,10 @@ napi_value EdgeCreateSharedInt32Array(napi_env env,
                                       int32_t** data_out);
 napi_value EdgeCreatePrivateSymbolsObject(napi_env env);
 napi_value EdgeCreatePerIsolateSymbolsObject(napi_env env);
+napi_status EdgeGetOwnNonIndexProperties(napi_env env,
+                                         napi_value value,
+                                         uint32_t filter_bits,
+                                         napi_value* result_out);
 napi_value EdgeInstallUtilBinding(napi_env env);
 napi_value EdgeGetTypesBinding(napi_env env);
 

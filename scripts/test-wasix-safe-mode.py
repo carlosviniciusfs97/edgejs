@@ -139,14 +139,15 @@ def build_cases(host: str, include_network: bool) -> list[Case]:
         # killing the instance with exit 27 before node::SignalExit could run.
         #
         # Without a JS listener the signal must instead reach SignalExit, which
-        # re-raises so the default disposition terminates the process. Note
-        # this only reproduces under WASIX: on native ABIs the surplus
+        # re-raises so the default disposition terminates the process. Wasmer
+        # reports that termination using the conventional 128 + signal status.
+        # Note this only reproduces under WASIX: on native ABIs the surplus
         # arguments are harmless, so the equivalent native test cannot catch it.
         Case(
             name="SIGINT without a JS listener terminates",
             script="process.kill(process.pid, 'SIGINT'); setTimeout(() => console.log('NOT REACHED'), 500);",
-            expected_returncode=127,
-            expected_stderr_contains="termination signal",
+            expected_returncode=128 + 2,
+            expected_stderr_contains="ExitCode::130",
         ),
         Case(
             name="SIGTERM reaches a JS listener",

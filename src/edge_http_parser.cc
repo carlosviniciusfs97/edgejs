@@ -75,6 +75,7 @@ struct Parser {
   napi_ref wrapper_ref = nullptr;
   EdgeStreamBase* consumed_stream = nullptr;
   EdgeStreamListener consumed_listener{};
+  bool consumed_wrapper_ref_held = false;
   llhttp_t parser{};
   llhttp_settings_t settings{};
   std::vector<std::string> fields;
@@ -258,6 +259,11 @@ void ParserConsumedListenerOnClose(EdgeStreamListener* listener) {
   if (p == nullptr) return;
   p->consumed_stream = nullptr;
   listener->previous = nullptr;
+  if (p->consumed_wrapper_ref_held) {
+    uint32_t ignored = 0;
+    (void)napi_reference_unref(p->env, p->wrapper_ref, &ignored);
+    p->consumed_wrapper_ref_held = false;
+  }
 }
 
 void ClearConsumedStreamBinding(Parser* p) {
@@ -265,6 +271,11 @@ void ClearConsumedStreamBinding(Parser* p) {
   (void)EdgeStreamBaseRemoveListener(p->consumed_stream, &p->consumed_listener);
   p->consumed_stream = nullptr;
   p->consumed_listener.previous = nullptr;
+  if (p->consumed_wrapper_ref_held) {
+    uint32_t ignored = 0;
+    (void)napi_reference_unref(p->env, p->wrapper_ref, &ignored);
+    p->consumed_wrapper_ref_held = false;
+  }
 }
 
 void ParserDetachFromConnectionsList(Parser* p) {
@@ -1067,19 +1078,50 @@ napi_value ParserConsume(napi_env env, napi_callback_info info) {
       }
       if (EdgeStreamBasePushListener(stream, &p->consumed_listener)) {
         p->consumed_stream = stream;
+        uint32_t ignored = 0;
+        if (napi_reference_ref(env, p->wrapper_ref, &ignored) != napi_ok) {
+          ClearConsumedStreamBinding(p);
+          napi_throw_error(env,
+                           "ERR_HTTP_PARSER_CONSUME",
+                           "Failed to retain the HTTP parser while consuming a stream");
+          return nullptr;
+        }
+        p->consumed_wrapper_ref_held = true;
+        // consume() transfers read dispatch to the parser listener. Ensure the
+        // stream is actually reading as part of that transaction; a bare
+        // net.Socket remains paused until a consumer starts it.
+        const int read_status = EdgeStreamBaseReadStart(stream);
+        // A parser can be attached while connect() is still pending. The
+        // socket will start reading on connection, so ENOTCONN must not undo
+        // the listener transfer.
+        if (read_status != 0 && read_status != UV_ENOTCONN) {
+          ClearConsumedStreamBinding(p);
+          napi_throw_error(env,
+                           uv_err_name(read_status),
+                           uv_strerror(read_status));
+          return nullptr;
+        }
         if (TraceNetEnabled()) {
           std::fprintf(stderr,
-                       "EDGE_TRACE_NET http_parser consume parser=%p stream=%p listener=%p ok=1\n",
+                       "EDGE_TRACE_NET http_parser consume parser=%p stream=%p listener=%p ok=%d read_status=%d\n",
+                       static_cast<void*>(p),
+                       static_cast<void*>(stream),
+                       static_cast<void*>(&p->consumed_listener),
+                       read_status == 0 || read_status == UV_ENOTCONN,
+                       read_status);
+        }
+      } else {
+        if (TraceNetEnabled()) {
+          std::fprintf(stderr,
+                       "EDGE_TRACE_NET http_parser consume parser=%p stream=%p listener=%p ok=0\n",
                        static_cast<void*>(p),
                        static_cast<void*>(stream),
                        static_cast<void*>(&p->consumed_listener));
         }
-      } else if (TraceNetEnabled()) {
-        std::fprintf(stderr,
-                     "EDGE_TRACE_NET http_parser consume parser=%p stream=%p listener=%p ok=0\n",
-                     static_cast<void*>(p),
-                     static_cast<void*>(stream),
-                     static_cast<void*>(&p->consumed_listener));
+        napi_throw_error(env,
+                         "ERR_HTTP_PARSER_CONSUME",
+                         "The stream already has an active read listener");
+        return nullptr;
       }
     }
   }

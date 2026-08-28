@@ -28,6 +28,9 @@ JavaScript engine through its WebAssembly/wasm-bindgen integration.
 - [006_unofficial_napi_surface_audit.md](006_unofficial_napi_surface_audit.md):
   the reduction of the unofficial extension surface into typed, stronger
   provider capabilities.
+- [007_pr_review_checkpoints.md](007_pr_review_checkpoints.md): the PR-review
+  execution plan, beginning with fixed wire layouts, exact ownership, and
+  process/runtime lifetime in Checkpoint A.
 - [`SECURITY-HOST-JS-NAPI.md`](../../../../SECURITY-HOST-JS-NAPI.md): deliberately
   deferred security concerns and later exit criteria.
 

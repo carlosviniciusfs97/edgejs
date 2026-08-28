@@ -407,15 +407,17 @@ napi_status EnqueueForegroundTaskFromEngine(void* target,
                                            unofficial_napi_foreground_task_cleanup cleanup,
                                            uint64_t delay_millis);
 
-napi_status InstallForegroundEnqueueHook(napi_env env) {
-  if (env == nullptr) return napi_invalid_arg;
+napi_status PrepareForegroundEnqueueHook(napi_env env,
+                                         unofficial_napi_env_hooks* hooks) {
+  if (env == nullptr || hooks == nullptr) return napi_invalid_arg;
   PlatformTaskState* state = &EnsureState(env);
   if (state == nullptr || state->cleanup_started.load(std::memory_order_acquire)) {
     return napi_generic_failure;
   }
   if (state == nullptr || !EnsureForegroundHandles(state)) return napi_generic_failure;
-  return unofficial_napi_set_enqueue_foreground_task_callback(
-      env, EnqueueForegroundTaskFromEngine, state);
+  hooks->data = state;
+  hooks->enqueue_foreground_task_callback = EnqueueForegroundTaskFromEngine;
+  return napi_ok;
 }
 
 void OnPlatformEnvCleanup(void* arg) {
@@ -425,7 +427,6 @@ void OnPlatformEnvCleanup(void* arg) {
   AssertOwningThread(state, "OnPlatformEnvCleanup");
 
   state->cleanup_started.store(true, std::memory_order_release);
-  (void)unofficial_napi_set_enqueue_foreground_task_callback(env, nullptr, nullptr);
   state->foreground_async_refs = 0;
   while (!state->immediate_tasks.empty()) {
     PlatformTask task = std::move(state->immediate_tasks.front());
@@ -537,8 +538,10 @@ napi_status EnqueueForegroundTaskFromEngine(void* target,
 
 }  // namespace
 
-napi_status EdgeRuntimePlatformInstallHooks(napi_env env) {
-  return InstallForegroundEnqueueHook(env);
+napi_status EdgeRuntimePlatformPrepareEnvHooks(
+    napi_env env,
+    unofficial_napi_env_hooks* hooks) {
+  return PrepareForegroundEnqueueHook(env, hooks);
 }
 
 napi_status EdgeRuntimePlatformEnqueueForegroundTask(napi_env env,

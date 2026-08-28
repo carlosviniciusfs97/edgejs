@@ -12,7 +12,12 @@
 
 class V8Runtime {
  public:
-  V8Runtime() = default;
+  V8Runtime() {
+    unofficial_napi_runtime_options options{};
+    options.size = sizeof(options);
+    options.version = UNOFFICIAL_NAPI_RUNTIME_OPTIONS_VERSION;
+    EXPECT_EQ(unofficial_napi_configure_runtime(&options), napi_ok);
+  }
   ~V8Runtime() = default;
 };
 
@@ -33,11 +38,10 @@ struct EnvScope {
 
   explicit EnvScope(V8Runtime* runtime) {
     (void)runtime;
-    EXPECT_EQ(unofficial_napi_create_env(8, &env, &scope), napi_ok);
+    EXPECT_EQ(unofficial_napi_create_env(8, nullptr, &env, &owner), napi_ok);
     EXPECT_NE(env, nullptr);
     if (env != nullptr) {
       EXPECT_TRUE(EdgeAttachEnvironmentForRuntime(env));
-      EXPECT_EQ(EdgeRuntimePlatformInstallHooks(env), napi_ok);
       EXPECT_EQ(EdgeInitializeTimersHost(env), napi_ok);
     }
     isolate = std::make_unique<IsolateShim>(env);
@@ -46,14 +50,19 @@ struct EnvScope {
   ~EnvScope() {
     isolate.reset();
     if (env != nullptr) {
-      EXPECT_EQ(unofficial_napi_release_env(scope), napi_ok);
+      // Edge owns its cleanup lifecycle. Drain and detach Edge resources
+      // before asking the provider to destroy the JavaScript environment.
+      EdgeEnvironmentRunCleanup(env);
+      EdgeEnvironmentRunAtExitCallbacks(env);
+      EdgeEnvironmentDetach(env);
+      EXPECT_EQ(unofficial_napi_release_env(owner, nullptr), napi_ok);
       env = nullptr;
-      scope = nullptr;
+      owner = nullptr;
     }
   }
 
   std::unique_ptr<IsolateShim> isolate;
-  void* scope = nullptr;
+  unofficial_napi_env_owner owner = nullptr;
   napi_env env = nullptr;
 };
 

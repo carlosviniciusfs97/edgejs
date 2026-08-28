@@ -1,6 +1,8 @@
 #ifndef EDGE_MODULE_LOADER_H_
 #define EDGE_MODULE_LOADER_H_
 
+#include <string>
+
 #include "node_api.h"
 #include "edge_task_queue.h"
 
@@ -22,5 +24,8 @@ void EdgeFinalizeModuleLoaderEnv(napi_env env);
 bool EdgeRequireBuiltin(napi_env env, const char* id, napi_value* out);
 napi_value EdgeGetBuiltinInternalBinding(napi_env env);
 bool EdgeExecuteBuiltin(napi_env env, const char* id, napi_value* out);
+bool EdgeResolveModulePathForImport(const std::string& specifier,
+                                    const std::string& base_dir,
+                                    std::string* resolved_path_out);
 
 #endif  // EDGE_MODULE_LOADER_H_

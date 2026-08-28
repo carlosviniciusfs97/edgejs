@@ -25,6 +25,7 @@
 #include "edge_module_loader.h"
 #include "edge_process_wrap.h"
 #include "edge_runtime.h"
+#include "uv.h"
 
 namespace {
 void BestEffortKillLeakedFixtureChildren();
@@ -34,6 +35,16 @@ class Test3NodeDropinSubsetPhase02 : public FixtureTestBase {
  protected:
   static void TearDownTestSuite() { BestEffortKillLeakedFixtureChildren(); }
 };
+
+#if defined(__wasi__)
+TEST_F(Test3NodeDropinSubsetPhase02,
+       WasixFreeMemoryAccountsForCurrentLinearMemory) {
+  const uint64_t total = uv_get_total_memory();
+  const uint64_t free = uv_get_free_memory();
+  EXPECT_GT(total, 0u);
+  EXPECT_LT(free, total);
+}
+#endif
 
 namespace {
 
@@ -138,56 +149,80 @@ std::string_view TrimLeadingAsciiWhitespace(std::string_view s) {
   return s;
 }
 
+bool IsDirectiveStatement(std::string_view line) {
+  line = TrimLeadingAsciiWhitespace(line);
+  if (line.size() < 2 || (line.front() != '\'' && line.front() != '"')) {
+    return false;
+  }
+  const char quote = line.front();
+  bool escaped = false;
+  size_t end = 1;
+  for (; end < line.size(); ++end) {
+    const char ch = line[end];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch == quote) break;
+  }
+  if (end == line.size()) return false;
+  std::string_view tail = TrimLeadingAsciiWhitespace(line.substr(end + 1));
+  if (!tail.empty() && tail.front() == ';') {
+    tail = TrimLeadingAsciiWhitespace(tail.substr(1));
+  }
+  return tail.empty() || StartsWith(tail, "//");
+}
+
 std::vector<std::string> ParseLeadingFlagsHeader(const std::filesystem::path& script_path) {
   std::ifstream in(script_path);
   if (!in.is_open()) {
     return {};
   }
 
-  bool in_block_comment = false;
   std::string line;
+  bool in_block_comment = false;
+  bool first_line = true;
+  // Metadata may follow an arbitrarily long license/comment preamble and
+  // directive prologue. Scan that grammar-defined prefix, stopping at the
+  // first executable statement instead of relying on a line-count heuristic.
   while (std::getline(in, line)) {
     std::string_view view(line);
     if (!view.empty() && view.back() == '\r') {
       view.remove_suffix(1);
     }
-    view = TrimLeadingAsciiWhitespace(view);
-    if (view.empty()) continue;
+    if (first_line && StartsWith(view, "#!")) {
+      first_line = false;
+      continue;
+    }
+    first_line = false;
 
-    if (in_block_comment) {
-      const size_t end = view.find("*/");
-      if (end == std::string_view::npos) continue;
-      in_block_comment = false;
-      view.remove_prefix(end + 2);
+    while (true) {
       view = TrimLeadingAsciiWhitespace(view);
-      if (view.empty()) continue;
-    }
-
-    if (StartsWith(view, "// Flags:")) {
-      view.remove_prefix(std::string_view("// Flags:").size());
-      return SplitAsciiWhitespace(view);
-    }
-    if (StartsWith(view, "//")) continue;
-    if (StartsWith(view, "#!")) continue;
-
-    if (StartsWith(view, "/*")) {
-      const size_t end = view.find("*/");
-      if (end == std::string_view::npos) {
-        in_block_comment = true;
+      if (in_block_comment) {
+        const size_t comment_end = view.find("*/");
+        if (comment_end == std::string_view::npos) break;
+        view.remove_prefix(comment_end + 2);
+        in_block_comment = false;
         continue;
       }
-      view.remove_prefix(end + 2);
-      view = TrimLeadingAsciiWhitespace(view);
-      if (view.empty()) continue;
+      if (view.empty()) break;
       if (StartsWith(view, "// Flags:")) {
         view.remove_prefix(std::string_view("// Flags:").size());
         return SplitAsciiWhitespace(view);
       }
-      if (StartsWith(view, "//")) continue;
+      if (StartsWith(view, "//")) break;
+      if (StartsWith(view, "/*")) {
+        view.remove_prefix(2);
+        in_block_comment = true;
+        continue;
+      }
+      if (IsDirectiveStatement(view)) break;
       return {};
     }
-
-    return {};
   }
   return {};
 }
@@ -353,12 +388,23 @@ int RunRawNodeTestScript(napi_env env,
   }
   const std::string node_test_dir = node_test_root_path.string();
   const std::string test_serial_id = MakeTestSerialId(script_rel);
+  const char* inherited_term = std::getenv("TERM");
+  const bool normalize_repl_term =
+      StartsWith(script_rel, "parallel/test-repl-") &&
+      (inherited_term == nullptr || inherited_term[0] == '\0' ||
+       std::strcmp(inherited_term, "dumb") == 0);
   setenv("NODE_TEST_DIR", node_test_dir.c_str(), 1);
   setenv("NODE_TEST_KNOWN_GLOBALS", "0", 1);
   setenv("TEST_SERIAL_ID", test_serial_id.c_str(), 1);
   setenv("TEST_THREAD_ID", test_serial_id.c_str(), 1);
   setenv("TEST_PARALLEL", is_parallel_suite ? "1" : "0", 1);
   setenv("EDGE_FORCE_STDIO_TTY", is_pseudo_tty_suite ? "1" : "0", 1);
+  if (normalize_repl_term) {
+    // Node's REPL tests exercise readline's terminal key parser. CTest sets
+    // TERM=dumb in non-interactive shells, which intentionally selects a
+    // different readline implementation where write("...\n") is literal.
+    setenv("TERM", "xterm-256color", 1);
+  }
   {
     napi_value global = nullptr;
     napi_value process_v = nullptr;
@@ -387,6 +433,14 @@ int RunRawNodeTestScript(napi_env env,
       napi_set_named_property(env, env_v, "TEST_SERIAL_ID", serial_id_v);
       napi_set_named_property(env, env_v, "TEST_THREAD_ID", thread_id_v);
       napi_set_named_property(env, env_v, "TEST_PARALLEL", parallel_v);
+      if (normalize_repl_term) {
+        napi_value term_v = nullptr;
+        if (napi_create_string_utf8(
+                env, "xterm-256color", NAPI_AUTO_LENGTH, &term_v) == napi_ok &&
+            term_v != nullptr) {
+          napi_set_named_property(env, env_v, "TERM", term_v);
+        }
+      }
     }
   }
   if (keep_event_loop_alive) {
@@ -583,9 +637,13 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
       _exit(70);
     }
 
-    void* scope = nullptr;
+    unofficial_napi_env_owner owner = nullptr;
     napi_env env = nullptr;
-    if (unofficial_napi_create_env(8, &env, &scope) != napi_ok || env == nullptr) {
+    if (unofficial_napi_create_env(8, nullptr, &env, &owner) != napi_ok || env == nullptr) {
+      _exit(70);
+    }
+    if (!EdgeAttachEnvironmentForRuntime(env)) {
+      (void)unofficial_napi_release_env(owner, nullptr);
       _exit(70);
     }
     std::string child_error;
@@ -599,8 +657,11 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
       (void)write(STDERR_FILENO, child_error.c_str(), child_error.size());
       (void)write(STDERR_FILENO, "\n", 1);
     }
-    if (scope != nullptr) {
-      (void)unofficial_napi_release_env(scope);
+    if (owner != nullptr) {
+      EdgeEnvironmentRunCleanup(env);
+      EdgeEnvironmentRunAtExitCallbacks(env);
+      EdgeEnvironmentDetach(env);
+      (void)unofficial_napi_release_env(owner, nullptr);
     }
     _exit(child_exit);
   }
@@ -659,6 +720,45 @@ int RunRawNodeTestScriptInSubprocess(const char* node_test_relative_path,
 }
 
 }  // namespace
+
+TEST_F(Test3NodeDropinSubsetPhase02, FlagsMetadataScansCompleteCommentAndDirectivePrefix) {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("edge-flags-prefix-" + std::to_string(CurrentProcessId()) + ".js");
+  {
+    std::ofstream out(path);
+    ASSERT_TRUE(out.is_open());
+    out << "/*\n";
+    for (size_t i = 0; i < 64; ++i) {
+      out << " * license line " << i << "\n";
+    }
+    out << " */\n'use strict';\n// another metadata comment\n";
+    out << "// Flags: --trace-uncaught --no-warnings\n";
+    out << "require('node:assert');\n";
+  }
+  const std::vector<std::string> flags = ParseLeadingFlagsHeader(path);
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
+  ASSERT_EQ(flags.size(), 2u);
+  EXPECT_EQ(flags[0], "--trace-uncaught");
+  EXPECT_EQ(flags[1], "--no-warnings");
+}
+
+TEST_F(Test3NodeDropinSubsetPhase02, FlagsMetadataStopsAtExecutableCode) {
+  const std::filesystem::path path =
+      std::filesystem::temp_directory_path() /
+      ("edge-flags-code-" + std::to_string(CurrentProcessId()) + ".js");
+  {
+    std::ofstream out(path);
+    ASSERT_TRUE(out.is_open());
+    out << "const alreadyRunning = true;\n";
+    out << "// Flags: --expose-gc\n";
+  }
+  const std::vector<std::string> flags = ParseLeadingFlagsHeader(path);
+  std::error_code ignored;
+  std::filesystem::remove(path, ignored);
+  EXPECT_TRUE(flags.empty());
+}
 
 TEST_F(Test3NodeDropinSubsetPhase02, NodeAssertSubsetTest) {
   EnvScope s(runtime_.get());
@@ -1248,9 +1348,17 @@ DEFINE_RAW_NODE_TEST(RawQuerystringMulticharSeparatorFromNodeTest, "test-queryst
 DEFINE_RAW_NODE_TEST(RawQuerystringMaxKeysNonFiniteFromNodeTest, "test-querystring-maxKeys-non-finite.js")
 DEFINE_RAW_NODE_TEST(RawQuerystringEscapeFromNodeTest, "test-querystring-escape.js")
 
+// Exercises repeated receive pause/resume cycles. The native parser must
+// consume these iteratively so peer-driven backpressure cannot grow the C++
+// stack.
+DEFINE_RAW_NODE_TEST(RawHttp2BackpressureFromNodeTest,
+                     "test-http2-backpressure.js")
+
 // Raw Node process tests
 DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessFeaturesFromNodeTest, "test-process-features.js")
 DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessAbortFromNodeTest, "test-process-abort.js")
+DEFINE_RAW_NODE_TEST(RawDomainAbortPolicyFromNodeTest,
+                     "test-domain-with-abort-on-uncaught-exception.js")
 TEST_F(Test3NodeDropinSubsetPhase02, RawProcessArgv0FromNodeTest) {
   if (RawNodeScriptHasUnsupportedFlagsHeader("test-process-argv-0.js")) {
     GTEST_SKIP() << "Skipping Node.js raw test with unsupported // Flags header: test-process-argv-0.js";
@@ -1417,10 +1525,10 @@ DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExecveAbortFromNodeTest, "test-process
 DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExecveOnExitFromNodeTest, "test-process-execve-on-exit.js")
 DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExecvePermissionFailFromNodeTest, "test-process-execve-permission-fail.js")
 DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExecvePermissionGrantedFromNodeTest, "test-process-execve-permission-granted.js")
-DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExceptionCaptureFromNodeTest, "test-process-exception-capture.js")
-DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExceptionCaptureErrorsFromNodeTest, "test-process-exception-capture-errors.js")
-DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExceptionCaptureShouldAbortOnUncaughtFromNodeTest, "test-process-exception-capture-should-abort-on-uncaught.js")
-DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExceptionCaptureShouldAbortOnUncaughtSetflagsfromstringFromNodeTest, "test-process-exception-capture-should-abort-on-uncaught-setflagsfromstring.js")
+DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExceptionCaptureFromNodeTest, "test-process-exception-capture.js")
+DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExceptionCaptureErrorsFromNodeTest, "test-process-exception-capture-errors.js")
+DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExceptionCaptureShouldAbortOnUncaughtFromNodeTest, "test-process-exception-capture-should-abort-on-uncaught.js")
+DEFINE_RAW_NODE_SUBPROCESS_TEST(RawProcessExceptionCaptureShouldAbortOnUncaughtSetflagsfromstringFromNodeTest, "test-process-exception-capture-should-abort-on-uncaught-setflagsfromstring.js")
 DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExternalStdioCloseFromNodeTest, "test-process-external-stdio-close.js")
 DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessExternalStdioCloseSpawnFromNodeTest, "test-process-external-stdio-close-spawn.js")
 DEFINE_RAW_NODE_IN_PROCESS_TEST(RawProcessGetactivehandlesFromNodeTest, "test-process-getactivehandles.js")
@@ -2278,9 +2386,12 @@ TEST_F(Test3NodeDropinSubsetPhase02, RawPathZeroLengthStringsFromNodeTest) {
 // Raw Node net tests (parallel, sequential, pummel).
 #define DEFINE_RAW_NODE_TEST(test_name, script_name)            \
   TEST_F(Test3NodeDropinSubsetPhase02, test_name) {             \
+    if (RawNodeScriptHasUnsupportedFlagsHeader(script_name)) {  \
+      GTEST_SKIP() << "Skipping Node.js raw test with unsupported // Flags header: " << script_name; \
+    }                                                            \
     EnvScope s(runtime_.get());                                 \
     std::string error;                                           \
-    const int exit_code = RunRawNodeTestScript(s.env, script_name, &error); \
+    const int exit_code = RunRawNodeTestScript(s.env, script_name, &error, true); \
     EXPECT_EQ(exit_code, 0) << "error=" << error;              \
     EXPECT_TRUE(error.empty()) << "error=" << error;            \
   }

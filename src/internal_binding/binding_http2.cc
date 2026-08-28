@@ -291,6 +291,7 @@ struct Http2SessionWrap {
   bool parent_reading_stopped = false;
   bool parent_closed = false;
   bool receive_paused = false;
+  bool consuming_parent_read = false;
   bool in_scope = false;
   bool write_scheduled = false;
   bool goaway_pending = false;
@@ -2106,50 +2107,82 @@ void InvokeStreamCloseCallback(Http2StreamWrap* stream, uint32_t error_code) {
 
 void ConsumeHTTP2Data(Http2SessionWrap* session) {
   if (session == nullptr || session->session == nullptr || session->destroyed ||
-      session->pending_parent_read_bytes.empty()) {
-    ClearPendingParentRead(session);
-    return;
-  }
-  if (session->pending_parent_read_offset > session->pending_parent_read_bytes.size()) {
-    ClearPendingParentRead(session);
+      session->consuming_parent_read) {
     return;
   }
 
-  const uint8_t* data =
-      session->pending_parent_read_bytes.data() + session->pending_parent_read_offset;
-  const size_t len = session->pending_parent_read_bytes.size() - session->pending_parent_read_offset;
-  DebugSession(session,
-               "consume input len=%zu offset=%zu want_read=%d paused=%s",
-               len,
-               session->pending_parent_read_offset,
-               nghttp2_session_want_read(session->session),
-               session->receive_paused ? "true" : "false");
+  // A call made after the parent write completes is the explicit resume edge.
   session->receive_paused = false;
-  session->custom_recv_error_code = nullptr;
-  session->in_scope = true;
-
-  const ssize_t rc = nghttp2_session_mem_recv(session->session, data, len);
-  session->in_scope = false;
-  DebugSession(session,
-               "consume input result=%zd paused=%s remaining=%zu",
-               rc,
-               session->receive_paused ? "true" : "false",
-               session->pending_parent_read_bytes.size() -
-                   std::min(session->pending_parent_read_offset, session->pending_parent_read_bytes.size()));
-  if (session->receive_paused) {
-    if (rc > 0) {
-      session->pending_parent_read_offset += static_cast<size_t>(rc);
+  while (!session->destroyed && !session->receive_paused) {
+    if (session->pending_parent_read_bytes.empty()) {
+      ClearPendingParentRead(session);
+      return;
     }
-  } else {
-    ClearPendingParentRead(session);
-  }
+    if (session->pending_parent_read_offset >
+        session->pending_parent_read_bytes.size()) {
+      ClearPendingParentRead(session);
+      return;
+    }
 
-  if (rc < 0) {
-    EmitInternalError(session, static_cast<int32_t>(rc), session->custom_recv_error_code);
-    return;
-  }
+    // Move ownership of the current contiguous input out of the session.
+    // Parser callbacks may synchronously append new parent data, but they now
+    // write to a distinct vector and cannot invalidate the buffer passed to
+    // nghttp2. Iteration, rather than recursive tail-calls, bounds native stack
+    // usage regardless of how many pause/resume rounds the peer induces.
+    const size_t input_offset = session->pending_parent_read_offset;
+    std::vector<uint8_t> input =
+        std::move(session->pending_parent_read_bytes);
+    session->pending_parent_read_bytes.clear();
+    session->pending_parent_read_offset = 0;
+    const size_t len = input.size() - input_offset;
+    if (len == 0) {
+      continue;
+    }
+    DebugSession(session,
+                 "consume input len=%zu offset=%zu want_read=%d paused=%s",
+                 len,
+                 input_offset,
+                 nghttp2_session_want_read(session->session),
+                 session->receive_paused ? "true" : "false");
+    session->custom_recv_error_code = nullptr;
+    const bool was_in_scope = session->in_scope;
+    session->in_scope = true;
+    session->consuming_parent_read = true;
 
-  if (!session->destroyed && !session->receive_paused) {
+    const ssize_t rc = nghttp2_session_mem_recv(
+        session->session, input.data() + input_offset, len);
+    session->consuming_parent_read = false;
+    session->in_scope = was_in_scope;
+    DebugSession(session,
+                 "consume input result=%zd paused=%s remaining=%zu",
+                 rc,
+                 session->receive_paused ? "true" : "false",
+                 session->pending_parent_read_bytes.size());
+    if (session->receive_paused) {
+      const size_t consumed =
+          rc > 0 ? std::min(static_cast<size_t>(rc), len) : 0;
+      if (consumed < len) {
+        std::vector<uint8_t> pending;
+        pending.reserve((len - consumed) +
+                        session->pending_parent_read_bytes.size());
+        pending.insert(pending.end(),
+                       input.begin() + input_offset + consumed,
+                       input.end());
+        pending.insert(pending.end(),
+                       session->pending_parent_read_bytes.begin(),
+                       session->pending_parent_read_bytes.end());
+        session->pending_parent_read_bytes.swap(pending);
+      }
+    }
+
+    if (rc < 0) {
+      EmitInternalError(
+          session, static_cast<int32_t>(rc), session->custom_recv_error_code);
+      return;
+    }
+    if (session->destroyed || session->receive_paused) {
+      return;
+    }
     MaybeScheduleSessionFlush(session);
     MaybeStopParentReading(session);
   }

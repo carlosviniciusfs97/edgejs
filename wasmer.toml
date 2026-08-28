@@ -1,13 +1,14 @@
 [package]
-entrypoint = "edgejs"
-name = "wasmer/edgejs"
-version = "0.1.4"
+entrypoint = "edge"
+name = "syrusakbary/edgejs"
+version = "0.1.24"
 description = "Edge.js with host-provided N-API and no embedded JavaScript engine"
 
 # [fs]
 # "/node-lib" = "./lib"
 [fs]
 "/etc" = "./quickjs-wasm/etc"
+"/npm" = "./test/deps/npm"
 "/pnpm" = "./quickjs-wasm/pnpm"
 "/usr/local/ssl" = "./ssl-certs"
 
@@ -65,13 +66,8 @@ runner = "https://webc.org/runner/wasi"
 
 [command.annotations.wasi]
 atom = "edgejs"
-main-args = ["/pnpm/edge-pnpm.cjs"]
+main-args = ["/npm/bin/npm-cli.js"]
 env = [
   "HOME=/tmp",
-  "npm_config_network_concurrency=4",
-  "npm_config_node_linker=hoisted",
-  "npm_config_optimistic_repeat_install=true",
-  "npm_config_package_import_method=copy",
-  "npm_config_store_dir=/tmp/.pnpm-store",
   "npm_config_update_notifier=false",
 ]

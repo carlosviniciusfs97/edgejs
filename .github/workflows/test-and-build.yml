@@ -344,6 +344,29 @@ jobs:
           path: .wasmer-provision
           key: ${{ steps.wasmer-provision.outputs.cache_key }}
 
+      - name: Verify Edge imports against Wasmer N-API provider
+        if: steps.wasmer-provision.outputs.mode == 'source'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ./wasix/validate-imported-napi-wasm.py \
+            --cmake-cache ./build-wasix/CMakeCache.txt \
+            --provider-napi-root ./.wasmer-src/lib/napi \
+            ./build-wasix/edgejs.wasm
+
+      - name: Record Edge N-API Wasmer revision triplet
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "edge=$(git rev-parse HEAD)"
+          echo "napi=$(git -C napi rev-parse HEAD)"
+          if [[ -d .wasmer-src/.git ]]; then
+            echo "wasmer=$(git -C .wasmer-src rev-parse HEAD)"
+            echo "wasmer-napi=$(git -C .wasmer-src/lib/napi rev-parse HEAD)"
+          else
+            echo "wasmer=$($(command -v wasmer) --version)"
+          fi
+
       - name: Test edge (V8 WASIX)
         shell: bash
         run: |

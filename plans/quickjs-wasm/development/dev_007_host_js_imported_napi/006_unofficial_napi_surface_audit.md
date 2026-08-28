@@ -2,9 +2,131 @@
 
 | | | Remarks |
 | --- | --- | --- |
-| **Status** | 🟡 | Design audit complete; implementation is intentionally split into independently testable reductions. |
+| **Status** | ▶️ | Implementation active on `codex/napi-surface-reduction` from the current Edge and N-API `main` branches. |
 | **Baseline** | 106 functions | Exported from `napi/include/unofficial_napi.h` on 2026-08-11. |
 | **Goal** | Provider-neutral capabilities | Keep only semantics unavailable through standard Node-API, with explicit ownership and atomic state transitions. |
+
+## Implementation status
+
+The first implementation milestone reduced the exported header from 106 to 90
+operations. Phase 1, all seven mechanical Phase 2 folds, and the first Phase 3
+environment-configuration work, the process-memory snapshot fold, and atomic
+source-map configuration, error-metadata snapshot, and message-resource
+ownership are complete, reducing
+the current surface to 66
+operations:
+
+- environment creation is one operation with nullable options;
+- environment release is one indivisible operation with a nullable loop;
+- structured clone has one optional-transfer-list form;
+- Edge implements non-index property filtering with standard Node-API; and
+- the worker stack limit is supplied only at environment creation; and
+- heap-space statistics use one capacity-bounded bulk snapshot instead of a
+  count operation followed by indexed provider calls; and
+- profiler and heap-snapshot JSON is returned as an environment-owned
+  `napi_value`; Edge copies it into Edge-owned `std::string` storage before a
+  worker result crosses threads, so the provider-wide `free_buffer` allocator
+  API is gone; and
+- six independently mutable environment setters are replaced by one versioned,
+  immutable, exactly-once `unofficial_napi_attach_env` transition. The hook
+  table carries lifecycle, context-token, foreground scheduling, fatal-error,
+  and OOM callbacks together; and
+- process-global `set_embedder_hooks` and `set_flags_from_string` are gone.
+  Engine flags, physical/constrained memory, resource limits, stack limit, and
+  guest-heap ownership are versioned immutable environment-creation inputs;
+  and
+- ArrayBuffer memory is part of the atomic heap-statistics snapshot, so Edge no
+  longer crosses the provider boundary through a second process-memory getter;
+  and
+- source-map enablement and its optional error-source callback are configured
+  together, preventing providers from observing a partially updated pair; and
+- current source positions, stderr formatting, and thrown-at text are returned
+  from one provider observation, while the same operation can atomically
+  consume preserved formatting state; and
+- cross-environment values are represented by a typed opaque message. Edge
+  holds queued messages through move-only ownership; `message_take` consumes
+  the resource on success or failure, and `message_drop` is used only when an
+  unconsumed queue entry is abandoned; and
+- bytecode is a typed opaque resource opened through one versioned
+  transaction. The provider validates an optional cache, reports rejection,
+  and compiles the source fallback atomically. A tagged source descriptor
+  prevents text and bytecode from being confused, while Edge owns artifacts
+  with one move-only RAII wrapper; and
+- module status, evaluation error, top-level-await presence, and async-graph
+  presence are returned by one module-state snapshot. Providers observe the
+  record once, and Edge applies Node's pre-instantiation visibility rule from
+  the returned status rather than asking providers through a separate call;
+  and
+- module resources use the opaque `unofficial_napi_module` type end to end.
+  Edge, provider implementations, and the Wasmer bridge can no longer
+  accidentally pass an unrelated `void*` resource into a module transition;
+  and
+- dynamic-import and import-meta callbacks are installed through one
+  versioned module-hooks descriptor. Updating either JavaScript-facing hook
+  sends the provider a complete, atomic view of both callbacks; and
+- source-text and synthetic modules are created through one versioned, tagged
+  descriptor. Providers validate the module kind and its complete payload at
+  one boundary, while the Wasm guest imports one operation instead of exposing
+  one import per module kind; and
+- CPU and heap profilers are both opened and consumed through one typed opaque
+  session contract. Edge owns the numeric IDs exposed by its worker binding,
+  while providers own profiler lifetime and clean up any session left active
+  at environment teardown. This replaces four provider-specific start/stop
+  operations, CPU IDs, and heap `found` flags with two ownership transitions;
+  and
+- dynamic near-heap-limit registration is one atomic configuration slot.
+  Supplying a callback installs or replaces it; supplying no callback removes
+  it and applies the requested restored limit. V8 registers its engine adapter
+  once, QuickJS preserves its validated no-op behavior, and Edge no longer
+  coordinates two provider operations; and
+- unsettled-top-level-await inspection takes the provider-owned opaque module
+  handle. Edge unwraps its own native `ModuleWrap`; providers no longer scan
+  JavaScript wrapper identity to recover a module, and the host-JavaScript
+  module record no longer retains a wrapper solely for reverse lookup.
+
+The profiler/snapshot migration is covered by complete V8 and QuickJS provider
+suites, native and wasm32 Wasmer guest-bridge compilation, complete native V8
+and QuickJS Edge suites, the exact 66-import WASIX conformance check, and the
+serial V8 and QuickJS WASIX compatibility suites. Edge's worker CPU profile,
+heap profile, heap snapshot, and heapdump failure paths all use the same typed
+session contract.
+
+The attachment migration is covered by provider-neutral exactly-once contract
+tests, complete V8 and QuickJS provider suites, and the Wasmer guest/host-JS
+bridge. V8 binds platform, lifecycle, and fatal state atomically; QuickJS owns
+and invokes the attached lifecycle callbacks exactly once; the Wasmer bridge
+accepts one wasm32 hook descriptor and rejects duplicate attachment. Edge
+builds the complete table before crossing the provider boundary and does not
+select attachment behavior with `#ifdef __wasi__`.
+
+Creation configuration is covered by provider-neutral descriptor validation,
+complete V8 and QuickJS suites, native and wasm32 compilation against the SDK
+Wasmer branch, and Edge's native and WASIX compatibility gates. The obsolete
+N-API-side Edge memory-hook adapter and its unused shutdown-pump callback path
+were removed; WASIX now reports its actual runtime memory ceiling through its
+libuv platform implementation.
+
+The 2026-08-13 review follow-up hardened three boundaries without adding an
+operation: V8 property enumeration now preserves a throwing Proxy `ownKeys`
+exception, environment creation validates descriptor size/version before
+reading or taking ownership of the guest-heap resource, and the duplicated wasm32
+environment-options decoder is shared. Module-state queries now use nullable
+typed outputs rather than an aggregate result struct, so status-only polling
+does not materialize an error handle or compute async-graph state. Edge's
+heap-space cache is reused only for one contiguous indexed observation, and
+task-queue dispatch no longer reads the mutable global `process` property for
+an ignored call receiver.
+
+The production-GC and environment-resource tightening is also complete. The
+test-named full-GC operation and the separate memory-pressure notification are
+one `unofficial_napi_collect_garbage` capability. Each provider uses its
+production collection primitive; in particular, V8 uses
+`LowMemoryNotification()` rather than its testing-only forced-GC API. This
+preserves `--expose-gc` and worker memory-pressure behavior while removing one
+export and an unnecessary mode type. Environment ownership and guest-heap
+ownership now use distinct opaque handle types across Edge, both native
+providers, and the Wasmer bridge; raw `void*` values remain only for
+non-resource callback data or addresses such as the native stack limit.
 
 ## Decision
 
@@ -29,6 +151,15 @@ The first pass can remove 11 exports which have no Edge native consumer. A
 second, mechanical pass can remove or fold another 7 without changing
 semantics. The larger reductions should then follow their ownership boundary,
 not be attempted as one ABI rewrite.
+
+The implementation audit initially appeared to show that
+`module_wrap_set_module_source_object` and
+`module_wrap_get_module_source_object` were Edge-owned metadata. A complete
+consumer trace disproved that: V8's source-phase resolver consumes the stored
+object from the linked module record, and QuickJS retains the same provider
+state. These operations therefore remain provider capabilities. The
+host-JavaScript implementation must be completed instead of moving the value
+into Edge.
 
 ## Rules for deciding whether an extension belongs
 
@@ -135,8 +266,9 @@ The exact names are provisional; the invariants are not:
   table;
 - imported host-JavaScript environments use the same attachment operation but
   have no `env_owner` to release;
-- callback `data` points at the Edge environment, removing both
-  `set_edge_environment` and the unused getter;
+- callback `data` points at one embedder-owned attachment state object;
+  callbacks that need the Edge environment recover it from `napi_env`, removing
+  both `set_edge_environment` and the unused getter;
 - `destroy_env_instance` is not public, so callers cannot split destruction
   from isolate/provider release;
 - global `set_embedder_hooks` and `set_flags_from_string` disappear. Their
@@ -144,10 +276,30 @@ The exact names are provisional; the invariants are not:
 - the host-JavaScript provider may report an unsupported capability, but Edge
   never selects a provider using `#ifdef __wasi__`.
 
-The near-heap-limit callback remains a separate dynamic registration because
-workers install and remove it during their lifetime. Promise hooks,
+The near-heap-limit callback remains separate dynamic state because workers
+install, replace, and remove it during their lifetime, but those transitions
+are one validated configuration operation rather than a setter/remover pair.
+Promise hooks,
 prepare-stack-trace, source-map callbacks, and rejection callbacks are also
 runtime JavaScript state, not immutable embedder attachment hooks.
+
+### Phase 3 implementation status
+
+Phase 3 is complete. These six public operations are gone:
+
+- `unofficial_napi_set_edge_environment`;
+- `unofficial_napi_set_env_cleanup_callback`;
+- `unofficial_napi_set_env_destroy_callback`;
+- `unofficial_napi_set_context_token_callbacks`;
+- `unofficial_napi_set_enqueue_foreground_task_callback`; and
+- `unofficial_napi_set_fatal_error_callbacks`.
+
+They are represented by the single `unofficial_napi_attach_env` operation, a
+net reduction of five exports. The two process-global configuration setters
+are also gone. Their required values now travel in the versioned
+`unofficial_napi_env_create_options` descriptor and are consumed synchronously
+before provider environment creation. No replacement setter or provider-kind
+branch was introduced.
 
 ## Phase 4: strengthen opaque resources
 
@@ -174,13 +326,13 @@ copy or a view over the entire WebAssembly memory.
 
 ### Cross-environment messages
 
-The current names `serialize_value`, `deserialize_value`, and
-`release_serialized_value` describe the V8 implementation, not the contract.
+The former names `serialize_value`, `deserialize_value`, and
+`release_serialized_value` described the V8 implementation, not the contract.
 The host-JavaScript provider correctly transports a host value through the
 Wasmer cross-worker registry, whose underlying transport performs structured
 clone/postMessage semantics. It does not need a second serializer.
 
-Replace the names with an opaque message resource:
+They are now represented by an opaque message resource:
 
 ```cpp
 unofficial_napi_message_create(source_env, value, &message);
@@ -188,11 +340,17 @@ unofficial_napi_message_take(destination_env, message, &value);  // consumes
 unofficial_napi_message_drop(message);                           // if unconsumed
 ```
 
-Three transitions are necessary even though the names become clearer: a
+Three transitions remain necessary even though the names are clearer: a
 queued message may be consumed in another environment or dropped because its
-port closes. `take` should consume the handle on both success and failure so
-the common success path cannot forget a separate release. Edge should own the
-handle with a move-only RAII wrapper while it is queued.
+port closes. `take` consumes the handle on both success and failure so the
+common success path cannot forget a separate release. Edge owns the handle
+with a move-only RAII wrapper while it is queued.
+
+The native Wasmer bridge stores message resources in a process-wide opaque
+handle table rather than reusing scope-bound `napi_value` IDs. This is required
+because a message can outlive its source handle scope and be taken by a
+different environment. The host-JavaScript bridge uses the Wasmer message
+registry with the same create/take/drop ownership contract.
 
 Within one environment, keep only the single structured-clone operation with
 an optional transfer list. It is not a substitute for the message handle,
@@ -223,6 +381,14 @@ The provider atomically validates cached bytes and compiles the fallback text,
 so V8, QuickJS, and host JavaScript cannot drift in fallback policy. Serialize
 and release remain genuine independent operations.
 
+This migration is complete. The former compile and deserialize entry points
+are represented by one `unofficial_napi_bytecode_open` operation, a net
+reduction of one export. V8 and QuickJS share the same fallback contract; the
+host-JavaScript provider retains source as its opaque artifact and rejects
+cache bytes because the browser engine exposes no portable compiled-code
+serialization. Empty supplied caches are rejected while still returning a
+freshly compiled artifact, so Edge never implements a second fallback branch.
+
 ### Module wrap
 
 Keep an opaque provider-owned module resource, but type it instead of exposing
@@ -231,18 +397,54 @@ Keep an opaque provider-owned module resource, but type it instead of exposing
 - replace source-text and synthetic creation with one tagged creation
   descriptor;
 - replace the two module callback setters with one module-hooks table;
-- replace `get_status`, `get_error`, `has_top_level_await`, and
-  `has_async_graph` with one module-state snapshot;
+- return immutable module requests and top-level-await status as part of the
+  creation result, then let Edge retain the request metadata and materialize
+  the JavaScript result with the required identity semantics;
+- replace `get_status`, `get_error`, and `has_async_graph` with one
+  module-state snapshot;
 - make `check_unsettled_top_level_await` take the opaque module handle instead
   of a JavaScript wrapper value;
 - keep link, instantiate, async evaluate, sync evaluate, namespace,
-  requests, set-export, cached-data, required-facade, and source-object
-  operations distinct because they perform different state transitions or
-  return values with different lifetimes.
+  set-export, cached-data, and required-facade operations distinct because
+  they perform different state transitions or return values with different
+  lifetimes;
+- keep source-object storage on the provider-owned module record because the
+  engine consumes it while resolving source-phase imports.
 
 Merging sync and async evaluate behind a boolean would not make the contract
 stronger: one returns a synchronous value/error contract and the other returns
 promise-driven evaluation.
+
+The module-state migration is complete. It replaces four field-at-a-time
+operations (`get_status`, `get_error`, `has_top_level_await`, and
+`has_async_graph`) with one provider-neutral query, a net reduction of three
+exports. Nullable typed outputs let each caller request only the fields it
+observes while keeping related fields in one provider call when Node requires
+them together. The module handle is also now typed across Edge, V8, QuickJS,
+and the Wasmer bridge without changing its pointer-sized ABI. Unsettled-TLA
+inspection now consumes that typed handle directly; providers do not recover
+it by scanning JavaScript wrapper identity.
+
+The module-hooks migration is complete. Two independently mutable callback
+setters are now one versioned configuration operation, a net reduction of one
+export. Edge retains the callbacks needed by its public binding methods and
+sends both values whenever either public setter changes, so no provider can
+observe a half-updated pair.
+
+The module-creation migration is complete. Source-text and synthetic creation
+are two variants of one `unofficial_napi_module_wrap_create` transaction. Its
+versioned tagged descriptor retains type-specific fields while removing a
+provider symbol and a Wasm import. Descriptor size, version, and tag validation
+are covered in both native providers; Edge uses the same call on native and
+WASIX targets.
+
+The immutable creation-metadata migration is complete. The creation result now
+returns the opaque module handle, the frozen module-request array, and initial
+top-level-await status atomically. Edge retains the request array through a
+normal N-API reference and serves the binding getter from that owned value, so
+the post-creation `unofficial_napi_module_wrap_get_module_requests` query and
+the initial mutable-state query are gone. Mutable status, error, and async-graph
+state remain in the separate module-state snapshot.
 
 ### Profilers
 
@@ -256,9 +458,9 @@ threads. This removes the extension-wide `free_buffer` allocator convention.
 
 ### Error metadata
 
-The current error API can read source positions, stderr formatting, thrown-at
-text, and preserved formatting through four calls. Those calls may observe or
-consume different provider state. Replace them with one metadata snapshot:
+The former error API read source positions, stderr formatting, thrown-at text,
+and preserved formatting through four calls which could observe or consume
+different provider state. They now use one metadata snapshot:
 
 ```cpp
 struct unofficial_napi_error_metadata {
@@ -275,18 +477,20 @@ struct unofficial_napi_error_metadata {
 unofficial_napi_get_error_metadata(env, error, mode, &metadata);
 ```
 
-The mode selects current versus consume-preserved state. Keep
-`preserve_error_source_message` as the explicit capture transition. Merge
-source-map enablement and the source-map error callback into one source-map
-configuration operation. This reduces calls while ensuring all formatting
-fields describe the same provider observation.
+The mode selects current versus consume-preserved state.
+`preserve_error_source_message` remains the explicit capture transition.
+Source-map enablement and the source-map error callback use one atomic
+configuration operation. All current formatting fields now come from the same
+provider message, and consuming preserved formatting is one indivisible state
+transition.
 
 ### Memory statistics
 
-Add ArrayBuffer memory to the heap-statistics snapshot so
-`get_process_memory_info` can be derived by Edge and removed. Return heap-space
-statistics in bulk rather than count-plus-index iteration. Keep heap-code
-statistics separate because callers do not otherwise need to pay for it.
+ArrayBuffer memory is now part of the heap-statistics snapshot and
+`get_process_memory_info` has been removed. Edge derives `process.memoryUsage()`
+and diagnostic-report heap values from that one snapshot. Heap-space statistics
+are already returned in bulk rather than count-plus-index iteration. Heap-code
+statistics remain separate because callers do not otherwise need to pay for it.
 
 ### Module state
 
@@ -319,8 +523,9 @@ not an equivalent replacement.
 
 ## Proposed migration order
 
-1. Add a generated ABI-usage test which compares the Edge Wasm imports with
-   the declared extension surface and rejects unused imports/stubs.
+1. Define one typed ABI inventory and generate declarations, bridge
+   registration, and import-conformance checks from it. Provider
+   implementations remain handwritten; this is not an opcode dispatcher.
 2. Remove the 11 unused/accidental exports and their bridge plumbing.
 3. Land the seven mechanical folds/replacements, one commit per capability.
 4. Introduce the environment options/hooks structs with `size` and `version`,
@@ -345,9 +550,13 @@ must not choose an implementation with `#ifdef __wasi__`.
 
 ## Expected outcome
 
-The immediate and mechanical phases reduce 106 exported functions to 88
-without a broad redesign. The later environment, snapshot, bytecode, module,
-and profiling changes can reduce it further, but their success criterion is
+The completed removal, mechanical, attachment, configuration, heap-space,
+memory-snapshot, source-map configuration, error-metadata snapshot,
+message-resource ownership, bytecode transaction, module-state snapshot,
+module-hooks configuration, tagged module creation, immutable creation metadata,
+typed profiler-session phases, and atomic near-heap-limit configuration reduce
+106 exported functions to 66. The remaining
+module-resource changes can reduce it further, but their success criterion is
 not a specific number. The success criterion is that every remaining extension
 is either:
 

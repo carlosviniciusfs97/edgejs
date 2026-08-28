@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -87,6 +88,40 @@ class ValidateImportedNapiWasmTests(unittest.TestCase):
     def test_rejects_non_wasm_input(self) -> None:
         with self.assertRaisesRegex(validator.ValidationError, "not a WebAssembly"):
             validator.validate_artifact(b"not wasm")
+
+    def test_compares_native_and_host_js_provider_operations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in ("src/guest/napi.rs", "src/guest/napi_js.rs"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    'let napi_namespace = namespace! {\n'
+                    '  "napi_create_object" => provider,\n'
+                    '};\n'
+                    'let napi_extension_wasmer_namespace = namespace! {\n'
+                    '  "unofficial_napi_create_env" => provider,\n'
+                    '};\n',
+                    encoding="utf-8",
+                )
+            standard, extension = validator.read_provider_operations(root)
+            imports = validator.validate_artifact(
+                module(
+                    ("napi", "napi_create_object"),
+                    ("napi_extension_wasmer_v0", "unofficial_napi_create_env"),
+                )
+            )
+            validator.validate_provider_imports(imports, standard, extension)
+
+    def test_rejects_provider_missing_an_edge_import(self) -> None:
+        imports = validator.validate_artifact(
+            module(
+                ("napi", "napi_create_object"),
+                ("napi_extension_wasmer_v0", "unofficial_napi_create_env"),
+            )
+        )
+        with self.assertRaisesRegex(validator.ValidationError, "does not implement"):
+            validator.validate_provider_operations(imports, set())
 
 
 if __name__ == "__main__":

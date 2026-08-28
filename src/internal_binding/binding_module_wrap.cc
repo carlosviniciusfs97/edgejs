@@ -1,4 +1,5 @@
 #include "internal_binding/binding_initializers.h"
+#include "internal_binding/binding_module_wrap.h"
 
 #include <filesystem>
 #include <string>
@@ -8,12 +9,16 @@
 #include <vector>
 
 #include "edge_buffer_lease.h"
+#include "edge_bytecode.h"
 #include "edge_environment.h"
 #include "internal_binding/helpers.h"
 #include "unofficial_napi.h"
 #include "../edge_bytecode_cache.h"
 #include "../edge_module_loader.h"
 #include "../edge_path.h"
+#if defined(EDGE_WEBCONTAINER_COMPAT)
+#include "../edge_url.h"
+#endif
 
 namespace internal_binding {
 
@@ -36,7 +41,8 @@ constexpr int32_t kEvaluationPhase = 2;
 struct ModuleWrapInstance {
   napi_ref wrapper_ref = nullptr;
   napi_ref url_ref = nullptr;
-  void* module_handle = nullptr;
+  napi_ref module_requests_ref = nullptr;
+  unofficial_napi_module module_handle = nullptr;
   bool has_top_level_await = false;
 };
 
@@ -88,6 +94,16 @@ void SetRef(napi_env env, napi_ref* ref_ptr, napi_value value, napi_valuetype re
   napi_create_reference(env, value, 1, ref_ptr);
 }
 
+void ConfigureModuleHooks(napi_env env, const ModuleWrapBindingState& state) {
+  const unofficial_napi_module_hooks hooks = {
+      sizeof(unofficial_napi_module_hooks),
+      UNOFFICIAL_NAPI_MODULE_HOOKS_VERSION,
+      GetRefValue(env, state.import_module_dynamically_ref),
+      GetRefValue(env, state.initialize_import_meta_ref),
+  };
+  (void)unofficial_napi_module_wrap_set_hooks(env, &hooks);
+}
+
 ModuleWrapInstance* UnwrapModuleWrap(napi_env env, napi_value this_arg) {
   if (this_arg == nullptr) return nullptr;
   void* data = nullptr;
@@ -104,7 +120,29 @@ void ModuleWrapFinalize(napi_env env, void* data, void* /*hint*/) {
   }
   ResetRef(env, &instance->wrapper_ref);
   ResetRef(env, &instance->url_ref);
+  ResetRef(env, &instance->module_requests_ref);
   delete instance;
+}
+
+bool AdoptModuleCreationResult(
+    napi_env env,
+    const unofficial_napi_module_create_result& result,
+    ModuleWrapInstance* instance) {
+  if (instance == nullptr || result.module == nullptr ||
+      result.module_requests == nullptr) {
+    if (result.module != nullptr) {
+      (void)unofficial_napi_module_wrap_destroy(env, result.module);
+    }
+    return false;
+  }
+  if (napi_create_reference(env, result.module_requests, 1,
+                            &instance->module_requests_ref) != napi_ok) {
+    (void)unofficial_napi_module_wrap_destroy(env, result.module);
+    return false;
+  }
+  instance->module_handle = result.module;
+  instance->has_top_level_await = result.has_top_level_await;
+  return true;
 }
 
 void SetNamedInt(napi_env env, napi_value obj, const char* key, int32_t value) {
@@ -400,14 +438,20 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
   if (has_exports_array && napi_is_array(env, argv[2], &is_array) == napi_ok && is_array) {
     SetNamedBool(env, this_arg, "synthetic", true);
     if (argc >= 4 && argv[3] != nullptr) {
-      if (unofficial_napi_module_wrap_create_synthetic(env,
-                                                       this_arg,
-                                                       argc >= 1 ? argv[0] : nullptr,
-                                                       argc >= 2 ? argv[1] : nullptr,
-                                                       argv[2],
-                                                       argv[3],
-                                                       &instance->module_handle) != napi_ok ||
-          instance->module_handle == nullptr) {
+      unofficial_napi_module_create_options create_options{};
+      create_options.size = sizeof(create_options);
+      create_options.version = UNOFFICIAL_NAPI_MODULE_CREATE_OPTIONS_VERSION;
+      create_options.kind = unofficial_napi_module_synthetic;
+      create_options.wrapper = this_arg;
+      create_options.url = argc >= 1 ? argv[0] : nullptr;
+      create_options.context_or_undefined = argc >= 2 ? argv[1] : nullptr;
+      create_options.payload.synthetic.export_names = argv[2];
+      create_options.payload.synthetic.synthetic_evaluation_steps = argv[3];
+      unofficial_napi_module_create_result create_result{};
+      if (unofficial_napi_module_wrap_create(env,
+                                             &create_options,
+                                             &create_result) != napi_ok ||
+          !AdoptModuleCreationResult(env, create_result, instance)) {
         delete instance;
         return nullptr;
       }
@@ -434,7 +478,7 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
       const bool arg5_is_cached_data = IsArrayBufferViewValue(env, arg5);
       napi_value host_defined_option = arg5_is_cached_data ? nullptr : arg5;
 
-      void* module_bytecode = nullptr;
+      EdgeBytecode module_bytecode;
       if (arg5_is_cached_data) {
         // vm.SourceTextModule cachedData: validate and consume. The provider
         // validates source/shape/integrity itself (V8 CachedData / QuickJS
@@ -442,21 +486,25 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
         // ERR_VM_MODULE_CACHED_DATA_REJECTED from the constructor on reject.
         bool rejected = true;
         EdgeBufferLease data;
-        if (AcquireArrayBufferView(env, arg5, &data) && data.size() > 0) {
-          bool deserialize_rejected = false;
-          if (unofficial_napi_bytecode_deserialize(env,
-                                                   data.data(),
-                                                   data.size(),
-                                                   argv[2],
-                                                   argc >= 1 ? argv[0] : nullptr,
-                                                   unofficial_napi_bytecode_shape_module,
-                                                   nullptr,
-                                                   nullptr,
-                                                   &module_bytecode,
-                                                   &deserialize_rejected) == napi_ok) {
-            rejected = deserialize_rejected || module_bytecode == nullptr;
-          }
-        }
+        const bool has_bytes = AcquireArrayBufferView(env, arg5, &data) && data.size() > 0;
+        const napi_status open_status = module_bytecode.Open(
+            env,
+            argv[2],
+            argc >= 1 ? argv[0] : nullptr,
+            unofficial_napi_bytecode_shape_module,
+            nullptr,
+            nullptr,
+            line_offset,
+            column_offset,
+            has_bytes ? data.data() : nullptr,
+            has_bytes ? data.size() : 0,
+            true,
+            &rejected,
+            nullptr,
+            false);
+        // SourceTextModule rejects invalid cachedData without paying for a
+        // fallback artifact that the constructor is required to discard.
+        rejected = open_status != napi_ok || rejected;
         SetNamedBool(env, this_arg, "cachedDataRejected", rejected);
         if (rejected) {
           ThrowCodeError(env, "ERR_VM_MODULE_CACHED_DATA_REJECTED",
@@ -482,39 +530,27 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
               std::filesystem::is_regular_file(std::filesystem::path(sidecar_source_path), ec) && !ec) {
             const std::string sidecar_source_utf8 = ValueToUtf8(env, argv[2]);
             edge_bytecode_cache::SidecarPayload payload;
-            if (edge_bytecode_cache::ReadSidecar(sidecar_source_path, sidecar_source_utf8,
-                                                 edge_bytecode_cache::kFlagEsmModuleV1, &payload)) {
-              bool rejected = false;
-              if (unofficial_napi_bytecode_deserialize(env,
-                                                       payload.data(),
-                                                       payload.payload_size,
-                                                       argv[2],
-                                                       argv[0],
-                                                       unofficial_napi_bytecode_shape_module,
-                                                       nullptr,
-                                                       host_defined_option,
-                                                       &module_bytecode,
-                                                       &rejected) != napi_ok ||
-                  rejected || module_bytecode == nullptr) {
-                edge_bytecode_cache::RemoveSidecar(sidecar_source_path);
-                module_bytecode = nullptr;
-              }
-            }
-            if (module_bytecode == nullptr) {
-              if (unofficial_napi_bytecode_compile(env,
-                                                   argv[2],
-                                                   argv[0],
-                                                   unofficial_napi_bytecode_shape_module,
-                                                   nullptr,
-                                                   host_defined_option,
-                                                   line_offset,
-                                                   column_offset,
-                                                   &module_bytecode,
-                                                   nullptr) == napi_ok &&
-                  module_bytecode != nullptr) {
+            const bool has_cache = edge_bytecode_cache::ReadSidecar(
+                sidecar_source_path, sidecar_source_utf8,
+                edge_bytecode_cache::kFlagEsmModuleV1, &payload);
+            bool cache_rejected = false;
+            if (module_bytecode.Open(env,
+                                     argv[2],
+                                     argv[0],
+                                     unofficial_napi_bytecode_shape_module,
+                                     nullptr,
+                                     host_defined_option,
+                                     line_offset,
+                                     column_offset,
+                                     has_cache ? payload.data() : nullptr,
+                                     has_cache ? payload.payload_size : 0,
+                                     has_cache,
+                                     &cache_rejected) == napi_ok &&
+                module_bytecode) {
+              if (!has_cache || cache_rejected) {
+                if (cache_rejected) edge_bytecode_cache::RemoveSidecar(sidecar_source_path);
                 napi_value cache_buffer = nullptr;
-                if (unofficial_napi_bytecode_serialize(env, module_bytecode, &cache_buffer) == napi_ok &&
-                    cache_buffer != nullptr) {
+                if (module_bytecode.Serialize(&cache_buffer) == napi_ok && cache_buffer != nullptr) {
                   EdgeBufferLease data;
                   if (AcquireArrayBufferView(env, cache_buffer, &data) && data.size() > 0) {
                     edge_bytecode_cache::WriteSidecar(sidecar_source_path,
@@ -524,35 +560,40 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
                                                       data.size());
                   }
                 }
-              } else {
-                // Compile failed (syntax error): clear it and let the text
-                // path below regenerate it with the existing error decoration.
-                bool has_pending = false;
-                napi_value ignored = nullptr;
-                if (napi_is_exception_pending(env, &has_pending) == napi_ok && has_pending) {
-                  (void)napi_get_and_clear_last_exception(env, &ignored);
-                }
-                module_bytecode = nullptr;
               }
+            } else {
+              // Compile failed (syntax error): clear it and let the text path
+              // below regenerate it with the existing error decoration.
+              bool has_pending = false;
+              napi_value ignored = nullptr;
+              if (napi_is_exception_pending(env, &has_pending) == napi_ok && has_pending) {
+                (void)napi_get_and_clear_last_exception(env, &ignored);
+              }
+              module_bytecode.Reset();
             }
           }
         }
       }
 
-      const unofficial_napi_js_source module_source{module_bytecode != nullptr ? nullptr : argv[2],
-                                                    module_bytecode};
-      const napi_status create_status =
-          unofficial_napi_module_wrap_create_source_text(env,
-                                                         this_arg,
-                                                         argc >= 1 ? argv[0] : nullptr,
-                                                         argc >= 2 ? argv[1] : nullptr,
-                                                         &module_source,
-                                                         line_offset,
-                                                         column_offset,
-                                                         host_defined_option,
-                                                         &instance->module_handle);
-      if (module_bytecode != nullptr) (void)unofficial_napi_bytecode_release(env, module_bytecode);
-      if (create_status != napi_ok || instance->module_handle == nullptr) {
+      const unofficial_napi_js_source module_source = module_bytecode
+                                                          ? module_bytecode.source()
+                                                          : unofficial_napi_js_source_from_text(argv[2]);
+      unofficial_napi_module_create_options create_options{};
+      create_options.size = sizeof(create_options);
+      create_options.version = UNOFFICIAL_NAPI_MODULE_CREATE_OPTIONS_VERSION;
+      create_options.kind = unofficial_napi_module_source_text;
+      create_options.wrapper = this_arg;
+      create_options.url = argc >= 1 ? argv[0] : nullptr;
+      create_options.context_or_undefined = argc >= 2 ? argv[1] : nullptr;
+      create_options.payload.source_text.source = &module_source;
+      create_options.payload.source_text.line_offset = line_offset;
+      create_options.payload.source_text.column_offset = column_offset;
+      create_options.payload.source_text.host_defined_option_id = host_defined_option;
+      unofficial_napi_module_create_result create_result{};
+      const napi_status create_status = unofficial_napi_module_wrap_create(
+          env, &create_options, &create_result);
+      if (create_status != napi_ok ||
+          !AdoptModuleCreationResult(env, create_result, instance)) {
         napi_value err = nullptr;
         if (napi_get_and_clear_last_exception(env, &err) == napi_ok && err != nullptr) {
           const std::string resource_name =
@@ -563,12 +604,6 @@ napi_value ModuleWrapCtor(napi_env env, napi_callback_info info) {
         }
         delete instance;
         return nullptr;
-      }
-      if (instance->module_handle != nullptr) {
-        bool has_tla = false;
-        if (unofficial_napi_module_wrap_has_top_level_await(env, instance->module_handle, &has_tla) == napi_ok) {
-          instance->has_top_level_await = has_tla;
-        }
       }
     }
   }
@@ -595,7 +630,7 @@ napi_value ModuleWrapLink(napi_env env, napi_callback_info info) {
   }
   uint32_t length = 0;
   napi_get_array_length(env, argv[0], &length);
-  std::vector<void*> linked_handles(length, nullptr);
+  std::vector<unofficial_napi_module> linked_handles(length, nullptr);
   for (uint32_t i = 0; i < length; ++i) {
     napi_value module_value = nullptr;
     if (napi_get_element(env, argv[0], i, &module_value) != napi_ok || module_value == nullptr) {
@@ -616,13 +651,9 @@ napi_value ModuleWrapGetModuleRequests(napi_env env, napi_callback_info info) {
   size_t argc = 0;
   napi_get_cb_info(env, info, &argc, nullptr, &this_arg, nullptr);
   ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
-  if (instance != nullptr && instance->module_handle != nullptr) {
-    napi_value out = nullptr;
-    if (unofficial_napi_module_wrap_get_module_requests(env, instance->module_handle, &out) == napi_ok &&
-        out != nullptr) {
-      return out;
-    }
-    return Undefined(env);
+  if (instance != nullptr && instance->module_requests_ref != nullptr) {
+    napi_value requests = GetRefValue(env, instance->module_requests_ref);
+    return requests != nullptr ? requests : Undefined(env);
   }
   napi_value out = nullptr;
   napi_create_array_with_length(env, 0, &out);
@@ -798,7 +829,10 @@ napi_value ModuleWrapGetStatus(napi_env env, napi_callback_info info) {
   ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
   int32_t status = kUninstantiated;
   if (instance != nullptr && instance->module_handle != nullptr) {
-    (void)unofficial_napi_module_wrap_get_status(env, instance->module_handle, &status);
+    if (unofficial_napi_module_wrap_get_state(
+            env, instance->module_handle, &status, nullptr, nullptr) != napi_ok) {
+      status = kUninstantiated;
+    }
   }
   napi_value out = nullptr;
   napi_create_int32(env, status, &out);
@@ -812,26 +846,14 @@ napi_value ModuleWrapGetError(napi_env env, napi_callback_info info) {
   ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
   if (instance == nullptr) return Undefined(env);
   if (instance->module_handle != nullptr) {
-    napi_value out = nullptr;
-    if (unofficial_napi_module_wrap_get_error(env, instance->module_handle, &out) == napi_ok && out != nullptr) {
-      return out;
+    napi_value error = nullptr;
+    if (unofficial_napi_module_wrap_get_state(
+            env, instance->module_handle, nullptr, &error, nullptr) == napi_ok &&
+        error != nullptr) {
+      return error;
     }
   }
   return Undefined(env);
-}
-
-napi_value ModuleWrapHasTopLevelAwait(napi_env env, napi_callback_info info) {
-  napi_value this_arg = nullptr;
-  size_t argc = 0;
-  napi_get_cb_info(env, info, &argc, nullptr, &this_arg, nullptr);
-  ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
-  bool value = instance != nullptr && instance->has_top_level_await;
-  if (instance != nullptr && instance->module_handle != nullptr) {
-    (void)unofficial_napi_module_wrap_has_top_level_await(env, instance->module_handle, &value);
-  }
-  napi_value out = nullptr;
-  napi_get_boolean(env, value, &out);
-  return out != nullptr ? out : Undefined(env);
 }
 
 napi_value ModuleWrapHasAsyncGraph(napi_env env, napi_callback_info info) {
@@ -841,7 +863,15 @@ napi_value ModuleWrapHasAsyncGraph(napi_env env, napi_callback_info info) {
   ModuleWrapInstance* instance = UnwrapModuleWrap(env, this_arg);
   bool value = false;
   if (instance != nullptr && instance->module_handle != nullptr) {
-    if (unofficial_napi_module_wrap_has_async_graph(env, instance->module_handle, &value) != napi_ok) {
+    int32_t status = kUninstantiated;
+    if (unofficial_napi_module_wrap_get_state(
+            env, instance->module_handle, &status, nullptr, &value) != napi_ok) {
+      return nullptr;
+    }
+    if (status < kInstantiated) {
+      ThrowCodeError(env,
+                     "ERR_MODULE_NOT_INSTANTIATED",
+                     "Module has not been instantiated");
       return nullptr;
     }
   }
@@ -857,7 +887,7 @@ napi_value ModuleWrapSetImportModuleDynamicallyCallback(napi_env env, napi_callb
   napi_value argv[1] = {nullptr};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   SetRef(env, &state->import_module_dynamically_ref, argc >= 1 ? argv[0] : nullptr, napi_function);
-  (void)unofficial_napi_module_wrap_set_import_module_dynamically_callback(env, argc >= 1 ? argv[0] : nullptr);
+  ConfigureModuleHooks(env, *state);
   return Undefined(env);
 }
 
@@ -868,7 +898,7 @@ napi_value ModuleWrapSetInitializeImportMetaObjectCallback(napi_env env, napi_ca
   napi_value argv[1] = {nullptr};
   napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
   SetRef(env, &state->initialize_import_meta_ref, argc >= 1 ? argv[0] : nullptr, napi_function);
-  (void)unofficial_napi_module_wrap_set_initialize_import_meta_object_callback(env, argc >= 1 ? argv[0] : nullptr);
+  ConfigureModuleHooks(env, *state);
   return Undefined(env);
 }
 
@@ -885,6 +915,46 @@ napi_value ModuleWrapImportModuleDynamically(napi_env env, napi_callback_info in
 
   napi_value global = GetGlobal(env);
   if (global == nullptr) return Undefined(env);
+
+#if defined(EDGE_WEBCONTAINER_COMPAT)
+  // Next's WebContainer SWC path passes an installed bare package through
+  // pathToFileURL(). Keep Node's normal file-URL semantics elsewhere: only
+  // rewrite a missing URL directly under cwd when the same relative text
+  // resolves as an installed package.
+  napi_value rewritten_specifier = nullptr;
+  {
+    const std::string specifier = ValueToUtf8(env, argv[0]);
+    if (specifier.rfind("file://", 0) == 0) {
+      const std::filesystem::path candidate(
+          edge_path::NormalizeFileURLOrPath(specifier));
+      std::error_code ec;
+      if (!candidate.empty() && !std::filesystem::exists(candidate, ec)) {
+        const std::filesystem::path cwd = std::filesystem::current_path(ec);
+        const std::filesystem::path relative =
+            ec ? std::filesystem::path() : candidate.lexically_relative(cwd);
+        const std::string package_specifier = relative.generic_string();
+        const bool is_bare_package =
+            !package_specifier.empty() && package_specifier != "." &&
+            package_specifier.rfind("../", 0) != 0 &&
+            package_specifier[0] != '/' && package_specifier[0] != '.';
+        std::string resolved_path;
+        if (is_bare_package &&
+            EdgeResolveModulePathForImport(
+                package_specifier, cwd.string(), &resolved_path)) {
+          const std::string resolved_url =
+              edge_url::PathToFileURLString(resolved_path);
+          if (!resolved_url.empty()) {
+            (void)napi_create_string_utf8(env,
+                                          resolved_url.c_str(),
+                                          resolved_url.size(),
+                                          &rewritten_specifier);
+          }
+        }
+      }
+    }
+  }
+  if (rewritten_specifier != nullptr) argv[0] = rewritten_specifier;
+#endif
 
   napi_value result = nullptr;
   if (argc >= 5) {
@@ -954,6 +1024,11 @@ napi_value ModuleWrapThrowIfPromiseRejected(napi_env env, napi_callback_info inf
 }
 
 }  // namespace
+
+unofficial_napi_module GetModuleWrapHandle(napi_env env, napi_value wrapper) {
+  ModuleWrapInstance* instance = UnwrapModuleWrap(env, wrapper);
+  return instance != nullptr ? instance->module_handle : nullptr;
+}
 
 napi_value InitModuleWrap(napi_env env) {
   auto& state = EnsureBindingState(env);

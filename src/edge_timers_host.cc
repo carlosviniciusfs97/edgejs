@@ -93,7 +93,17 @@ bool CallImmediateCallback(TimersHostState* st) {
   napi_value recv = nullptr;
   if (!GetProcessReceiver(st->env, &recv) || recv == nullptr) return false;
   napi_value ignored = nullptr;
-  const napi_status status = EdgeMakeCallback(st->env, recv, cb, 0, nullptr, &ignored);
+  // processImmediate() drains nextTick between immediate entries. A handled
+  // throw preserves the unprocessed tail for native re-entry, so defer the
+  // outer callback-scope checkpoint until OnImmediateCheck has consumed that
+  // tail. This call owns only one processImmediate invocation.
+  const napi_status status = EdgeMakeCallbackWithFlags(st->env,
+                                                       recv,
+                                                       cb,
+                                                       0,
+                                                       nullptr,
+                                                       &ignored,
+                                                       kEdgeMakeCallbackSkipTaskQueues);
   return status == napi_ok;
 }
 

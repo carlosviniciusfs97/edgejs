@@ -653,7 +653,11 @@ napi_value BindingFill(napi_env env, napi_callback_info info) {
   int32_t end = 0;
   GetInt32(env, argv[2], &start);
   GetInt32(env, argv[3], &end);
-  if (start < 0 || end < 0 || start > end || end > static_cast<int32_t>(dst_len)) return MakeInt32(env, -2);
+  if (start < 0 || end < 0) {
+    napi_throw_range_error(env, "ERR_OUT_OF_RANGE", "Index out of range");
+    return nullptr;
+  }
+  if (start > end || end > static_cast<int32_t>(dst_len)) return MakeInt32(env, -2);
   const size_t fill_len = static_cast<size_t>(end - start);
   if (fill_len == 0) return MakeUndefined(env);
 

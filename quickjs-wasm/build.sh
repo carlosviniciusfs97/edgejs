@@ -7,7 +7,7 @@ BUILD_DIR="${PROJECT_ROOT}/build-quickjs-wasix"
 TOOLCHAIN_FILE="${PROJECT_ROOT}/wasix/wasix-toolchain.cmake"
 OPENSSL_WASIX_DIR="${PROJECT_ROOT}/deps/openssl-wasix"
 
-export WASIXCC_WASM_EXCEPTIONS="${WASIXCC_WASM_EXCEPTIONS:-yes}"
+export WASIXCC_WASM_EXCEPTIONS="${WASIXCC_WASM_EXCEPTIONS:-exnref}"
 
 if ! command -v wasixcc >/dev/null 2>&1 && [[ -x "${HOME}/.wasixcc/bin/wasixcc" ]]; then
   export PATH="${HOME}/.wasixcc/bin:${PATH}"

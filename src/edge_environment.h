@@ -305,10 +305,6 @@ class Environment {
   void IncrementOpenCallbackScopes();
   void DecrementOpenCallbackScopes();
 
-  size_t async_callback_scope_depth() const;
-  void IncrementAsyncCallbackScopeDepth();
-  void DecrementAsyncCallbackScopeDepth();
-
   std::vector<napi_async_cleanup_hook_handle> async_cleanup_hooks() const;
   void AddAsyncCleanupHook(napi_async_cleanup_hook_handle handle);
   bool RemoveAsyncCleanupHook(napi_async_cleanup_hook_handle handle);
@@ -384,7 +380,6 @@ class Environment {
   double timer_base_ms_ = -1;
   size_t callback_scope_depth_ = 0;
   size_t open_callback_scopes_ = 0;
-  size_t async_callback_scope_depth_ = 0;
   std::vector<napi_async_cleanup_hook_handle> async_cleanup_hooks_;
   bool async_cleanup_hook_registered_ = false;
   std::vector<CleanupHookEntry> cleanup_hooks_;
@@ -408,6 +403,35 @@ class Environment {
   std::deque<ThreadsafeImmediateEntry> interrupts_;
   std::deque<ThreadsafeImmediateEntry> threadsafe_immediates_;
   ProcessExitHandler process_exit_handler_;
+};
+
+// Tracks one native boundary which may enter JavaScript. Task-queue policy is
+// deliberately left to the boundary owner; this class only makes nesting a
+// single environment-wide fact shared by Edge and the public callback APIs.
+class CallbackScopeDepthGuard {
+ public:
+  explicit CallbackScopeDepthGuard(Environment* environment)
+      : environment_(environment) {
+    if (environment_ != nullptr) environment_->IncrementCallbackScopeDepth();
+  }
+
+  ~CallbackScopeDepthGuard() { Close(); }
+
+  CallbackScopeDepthGuard(const CallbackScopeDepthGuard&) = delete;
+  CallbackScopeDepthGuard& operator=(const CallbackScopeDepthGuard&) = delete;
+
+  size_t depth() const {
+    return environment_ != nullptr ? environment_->callback_scope_depth() : 0;
+  }
+
+  void Close() {
+    if (environment_ == nullptr) return;
+    environment_->DecrementCallbackScopeDepth();
+    environment_ = nullptr;
+  }
+
+ private:
+  Environment* environment_;
 };
 
 }  // namespace edge
@@ -436,6 +460,11 @@ void EdgeEnvironmentRegisterCleanupStage(napi_env env,
 void EdgeEnvironmentUnregisterCleanupStage(napi_env env,
                                            edge::Environment::CleanupStageCallback callback,
                                            void* arg);
+bool EdgeCallbackTraceEnabled();
+void EdgeCallbackTrace(napi_env env,
+                       const char* event,
+                       int64_t detail_a = -1,
+                       int64_t detail_b = -1);
 
 template <typename T>
 T* EdgeEnvironmentGetSlotData(napi_env env, size_t slot_id) {

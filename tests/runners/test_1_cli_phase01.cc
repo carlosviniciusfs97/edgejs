@@ -16,9 +16,28 @@
 #include "edge_cli.h"
 #include "edge_version.h"
 
-class Test1CliPhase01 : public FixtureTestBase {};
+#if !defined(_WIN32)
+namespace node {
+void RegisterSignalHandler(
+    int signal,
+    void (*handler)(int signal, siginfo_t* info, void* ucontext),
+    bool reset_handler);
+}  // namespace node
+#endif
+
+// These tests exercise EdgeRunCli, which owns runtime configuration itself.
+// Preconfiguring the process-wide provider through FixtureTestBase makes that
+// ownership ambiguous and causes the CLI's supported engine flags to look like
+// an incompatible second configuration.
+class Test1CliPhase01 : public ::testing::Test {};
 
 namespace {
+
+#if !defined(_WIN32)
+void TestSiginfoHandler(int /*signal*/,
+                        siginfo_t* /*info*/,
+                        void* /*ucontext*/) {}
+#endif
 
 std::string WriteTempScript(const std::string& stem, const std::string& contents) {
   const auto temp_dir = std::filesystem::temp_directory_path();
@@ -740,7 +759,8 @@ TEST_F(Test1CliPhase01, InteractiveWelcomeMessageIncludesEdgeAndNodeVersions) {
 
   EXPECT_EQ(WEXITSTATUS(status), 0) << "stderr=" << stderr_output;
   EXPECT_TRUE(stderr_output.empty()) << "stderr=" << stderr_output;
-  EXPECT_NE(stdout_output.find("Welcome to Edge.js " EDGE_VERSION_STRING " (Node.js " NODE_VERSION ")."),
+  EXPECT_NE(stdout_output.find("Welcome to Edge.js " EDGE_VERSION_STRING
+                               " (Node.js " NODE_COMPAT_VERSION ")."),
             std::string::npos)
       << stdout_output;
 #endif
@@ -1225,6 +1245,7 @@ TEST_F(Test1CliPhase01, PromiseDetailsReportSettledQuickjsPromises) {
   const std::string script_path = WriteTempScript(
       "edge_phase01_cli_promise_details",
       "const assert = require('assert');\n"
+      "const { internalBinding } = require('internal/test/binding');\n"
       "const { getPromiseDetails } = internalBinding('util');\n"
       "const pending = new Promise(() => {});\n"
       "const fulfilled = Promise.resolve('ok');\n"
@@ -1240,8 +1261,10 @@ TEST_F(Test1CliPhase01, PromiseDetailsReportSettledQuickjsPromises) {
       "assert.strictEqual(rejectedDetails[1].message, 'boom');\n"
       "console.log(JSON.stringify([pendingDetails[0], fulfilledDetails[0], rejectedDetails[0]]));\n");
 
-  const CommandResult result =
-      RunBuiltBinaryAndCapture(edge_path, {script_path}, "edge_phase01_cli_promise_details_run");
+  const CommandResult result = RunBuiltBinaryAndCapture(
+      edge_path,
+      {"--no-warnings", "--expose-internals", script_path},
+      "edge_phase01_cli_promise_details_run");
 
   RemoveTempScript(script_path);
 
@@ -2009,6 +2032,24 @@ TEST_F(Test1CliPhase01, SignalWrapCloseMatchesHandleWrapCallbackSemantics) {
 #endif
 }
 
+TEST_F(Test1CliPhase01, RegisterSignalHandlerUsesPosixSiginfoContract) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "sigaction contract check is POSIX-only";
+#else
+  struct sigaction previous;
+  ASSERT_EQ(sigaction(SIGUSR1, nullptr, &previous), 0);
+
+  node::RegisterSignalHandler(SIGUSR1, TestSiginfoHandler, true);
+
+  struct sigaction installed;
+  ASSERT_EQ(sigaction(SIGUSR1, nullptr, &installed), 0);
+  EXPECT_NE(installed.sa_flags & SA_SIGINFO, 0);
+  EXPECT_EQ(installed.sa_sigaction, TestSiginfoHandler);
+
+  ASSERT_EQ(sigaction(SIGUSR1, &previous, nullptr), 0);
+#endif
+}
+
 TEST_F(Test1CliPhase01, UdpWrapCloseMatchesHandleWrapCallbackAndRefSemantics) {
 #if defined(_WIN32)
   GTEST_SKIP() << "udp_wrap close semantics check is POSIX-only";
@@ -2159,6 +2200,7 @@ TEST_F(Test1CliPhase01, InternalBufferBindingSentinelsAndSharedArrayBufferCopyMa
       "assert.strictEqual(binding.fill(Buffer.alloc(4), 1, 0, 4), undefined);\n"
       "assert.strictEqual(binding.fill(Buffer.alloc(4), 'zz', 0, 4, 'hex'), -1);\n"
       "assert.strictEqual(binding.fill(Buffer.alloc(4), 1, 3, 2), -2);\n"
+      "assert.throws(() => binding.fill(Buffer.alloc(4), 1, -1, 0), { code: 'ERR_OUT_OF_RANGE' });\n"
       "const toggle = binding.getZeroFillToggle();\n"
       "assert.ok(toggle instanceof Uint32Array);\n"
       "assert.strictEqual(toggle.length, 1);\n"
@@ -2471,6 +2513,25 @@ TEST_F(Test1CliPhase01, MessagePortMatchesNodeLocalTransferCloseAndRefSemantics)
       "  assert.strictEqual(typedArray.buffer.byteLength, 0);\n"
       "  const first = receiveMessageOnPort(channel.port1);\n"
       "  assert.deepStrictEqual(Array.from(first.message.typedArray), [0, 1, 2, 3, 4]);\n"
+      "  const combined = new MessageChannel();\n"
+      "  const nested = new MessageChannel();\n"
+      "  const combinedArray = new Uint8Array([5, 6, 7, 8]);\n"
+      "  combined.port2.postMessage(\n"
+      "    { port: nested.port1, typedArray: combinedArray },\n"
+      "    [nested.port1, combinedArray.buffer]);\n"
+      "  assert.strictEqual(combinedArray.buffer.byteLength, 0);\n"
+      "  const combinedMessage = receiveMessageOnPort(combined.port1);\n"
+      "  assert.ok(combinedMessage);\n"
+      "  assert.deepStrictEqual(\n"
+      "    Array.from(combinedMessage.message.typedArray), [5, 6, 7, 8]);\n"
+      "  combinedMessage.message.port.postMessage('combined-transfer-ok');\n"
+      "  assert.deepStrictEqual(\n"
+      "    receiveMessageOnPort(nested.port2),\n"
+      "    { message: 'combined-transfer-ok' });\n"
+      "  combinedMessage.message.port.close();\n"
+      "  nested.port2.close();\n"
+      "  combined.port1.close();\n"
+      "  combined.port2.close();\n"
       "  for (const value of [null, 0, -1, {}, []]) {\n"
       "    assert.throws(() => receiveMessageOnPort(value), {\n"
       "      name: 'TypeError',\n"

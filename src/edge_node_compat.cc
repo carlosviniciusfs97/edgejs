@@ -86,11 +86,6 @@ __attribute__((visibility("default"))) void RegisterSignalHandler(
   struct sigaction sa;
   std::memset(&sa, 0, sizeof(sa));
   sa.sa_sigaction = handler;
-  // `handler` is the three-argument form, so SA_SIGINFO is required: without
-  // it POSIX dispatches through the one-argument `sa_handler` member of the
-  // union instead. Native ABIs ignore the surplus arguments, but on wasm the
-  // argument count is part of the function type and the mismatched
-  // `call_indirect` traps, taking the whole instance down.
   sa.sa_flags = SA_SIGINFO | (reset_handler ? SA_RESETHAND : 0);
   sigfillset(&sa.sa_mask);
   (void)sigaction(signal, &sa, nullptr);

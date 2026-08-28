@@ -77,9 +77,15 @@ struct WorkerThreadData {
 
   Worker* worker = nullptr;
   napi_env env = nullptr;
-  void* scope = nullptr;
+  unofficial_napi_env_owner owner = nullptr;
   uv_async_t stop_async{};
   std::atomic<bool> stop_async_initialized{false};
+  // Provider profiler handles are created, consumed, and invalidated only on
+  // the worker engine thread. Keeping them on WorkerThreadData makes that
+  // affinity structural instead of relying on the parent-facing Worker mutex.
+  std::unordered_map<uint32_t, unofficial_napi_profile> cpu_profiles;
+  uint32_t next_cpu_profile_id = 1;
+  unofficial_napi_profile heap_profile = nullptr;
 };
 
 struct Worker {
@@ -131,8 +137,7 @@ struct WorkerTask {
   uv_rusage_t cpu_usage{};
   unofficial_napi_heap_statistics heap_statistics{};
   uint32_t started_profile_id = 0;
-  char* json_data = nullptr;
-  size_t json_len = 0;
+  std::string json;
   unofficial_napi_heap_snapshot_options heap_snapshot_options{};
 };
 
@@ -580,13 +585,12 @@ napi_value BuildResourceLimitsArray(napi_env env, const std::array<double, 4>& l
   return typed;
 }
 
-void FreeWorkerTaskPayload(WorkerTask* task) {
-  if (task == nullptr) return;
-  if (task->json_data != nullptr) {
-    unofficial_napi_free_buffer(task->json_data);
-    task->json_data = nullptr;
-    task->json_len = 0;
-  }
+bool CopyUtf8Bytes(napi_env env, napi_value value, std::string* output) {
+  if (env == nullptr || value == nullptr || output == nullptr) return false;
+  EdgeBufferLease bytes;
+  if (!bytes.Acquire(env, value, unofficial_napi_buffer_access_read)) return false;
+  output->assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  return true;
 }
 
 void DeleteWorkerTaskRef(napi_env env, WorkerTask* task) {
@@ -605,7 +609,6 @@ void ClearCompletedWorkerTasks(napi_env env, Worker* wrap) {
   for (auto& task : completed) {
     if (!task) continue;
     DeleteWorkerTaskRef(env, task.get());
-    FreeWorkerTaskPayload(task.get());
   }
 }
 
@@ -725,12 +728,12 @@ napi_value HeapSnapshotHandleReadStart(napi_env env, napi_callback_info info) {
 }
 
 napi_value CreateHeapSnapshotHandle(napi_env env, WorkerTask* task) {
-  if (env == nullptr || task == nullptr || task->json_data == nullptr) return nullptr;
+  if (env == nullptr || task == nullptr) return nullptr;
   napi_value handle = nullptr;
   if (napi_create_object(env, &handle) != napi_ok || handle == nullptr) return nullptr;
   auto* wrap = new HeapSnapshotHandleWrap();
   wrap->env = env;
-  wrap->payload.assign(task->json_data, task->json_len);
+  wrap->payload = task->json;
   if (napi_wrap(env, handle, wrap, HeapSnapshotHandleFinalize, nullptr, nullptr) != napi_ok) {
     delete wrap;
     return nullptr;
@@ -771,6 +774,11 @@ void SetTaskError(WorkerTask* task, const char* code, const std::string& message
 void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
   auto* task = static_cast<WorkerTask*>(data);
   if (task == nullptr || task->wrap == nullptr || worker_env == nullptr) return;
+  WorkerThreadData* thread_data = task->wrap->thread_data.get();
+  if (thread_data == nullptr) {
+    SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Worker thread state is unavailable");
+    return;
+  }
 
   switch (task->type) {
     case WorkerTaskType::kCpuUsage: {
@@ -782,54 +790,94 @@ void OnWorkerTaskInterrupt(napi_env worker_env, void* data) {
       break;
     }
     case WorkerTaskType::kGetHeapStatistics: {
+      unofficial_napi_heap_statistics_init(&task->heap_statistics);
       if (unofficial_napi_get_heap_statistics(worker_env, &task->heap_statistics) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to get heap statistics");
       } else {
+        unofficial_napi_heap_statistics_normalize(&task->heap_statistics);
         task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStartCpuProfile: {
-      unofficial_napi_cpu_profile_start_result result = unofficial_napi_cpu_profile_start_ok;
-      if (unofficial_napi_start_cpu_profile(worker_env, &result, &task->started_profile_id) != napi_ok) {
+      unofficial_napi_profile_start_result result = unofficial_napi_profile_start_ok;
+      unofficial_napi_profile profile = nullptr;
+      if (unofficial_napi_profile_start(
+              worker_env, unofficial_napi_profile_cpu, &result, &profile) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to start CPU profile");
-      } else if (result == unofficial_napi_cpu_profile_start_too_many) {
+      } else if (result == unofficial_napi_profile_start_busy) {
         SetTaskError(task, "ERR_CPU_PROFILE_TOO_MANY", "There are too many CPU profiles");
+      } else if (profile == nullptr) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "CPU profile session was not created");
       } else {
+        uint32_t profile_id = thread_data->next_cpu_profile_id++;
+        while (profile_id == 0 || thread_data->cpu_profiles.count(profile_id) != 0) {
+          profile_id = thread_data->next_cpu_profile_id++;
+        }
+        thread_data->cpu_profiles.emplace(profile_id, profile);
+        task->started_profile_id = profile_id;
         task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStopCpuProfile: {
-      if (unofficial_napi_stop_cpu_profile(
-              worker_env, task->profile_id, &task->found, &task->json_data, &task->json_len) != napi_ok) {
-        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop CPU profile");
-      } else if (!task->found) {
+      auto profile_it = thread_data->cpu_profiles.find(task->profile_id);
+      if (profile_it == thread_data->cpu_profiles.end()) {
         SetTaskError(task, "ERR_CPU_PROFILE_NOT_STARTED", "CPU profile not started");
+        break;
+      }
+      unofficial_napi_profile profile = profile_it->second;
+      thread_data->cpu_profiles.erase(profile_it);
+      napi_value json = nullptr;
+      if (unofficial_napi_profile_stop(worker_env, profile, &json) != napi_ok) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop CPU profile");
+      } else if (!CopyUtf8Bytes(worker_env, json, &task->json)) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy CPU profile");
+      } else {
+        task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStartHeapProfile: {
-      if (unofficial_napi_start_heap_profile(worker_env, &task->found) != napi_ok) {
+      unofficial_napi_profile_start_result result = unofficial_napi_profile_start_ok;
+      unofficial_napi_profile profile = nullptr;
+      if (unofficial_napi_profile_start(
+              worker_env, unofficial_napi_profile_heap, &result, &profile) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to start heap profile");
-      } else if (!task->found) {
+      } else if (result == unofficial_napi_profile_start_busy) {
         SetTaskError(task, "ERR_HEAP_PROFILE_HAVE_BEEN_STARTED", "heap profiler have been started");
+      } else if (profile == nullptr) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Heap profile session was not created");
+      } else {
+        thread_data->heap_profile = profile;
+        task->found = true;
       }
       break;
     }
     case WorkerTaskType::kStopHeapProfile: {
-      if (unofficial_napi_stop_heap_profile(
-              worker_env, &task->found, &task->json_data, &task->json_len) != napi_ok) {
-        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop heap profile");
-      } else if (!task->found) {
+      unofficial_napi_profile profile = thread_data->heap_profile;
+      if (profile == nullptr) {
         SetTaskError(task, "ERR_HEAP_PROFILE_NOT_STARTED", "heap profile not started");
+        break;
+      }
+      thread_data->heap_profile = nullptr;
+      napi_value json = nullptr;
+      if (unofficial_napi_profile_stop(worker_env, profile, &json) != napi_ok) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to stop heap profile");
+      } else if (!CopyUtf8Bytes(worker_env, json, &task->json)) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy heap profile");
+      } else {
+        task->found = true;
       }
       break;
     }
     case WorkerTaskType::kTakeHeapSnapshot: {
+      napi_value json = nullptr;
       if (unofficial_napi_take_heap_snapshot(
-              worker_env, &task->heap_snapshot_options, &task->json_data, &task->json_len) != napi_ok) {
+              worker_env, &task->heap_snapshot_options, &json) != napi_ok) {
         SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to take heap snapshot");
+      } else if (!CopyUtf8Bytes(worker_env, json, &task->json)) {
+        SetTaskError(task, "ERR_WORKER_OPERATION_FAILED", "Failed to copy heap snapshot");
       } else {
         task->found = true;
       }
@@ -854,19 +902,16 @@ void OnWorkerCompletionAsync(uv_async_t* handle) {
 
   for (auto& task : completed) {
     if (!task || task->taker_ref == nullptr) {
-      if (task) FreeWorkerTaskPayload(task.get());
       continue;
     }
     napi_value taker = GetRefValue(wrap->env, task->taker_ref);
     DeleteWorkerTaskRef(wrap->env, task.get());
     if (taker == nullptr) {
-      FreeWorkerTaskPayload(task.get());
       continue;
     }
 
     napi_value ondone = GetNamed(wrap->env, taker, "ondone");
     if (!IsFunction(wrap->env, ondone)) {
-      FreeWorkerTaskPayload(task.get());
       continue;
     }
 
@@ -926,7 +971,7 @@ void OnWorkerCompletionAsync(uv_async_t* handle) {
         argv[0] = task->success ? CreateNull(wrap->env)
                                 : CreateErrorWithCode(wrap->env, task->error_code, task->error_message);
         if (task->success) {
-          napi_create_string_utf8(wrap->env, task->json_data, task->json_len, &argv[1]);
+          napi_create_string_utf8(wrap->env, task->json.data(), task->json.size(), &argv[1]);
         }
         break;
       }
@@ -946,7 +991,6 @@ void OnWorkerCompletionAsync(uv_async_t* handle) {
 
     napi_value ignored = nullptr;
     (void)EdgeMakeCallback(wrap->env, taker, ondone, argc, argv, &ignored);
-    FreeWorkerTaskPayload(task.get());
   }
 }
 
@@ -1104,7 +1148,7 @@ void FinalizeWorkerThread(Worker* wrap, int exit_code, const std::string& custom
     std::lock_guard<std::mutex> lock(wrap->mutex);
     if (wrap->thread_data != nullptr) {
       wrap->thread_data->env = nullptr;
-      wrap->thread_data->scope = nullptr;
+      wrap->thread_data->owner = nullptr;
     }
     wrap->exit_code = exit_code;
     wrap->custom_err = custom_err;
@@ -1135,7 +1179,7 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
   std::string custom_err_reason;
   WorkerThreadData* thread_data = wrap != nullptr ? wrap->thread_data.get() : nullptr;
   napi_env worker_env = nullptr;
-  void* worker_scope = nullptr;
+  unofficial_napi_env_owner worker_owner = nullptr;
   uv_loop_t* worker_loop = nullptr;
   if (wrap != nullptr) {
     wrap->stack_base = stack_top > (wrap->thread_stack_size - kWorkerStackBufferSize)
@@ -1163,6 +1207,7 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
   }
 
   unofficial_napi_env_create_options create_options{};
+  EdgeInitializeNapiEnvCreateOptions(&create_options);
   if (wrap != nullptr) {
     if (wrap->worker_config.resource_limits[0] > 0) {
       create_options.max_young_generation_size_in_bytes =
@@ -1180,9 +1225,8 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
       create_options.stack_limit = reinterpret_cast<void*>(wrap->stack_base);
     }
   }
-  EdgeInstallNapiEmbedderHooks();
-  if (unofficial_napi_create_env_with_options(8, &create_options, &worker_env, &worker_scope) != napi_ok ||
-      worker_env == nullptr || worker_scope == nullptr) {
+  if (unofficial_napi_create_env(8, &create_options, &worker_env, &worker_owner) != napi_ok ||
+      worker_env == nullptr || worker_owner == nullptr) {
     EdgeEnvironmentDestroyReleasedEventLoop(worker_loop);
     FinalizeWorkerThread(wrap, 1, "ERR_WORKER_INIT_FAILED", "Failed to create worker env");
     return;
@@ -1195,22 +1239,20 @@ void WorkerThreadMain(Worker* wrap, uintptr_t stack_top) {
   if (!EdgeAttachEnvironmentForRuntime(worker_env, &wrap->worker_config)) {
     uv_loop_t* shutdown_loop = EdgeEnvironmentReleaseEventLoop(worker_env);
     if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
-    (void)unofficial_napi_release_env_with_loop(worker_scope, shutdown_loop);
+    (void)unofficial_napi_release_env(worker_owner, shutdown_loop);
     EdgeEnvironmentDestroyReleasedEventLoop(shutdown_loop);
     wrap->worker_config.external_event_loop = nullptr;
     FinalizeWorkerThread(wrap, 1, "ERR_WORKER_INIT_FAILED", "Failed to attach worker env");
     return;
   }
-  if (wrap->stack_base != 0) {
-    (void)unofficial_napi_set_stack_limit(worker_env, reinterpret_cast<void*>(wrap->stack_base));
-  }
-  (void)unofficial_napi_set_near_heap_limit_callback(worker_env, WorkerNearHeapLimit, wrap);
+  (void)unofficial_napi_configure_near_heap_limit_callback(
+      worker_env, WorkerNearHeapLimit, wrap, 0);
   {
     std::lock_guard<std::mutex> lock(wrap->mutex);
     wrap->worker_config.env_message_port_data.reset();
     if (thread_data != nullptr) {
       thread_data->env = worker_env;
-      thread_data->scope = worker_scope;
+      thread_data->owner = worker_owner;
     }
   }
   wrap->loop_start_time_ms.store(static_cast<double>(uv_hrtime()) / 1e6, std::memory_order_release);
@@ -1266,15 +1308,23 @@ cleanup_worker_env:
     (void)unofficial_napi_cancel_terminate_execution(worker_env);
   }
 
-  (void)unofficial_napi_remove_near_heap_limit_callback(worker_env, 0);
+  (void)unofficial_napi_configure_near_heap_limit_callback(
+      worker_env, nullptr, nullptr, 0);
   EdgeWorkerEnvRunCleanupPreserveLoop(worker_env);
   EdgeEnvironmentRunAtExitCallbacks(worker_env);
   if (exit_code == 0 && custom_err.empty() && custom_err_reason.empty()) {
-    (void)unofficial_napi_low_memory_notification(worker_env);
+    (void)unofficial_napi_collect_garbage(worker_env);
   }
   shutdown_loop = EdgeWorkerEnvReleaseEventLoop(worker_env);
   if (shutdown_loop == nullptr) shutdown_loop = worker_loop;
-  (void)unofficial_napi_release_env_with_loop(worker_scope, shutdown_loop);
+  EdgeWorkerEnvForget(worker_env);
+  (void)unofficial_napi_release_env(worker_owner, shutdown_loop);
+  if (wrap->thread_data != nullptr) {
+    // release_env has stopped and reclaimed any sessions the worker did not
+    // explicitly consume; these are now invalid bookkeeping tokens.
+    wrap->thread_data->cpu_profiles.clear();
+    wrap->thread_data->heap_profile = nullptr;
+  }
   EdgeWorkerEnvDestroyReleasedEventLoop(shutdown_loop);
   wrap->worker_config.external_event_loop = nullptr;
   FinalizeWorkerThread(wrap, exit_code, custom_err, custom_err_reason);

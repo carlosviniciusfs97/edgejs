@@ -2,12 +2,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <new>
 #include <utility>
 
 #include "edge_runtime_platform.h"
 #include "edge_handle_scope.h"
+#include "edge_process.h"
+#include "edge_runtime.h"
 #include "edge_timers_host.h"
 #include "edge_worker_env.h"
 #include "unofficial_napi.h"
@@ -26,17 +30,7 @@ struct DetachedSlotState {
 };
 
 std::unordered_map<napi_env, DetachedSlotState> g_detached_slots;
-
-void AttachedEnvCleanup(napi_env env, void* /*data*/) {
-  if (auto* environment = edge::Environment::Get(env); environment != nullptr) {
-    environment->RunCleanup();
-    environment->RunAtExitCallbacks();
-  }
-}
-
-void AttachedEnvDestroy(napi_env env, void* /*data*/) {
-  edge::Environment::Detach(env);
-}
+std::atomic<uint64_t> g_callback_trace_sequence{0};
 
 void AttachedEnvAssignContextToken(napi_env env, void* token, void* /*data*/) {
   if (auto* environment = edge::Environment::Get(env); environment != nullptr) {
@@ -51,28 +45,23 @@ void AttachedEnvUnassignContextToken(napi_env env, void* token, void* /*data*/) 
 }
 
 bool RegisterAttachedEnvHooks(napi_env env) {
-#if defined(EDGE_EMBEDDED_NAPI_PROVIDER)
-  if (unofficial_napi_set_edge_environment(env, edge::Environment::Get(env)) != napi_ok) {
-    return false;
+  unofficial_napi_env_hooks hooks{};
+  hooks.size = sizeof(hooks);
+  hooks.version = UNOFFICIAL_NAPI_ENV_HOOKS_VERSION;
+  hooks.context_token_assign_callback = AttachedEnvAssignContextToken;
+  hooks.context_token_unassign_callback = AttachedEnvUnassignContextToken;
+  hooks.fatal_error_callback = EdgeFatalErrorReportCallback;
+  hooks.oom_error_callback = EdgeOomErrorReportCallback;
+  if (EdgeRuntimePlatformPrepareEnvHooks(env, &hooks) != napi_ok) return false;
+  uint64_t accepted_hooks = 0;
+  if (unofficial_napi_attach_env(env, &hooks, &accepted_hooks) == napi_ok) {
+    // Edge owns cleanup and detachment. This transaction contains only events
+    // which originate inside the provider; unsupported optional events remain
+    // absent from the accepted capability mask.
+    return true;
   }
-  if (unofficial_napi_set_env_cleanup_callback(env, AttachedEnvCleanup, nullptr) != napi_ok) {
-    (void)unofficial_napi_set_edge_environment(env, nullptr);
-    return false;
-  }
-  if (unofficial_napi_set_env_destroy_callback(env, AttachedEnvDestroy, nullptr) != napi_ok) {
-    (void)unofficial_napi_set_env_cleanup_callback(env, nullptr, nullptr);
-    (void)unofficial_napi_set_edge_environment(env, nullptr);
-    return false;
-  }
-  if (unofficial_napi_set_context_token_callbacks(
-          env, AttachedEnvAssignContextToken, AttachedEnvUnassignContextToken, nullptr) != napi_ok) {
-    (void)unofficial_napi_set_env_destroy_callback(env, nullptr, nullptr);
-    (void)unofficial_napi_set_env_cleanup_callback(env, nullptr, nullptr);
-    (void)unofficial_napi_set_edge_environment(env, nullptr);
-    return false;
-  }
-#endif
-  return true;
+  EdgeRunRuntimePlatformEnvCleanup(env);
+  return false;
 }
 
 void RunSlotDeleters(std::unordered_map<size_t, edge::SlotEntry>* slots) {
@@ -188,6 +177,37 @@ void StopLoopOnJsError(edge::Environment* env) {
 }
 
 }  // namespace
+
+bool EdgeCallbackTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("EDGE_TRACE_CALLBACKS");
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
+  }();
+  return enabled;
+}
+
+void EdgeCallbackTrace(napi_env env,
+                       const char* event,
+                       int64_t detail_a,
+                       int64_t detail_b) {
+  if (!EdgeCallbackTraceEnabled()) return;
+  const uint64_t sequence =
+      g_callback_trace_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+  size_t callback_depth = 0;
+  if (auto* environment = edge::Environment::Get(env); environment != nullptr) {
+    callback_depth = environment->callback_scope_depth();
+  }
+  std::fprintf(stderr,
+               "[edge-callback] seq=%llu event=%s env=%p depth=%zu "
+               "a=%lld b=%lld\n",
+               static_cast<unsigned long long>(sequence),
+               event != nullptr ? event : "unknown",
+               static_cast<void*>(env),
+               callback_depth,
+               static_cast<long long>(detail_a),
+               static_cast<long long>(detail_b));
+  std::fflush(stderr);
+}
 
 namespace edge {
 
@@ -1230,21 +1250,6 @@ void Environment::DecrementOpenCallbackScopes() {
   if (open_callback_scopes_ > 0) open_callback_scopes_ -= 1;
 }
 
-size_t Environment::async_callback_scope_depth() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return async_callback_scope_depth_;
-}
-
-void Environment::IncrementAsyncCallbackScopeDepth() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  async_callback_scope_depth_ += 1;
-}
-
-void Environment::DecrementAsyncCallbackScopeDepth() {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (async_callback_scope_depth_ > 0) async_callback_scope_depth_ -= 1;
-}
-
 std::vector<napi_async_cleanup_hook_handle> Environment::async_cleanup_hooks() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return async_cleanup_hooks_;
@@ -1421,8 +1426,13 @@ void Environment::OnTimer(uv_timer_t* handle) {
   if (env == nullptr || !env->can_call_into_js()) return;
 
   const double now_ms = env->GetNowMs();
+  CallbackScopeDepthGuard callback_scope(env);
   const double next_expiry = EdgeTimersHostCallTimersCallback(env->env(), now_ms);
-  env->ScheduleTimerFromExpiry(next_expiry, now_ms);
+  callback_scope.Close();
+  // processTimers() expresses the next deadline against libuv's clock at the
+  // start of the callback. Re-read that clock after user callbacks complete so
+  // their duration is not added to a repeating timer's interval.
+  env->ScheduleTimerFromExpiry(next_expiry, env->GetNowMs());
   if (!EdgeTimersHostRunCallbackCheckpoint(env->env())) {
     StopLoopOnJsError(env);
   }
@@ -1450,9 +1460,27 @@ void Environment::OnImmediateCheck(uv_check_t* handle) {
     return;
   }
 
-  if (env->immediate_count() != 0 && !EdgeTimersHostCallImmediateCallback(env->env())) {
-    StopLoopOnJsError(env);
-    return;
+  if (env->immediate_count() != 0) {
+    // processImmediate() preserves the unprocessed tail in outstandingQueue
+    // when a callback throws. Match Node's check-phase loop by re-entering the
+    // callback after uncaught/domain handling until that tail is consumed.
+    CallbackScopeDepthGuard callback_scope(env);
+    do {
+      if (!EdgeTimersHostCallImmediateCallback(env->env())) {
+        StopLoopOnJsError(env);
+        return;
+      }
+    } while (env->immediate_has_outstanding() && env->can_call_into_js());
+    callback_scope.Close();
+
+    // This is the callback-scope checkpoint for the complete native check
+    // callback, not for each re-entry above. It must run after a handled throw
+    // has drained outstandingQueue, but before libuv can deliver close
+    // callbacks scheduled by the final immediate.
+    if (EdgeRunCallbackScopeCheckpoint(env->env()) != napi_ok) {
+      StopLoopOnJsError(env);
+      return;
+    }
   }
 
   if (env->immediate_ref_count() == 0 &&
