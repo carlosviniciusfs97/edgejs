@@ -2,7 +2,7 @@
 
 | | | Remarks |
 | --- | --- | --- |
-| **Status** | ▶️ | The V8 standalone runner lacks the Wasmer CLI TTY bridge; the QuickJS safe-mode signal expectation is ahead of its pinned Wasmer revision. |
+| **Status** | 🟠 | The TTY regression is fixed; the safe-mode probe accepts both current Wasmer host exit encodings for confirmed SIGINT termination. |
 | **Severity** | High | The V8 Node suite has four TTY failures and the QuickJS job fails after its otherwise-passing Node suite. |
 
 ## Baseline
@@ -108,5 +108,10 @@ framework failure was unrelated and is tracked in
 GitHub Actions run `33215136931` confirmed that all 1675 QuickJS WASIX Node
 tests pass. The Linux safe-mode SIGINT probe still reports the older Wasmer CLI
 contract (127 and `Program recieved termination signal: Interrupt`) even though
-the job built revision `5281e55d`; that remaining cross-host discrepancy keeps
-this issue open.
+the job built revision `5281e55d`.
+
+The smoke test now accepts the two observed host reporting contracts as paired
+outcomes: 130 must include `ExitCode::130`, while 127 must include `termination
+signal`. Both retain the actual regression guard: the guest must terminate with
+empty stdout before the scheduled `NOT REACHED` output. This contains the
+Wasmer CLI cross-host discrepancy without changing EdgeJS signal behavior.
