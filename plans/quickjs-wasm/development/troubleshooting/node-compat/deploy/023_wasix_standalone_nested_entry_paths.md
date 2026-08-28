@@ -44,7 +44,7 @@ every directory component below the mounted project root.
 
 ## Implementation
 
-N-API PR `wasmerio/napi#65` now checks whether the canonical host entry file is
+N-API PR `wasmerio/napi#66` now checks whether the canonical host entry file is
 covered by an existing mount. When it is, the CLI translates the file relative
 to that mount's guest path. For example:
 
