@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Scope | Confirm the checked-in `napi_wasmer` CLI contract and map the V8 WASIX runners to it. |
-| Dependencies | Current EdgeJS `main`; N-API gitlink `19eb9fdc67008acba7dc7d1bcacbc1180cc9cc9b`. |
+| Dependencies | Current EdgeJS `main`; N-API standalone-runner update `baafd3e`. |
 | Write ownership | Read-only audit; no repository files. |
 | Status | 🟢 Complete. |
 | Verification | Identify build target, binary path, argument/mount/env/cwd support, and incompatible Wasmer-only flags. |
@@ -25,9 +25,9 @@ standalone-build test lanes.
   working directory, a stable guest program name, mounts, guest arguments, and
   direct stdio. The existing CLI already had mounts and guest arguments; the
   remaining options were added to its public runner helper and command line.
-- The pinned N-API source requires Wasmer APIs from source revision
-  `60ea058b2634ae4ed46cc14fc8b49e6b5304e7f0`. Published crates do not expose
-  the complete matching hook/shared-memory API, so the standalone manifest now
+- The pinned N-API source requires the Wasmer 7.3 APIs from SDK revision
+  `5281e55dac6c85be91560c4c828d49fd2d5b8b5d`. Published crates do not expose
+  the complete matching hook/shared-memory API, so the standalone manifest
   locks that immutable library revision.
 - Cranelift is sufficient for the test runner and avoids the custom LLVM
   installation previously hidden inside Wasmer CLI provisioning.

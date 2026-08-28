@@ -36,6 +36,15 @@ Completed on 2026-08-28:
 - Shell syntax, workflow YAML parsing, Cargo formatting, Make dry-runs, and
   root/N-API `git diff --check` passed.
 
+Follow-up verification after the Rust 1.94 CI lockfile failure:
+
+- Rust 1.95 locked release build against Wasmer SDK revision `5281e55`: passed.
+- `x86_64-unknown-linux-gnu` locked metadata resolution: passed.
+- Direct `napi_wasmer build-wasix/edgejs.wasm -e ...` smoke: passed and printed
+  `hello world!`.
+- Imported-N-API validation: 110 standard imports and 67 extension imports.
+- Import-validator tests: 8 passed.
+
 The complete Node and framework matrices remain for GitHub Actions; focused
 local coverage exercised every changed runner path and the failure point from
 run `33196256897` no longer exists.

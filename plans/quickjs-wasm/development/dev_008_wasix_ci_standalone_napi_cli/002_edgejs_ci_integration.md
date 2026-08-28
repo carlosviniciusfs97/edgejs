@@ -31,5 +31,7 @@ test operation.
   the ephemeral standalone Cargo materialization directory.
 - N-API-side changes are recorded in submodule commit
   `0c38589f361811cc0e2e9e86c1dc9277923887a0`.
+- The Rust 1.95/Wasmer 7.3 follow-up is recorded in N-API commit `baafd3e`,
+  pinned to SDK revision `5281e55dac6c85be91560c4c828d49fd2d5b8b5d`.
 - Nightly publishing still installs Wasmer because `wasmer publish` is a
   distribution operation, not a test-runtime dependency.
