@@ -48,3 +48,14 @@ Follow-up verification after the Rust 1.94 CI lockfile failure:
 The complete Node and framework matrices remain for GitHub Actions; focused
 local coverage exercised every changed runner path and the failure point from
 run `33196256897` no longer exists.
+
+Follow-up TTY regression verification on 2026-08-28:
+
+- The standalone CLI now installs Wasmer's native `SysTty` bridge for direct
+  stdio and avoids waiting for an outstanding host stdin task after guest exit.
+- `pseudo-tty/test-readable-tty-keepalive`,
+  `parallel/test-tty-stdin-pipe`, `pseudo-tty/stdin-setrawmode`, and
+  `pseudo-tty/test-tty-stdout-resize` all pass together through the Release
+  V8 WASIX artifact and standalone runner.
+- N-API unit coverage verifies that direct stdio installs the TTY bridge while
+  capture helpers do not.

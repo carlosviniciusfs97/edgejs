@@ -1177,6 +1177,14 @@ napi_value EdgeStreamBaseClose(EdgeStreamBase* base, napi_value close_callback) 
   uv_handle_t* handle = (base->ops != nullptr && base->ops->get_handle != nullptr)
                             ? base->ops->get_handle(base)
                             : nullptr;
+  if (EDGE_TRACE_ENABLED("EDGE_TRACE_TTY") &&
+      base->provider_type == kEdgeProviderTtyWrap) {
+    std::fprintf(stderr,
+                 "EDGE_TRACE_TTY close closed=%d closing=%d uv_closing=%d\n",
+                 base->closed,
+                 base->closing,
+                 handle != nullptr ? uv_is_closing(handle) : -1);
+  }
   if (handle == nullptr || base->closed || base->closing || uv_is_closing(handle)) {
     return EdgeStreamBaseUndefined(base->env);
   }

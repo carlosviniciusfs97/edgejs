@@ -113,6 +113,10 @@ env_specs=(
   "TEST_SERIAL_ID=${test_serial_id}"
 )
 
+if [[ -n "${EDGE_TRACE_TTY:-}" ]]; then
+  env_specs+=("EDGE_TRACE_TTY=${EDGE_TRACE_TTY}")
+fi
+
 if [[ "${runner_kind}" == "napi" ]]; then
   runner_args=(
     "${runner_bin}"

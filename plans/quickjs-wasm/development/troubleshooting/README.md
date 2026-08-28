@@ -45,6 +45,7 @@ duplicating issue details.
 | 🟢 | High | [019_wasmer_napi_checkpoint_import.md](node-compat/deploy/019_wasmer_napi_checkpoint_import.md) | Wasmer N-API checkpoint import alignment |
 | 🟢 | High | [020_wasix_ci_tail_failures.md](node-compat/deploy/020_wasix_ci_tail_failures.md) | WASIX CI tail failures |
 | 🟢 | High | [021_wasix_ci_standalone_napi_cli.md](node-compat/deploy/021_wasix_ci_standalone_napi_cli.md) | WASIX CI standalone N-API CLI |
+| ▶️ | High | [022_wasix_ci_tty_bridge_and_signal_pin.md](node-compat/deploy/022_wasix_ci_tty_bridge_and_signal_pin.md) | WASIX CI TTY bridge and signal pin |
 
 ## Node Test
 

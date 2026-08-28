@@ -76,6 +76,9 @@ void TtyDestroy(EdgeStreamBase* base) {
 void TtyAfterClose(uv_handle_t* handle) {
   auto* wrap = handle != nullptr ? static_cast<TtyWrap*>(handle->data) : nullptr;
   if (wrap == nullptr) return;
+  if (EDGE_TRACE_ENABLED("EDGE_TRACE_TTY")) {
+    std::fprintf(stderr, "EDGE_TRACE_TTY afterClose fd=%d\n", wrap->fd);
+  }
   EdgeStreamBaseOnClosed(&wrap->base);
 }
 
