@@ -70,6 +70,10 @@
 - Pinned the N-API standalone manifest and lockfile to that latest SDK commit
   in N-API head `625777a`, then advanced EdgeJS PR #149 to that N-API head.
   The locked standalone N-API library suite still passes all 44 tests.
+- Applied the exact Taplo formatting required by Wasmer CI in N-API commit
+  `1e11604` and Wasmer SDK commit `5a02e54a540`, then advanced EdgeJS to the
+  formatting-complete N-API head. These follow-up commits contain no runtime
+  behavior changes.
 
 ## Verification expectations
 
