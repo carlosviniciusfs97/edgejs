@@ -302,70 +302,19 @@ jobs:
           corepack prepare pnpm@latest --activate
           pnpm --version
 
-      # See the quickjs-linux job for how Wasmer provisioning modes work. The
-      # V8 WASIX lane runs the edgejs wasm through the wasmer CLI's
-      # experimental N-API runtime, so the CLI must be built with the napi-v8
-      # feature (EDGE_WASMER_NAPI=1) in addition to LLVM. Use the same
-      # repository-level Wasmer revision as every other lane so provider and
-      # guest compatibility cannot drift behind a second hidden pin.
-      - name: Resolve Wasmer provisioning
-        id: wasmer-provision
-        shell: bash
-        env:
-          WASMER_SOURCE_REF: ${{ vars.WASMER_SOURCE_REF }}
-          WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
-          WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
-          EDGE_WASMER_NAPI: "1"
-        run: ./scripts/ci/provision-wasmer.sh resolve wasix
-
-      - name: Restore Wasmer source build cache
-        id: wasmer-cache
-        if: steps.wasmer-provision.outputs.mode == 'source'
-        uses: actions/cache/restore@v4
-        with:
-          path: .wasmer-provision
-          key: ${{ steps.wasmer-provision.outputs.cache_key }}
-
-      - name: Provision Wasmer
-        shell: bash
-        env:
-          WASMER_SOURCE_REF: ${{ vars.WASMER_SOURCE_REF }}
-          WASMER_SOURCE_REPO: ${{ vars.WASMER_SOURCE_REPO }}
-          WASMER_ARTIFACT_RUN_ID: ${{ vars.WASMER_ARTIFACT_RUN_ID }}
-          WASMER_RELEASE_VERSION: ${{ vars.WASMER_RELEASE_VERSION }}
-          GH_TOKEN: ${{ secrets.WASMER_ARTIFACTS_TOKEN }}
-          EDGE_WASMER_NAPI: "1"
-        run: ./scripts/ci/provision-wasmer.sh wasix
-
-      - name: Save Wasmer source build cache
-        if: steps.wasmer-provision.outputs.mode == 'source' && steps.wasmer-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .wasmer-provision
-          key: ${{ steps.wasmer-provision.outputs.cache_key }}
-
-      - name: Verify Edge imports against Wasmer N-API provider
-        if: steps.wasmer-provision.outputs.mode == 'source'
+      - name: Validate Edge WASIX imports
         shell: bash
         run: |
           set -euo pipefail
-          python3 ./wasix/validate-imported-napi-wasm.py \
-            --cmake-cache ./build-wasix/CMakeCache.txt \
-            --provider-napi-root ./.wasmer-src/lib/napi \
-            ./build-wasix/edgejs.wasm
+          make validate-wasix-imports
 
-      - name: Record Edge N-API Wasmer revision triplet
+      # Build the host provider from the exact N-API revision pinned by EdgeJS.
+      # This standalone runner replaces test-time Wasmer CLI provisioning.
+      - name: Build standalone N-API CLI
         shell: bash
         run: |
           set -euo pipefail
-          echo "edge=$(git rev-parse HEAD)"
-          echo "napi=$(git -C napi rev-parse HEAD)"
-          if [[ -d .wasmer-src/.git ]]; then
-            echo "wasmer=$(git -C .wasmer-src rev-parse HEAD)"
-            echo "wasmer-napi=$(git -C .wasmer-src/lib/napi rev-parse HEAD)"
-          else
-            echo "wasmer=$($(command -v wasmer) --version)"
-          fi
+          make build-napi-wasmer-cli
 
       - name: Test edge (V8 WASIX)
         shell: bash

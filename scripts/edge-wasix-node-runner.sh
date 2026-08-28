@@ -5,8 +5,10 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 default_edgejs_root="$(cd "${script_dir}/.." && pwd)"
 
 edgejs_root="${EDGEJS_ROOT:-${default_edgejs_root}}"
-wasmer_bin="${WASMER_BIN:-wasmer}"
+runner_kind="${WASIX_RUNNER_KIND:-wasmer}"
+runner_bin="${WASIX_RUNNER_BIN:-${WASMER_BIN:-wasmer}}"
 package_dir="${WASIX_EDGEJS_PACKAGE_DIR:-${edgejs_root}/quickjs-wasm}"
+wasm_path="${WASIX_EDGEJS_WASM:-${edgejs_root}/build-wasix/edgejs.wasm}"
 guest_root="${WASIX_EDGEJS_GUEST_ROOT:-/workspace}"
 guest_test_tmp_root="${WASIX_EDGEJS_GUEST_TEST_TMP_ROOT:-/tmp/edgejs-node-test}"
 workspace_dirs_csv="${WASIX_EDGEJS_WORKSPACE_DIRS:-test,lib,deps,assets,build-quickjs-wasix}"
@@ -18,8 +20,7 @@ if [[ -n "${WASMER_STACK_SIZE:-}" ]]; then
   wasmer_stack_args+=(--stack-size "${WASMER_STACK_SIZE}")
 fi
 
-# Extra `wasmer run` flags for the target lane (e.g. --experimental-napi for
-# the V8 imports package). Word-split intentionally.
+# Extra `wasmer run` flags for package-based lanes. Word-split intentionally.
 wasmer_extra_args=()
 if [[ -n "${WASMER_EXTRA_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
@@ -83,14 +84,14 @@ for arg in "$@"; do
   guest_args+=("$(rewrite_guest_path_arg "${arg}")")
 done
 
-volume_args=(
-  --volume "${host_workspace_root}:${guest_root}"
-  --volume "${host_test_tmp_root}:${guest_test_tmp_root}"
-  --volume "${edgejs_root}/ssl-certs:/usr/local/ssl"
+mount_specs=(
+  "${host_workspace_root}:${guest_root}"
+  "${host_test_tmp_root}:${guest_test_tmp_root}"
+  "${edgejs_root}/ssl-certs:/usr/local/ssl"
 )
 
 if [[ -d "${package_dir}/etc" ]]; then
-  volume_args+=(--volume "${package_dir}/etc:/etc")
+  mount_specs+=("${package_dir}/etc:/etc")
 fi
 
 IFS=',' read -r -a workspace_dirs <<< "${workspace_dirs_csv}"
@@ -102,20 +103,57 @@ for workspace_dir in "${workspace_dirs[@]}"; do
     printf 'warning: skipping missing WASIX EdgeJS workspace dir: %s\n' "${edgejs_root}/${workspace_dir}" >&2
     continue
   fi
-  volume_args+=(--volume "${edgejs_root}/${workspace_dir}:${guest_root}/${workspace_dir}")
+  mount_specs+=("${edgejs_root}/${workspace_dir}:${guest_root}/${workspace_dir}")
+done
+
+env_specs=(
+  "HOME=/tmp"
+  "EDGE_EXEC_PATH=${guest_exec_path}"
+  "NODE_TEST_DIR=${guest_test_tmp_root}"
+  "TEST_SERIAL_ID=${test_serial_id}"
+)
+
+if [[ "${runner_kind}" == "napi" ]]; then
+  runner_args=(
+    "${runner_bin}"
+    "${wasm_path}"
+    --program-name edge
+    --builtin-js-dir "${edgejs_root}/lib"
+    --cwd "${guest_root}"
+  )
+  for env_spec in "${env_specs[@]}"; do
+    runner_args+=(--env "${env_spec}")
+  done
+  for mount_spec in "${mount_specs[@]}"; do
+    runner_args+=(--mount "${mount_spec}")
+  done
+  runner_args+=(-- "${guest_args[@]}")
+
+  if [[ "${WASIX_EDGEJS_TRACE:-0}" == "1" ]]; then
+    printf '%q ' "${runner_args[@]}" >&2
+    printf '\n' >&2
+  fi
+
+  "${runner_args[@]}"
+  exit $?
+fi
+
+volume_args=()
+for mount_spec in "${mount_specs[@]}"; do
+  volume_args+=(--volume "${mount_spec}")
 done
 
 if [[ "${WASIX_EDGEJS_TRACE:-0}" == "1" ]]; then
   {
-    printf '%q ' "${wasmer_bin}" run \
+    printf '%q ' "${runner_bin}" run \
       --llvm \
       "${wasmer_extra_args[@]+"${wasmer_extra_args[@]}"}" \
       "${wasmer_stack_args[@]+"${wasmer_stack_args[@]}"}" \
       --net \
-      --env HOME=/tmp \
-      --env "EDGE_EXEC_PATH=${guest_exec_path}" \
-      --env "NODE_TEST_DIR=${guest_test_tmp_root}" \
-      --env "TEST_SERIAL_ID=${test_serial_id}" \
+      --env "${env_specs[0]}" \
+      --env "${env_specs[1]}" \
+      --env "${env_specs[2]}" \
+      --env "${env_specs[3]}" \
       "${volume_args[@]}" \
       --cwd "${guest_root}" \
       "${package_dir}" \
@@ -124,15 +162,15 @@ if [[ "${WASIX_EDGEJS_TRACE:-0}" == "1" ]]; then
   } >&2
 fi
 
-"${wasmer_bin}" run \
+"${runner_bin}" run \
   --llvm \
   "${wasmer_extra_args[@]+"${wasmer_extra_args[@]}"}" \
   "${wasmer_stack_args[@]+"${wasmer_stack_args[@]}"}" \
   --net \
-  --env HOME=/tmp \
-  --env "EDGE_EXEC_PATH=${guest_exec_path}" \
-  --env "NODE_TEST_DIR=${guest_test_tmp_root}" \
-  --env "TEST_SERIAL_ID=${test_serial_id}" \
+  --env "${env_specs[0]}" \
+  --env "${env_specs[1]}" \
+  --env "${env_specs[2]}" \
+  --env "${env_specs[3]}" \
   "${volume_args[@]}" \
   --cwd "${guest_root}" \
   "${package_dir}" \

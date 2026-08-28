@@ -44,6 +44,7 @@ duplicating issue details.
 | 🟠 | Medium | [018_pnpm_deploy_graph_materialization.md](node-compat/deploy/018_pnpm_deploy_graph_materialization.md) | pnpm deploy graph materialization |
 | 🟢 | High | [019_wasmer_napi_checkpoint_import.md](node-compat/deploy/019_wasmer_napi_checkpoint_import.md) | Wasmer N-API checkpoint import alignment |
 | 🟢 | High | [020_wasix_ci_tail_failures.md](node-compat/deploy/020_wasix_ci_tail_failures.md) | WASIX CI tail failures |
+| 🟢 | High | [021_wasix_ci_standalone_napi_cli.md](node-compat/deploy/021_wasix_ci_standalone_napi_cli.md) | WASIX CI standalone N-API CLI |
 
 ## Node Test
 
