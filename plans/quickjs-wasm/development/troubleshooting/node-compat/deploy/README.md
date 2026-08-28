@@ -16,3 +16,4 @@ they describe deploy artifact and package graph status.
 - [WASIX CI tail failures](020_wasix_ci_tail_failures.md)
 - 🟢 [WASIX CI standalone N-API CLI](021_wasix_ci_standalone_napi_cli.md)
 - ▶️ [WASIX CI TTY bridge and signal pin](022_wasix_ci_tty_bridge_and_signal_pin.md)
+- 🟢 [WASIX standalone nested entry paths](023_wasix_standalone_nested_entry_paths.md)

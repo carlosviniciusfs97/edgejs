@@ -99,3 +99,14 @@ runner.
 - QuickJS WASIX rebuild: passed, including the no-N-API-import validation.
 - QuickJS SIGINT probe on the newer Wasmer signal runtime: exited 130 with
   `ExitCode::130`.
+
+GitHub Actions run `33215136959` subsequently confirmed that the complete V8
+WASIX Node step passes, including the four formerly failing TTY tests. Its later
+framework failure was unrelated and is tracked in
+`023_wasix_standalone_nested_entry_paths.md`.
+
+GitHub Actions run `33215136931` confirmed that all 1675 QuickJS WASIX Node
+tests pass. The Linux safe-mode SIGINT probe still reports the older Wasmer CLI
+contract (127 and `Program recieved termination signal: Interrupt`) even though
+the job built revision `5281e55d`; that remaining cross-host discrepancy keeps
+this issue open.
