@@ -51,9 +51,6 @@
   pushed N-API head `99a58dd`; the locked standalone library suite passes all
   44 tests.
 - Advanced Wasmer SDK PR #6956 to N-API head `99a58dd` in `83cf85c3292`.
-  N-API intentionally pins the preceding Wasmer commit because the final SDK
-  commit only updates the superproject's N-API gitlink; this breaks the normal
-  superproject/submodule pin cycle while preserving identical Wasmer code.
 - The first EdgeJS V8 WASIX smoke exposed one missed reentry boundary:
   `unofficial_napi_contextify_run_script` ran JavaScript while its import still
   held the store. A scoped trace showed the callback trampoline reaching a
@@ -64,6 +61,15 @@
 - Rebuilt the complete V8 WASIX guest, validated its 110 N-API and 67 extension
   imports, rebuilt the locked release `napi_wasmer` runner, and passed the
   Makefile smoke with `hello world!`.
+- Fixed the SDK stack's Rust 1.95 lint and NodeJS test-feature regressions in
+  Wasmer commit `1e295461b57`. The exact NodeJS WASM test build and full
+  `make lint-packages` target pass locally. The dependency cooldown advisory is
+  intentionally out of scope because crates.io yanked the eligible
+  `chacha20` releases while their replacement remains inside the repository's
+  three-day quarantine.
+- Pinned the N-API standalone manifest and lockfile to that latest SDK commit
+  in N-API head `625777a`, then advanced EdgeJS PR #149 to that N-API head.
+  The locked standalone N-API library suite still passes all 44 tests.
 
 ## Verification expectations
 
