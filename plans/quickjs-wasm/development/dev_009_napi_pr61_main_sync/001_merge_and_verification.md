@@ -74,6 +74,11 @@
   `1e11604` and Wasmer SDK commit `5a02e54a540`, then advanced EdgeJS to the
   formatting-complete N-API head. These follow-up commits contain no runtime
   behavior changes.
+- Fixed two Rust 1.95 C-API import lints in Wasmer functional head
+  `c83ba6d315d`, pinned N-API standalone builds to it in `79a1822`, and
+  advanced EdgeJS to that N-API head. Wasmer head `19011b95302` then updates
+  only its N-API submodule pointer, avoiding an unresolvable circular latest-
+  commit pin while EdgeJS still consumes every functional SDK change.
 
 ## Verification expectations
 
