@@ -36,6 +36,9 @@
    V8 and QuickJS CI-equivalent suites supported by the repository.
 6. Push the resolved branch, monitor all PR checks, and address any failure
    until the PR is green and mergeable.
+7. Reproduce the remaining V8 WASIX `process.report.getReport()` failure with a
+   clean standalone runner, trace the exact nested callback boundary, and add a
+   focused regression before advancing the N-API, Wasmer, and EdgeJS stack.
 
 ## Integration progress
 
@@ -113,6 +116,29 @@
   `napi_wasmer` build, full V8 WASIX rebuild/import validation, CLI smoke, and
   representative buffer-constructor, diagnostics-channel module-import, and
   HTTP proxy-fetch tests all pass locally.
+- EdgeJS CI then exposed one remaining callback-reentry boundary in
+  `test-http-agent-reuse-drained-socket-only`: `process.report.getReport()`
+  enumerates the `process.env` Proxy while the report callback owns the WASIX
+  store. `napi_get_property_names` entered V8 without lending that store, so
+  the Proxy's guest `ownKeys` trap could not re-enter. Its failed trampoline
+  returned `undefined`, producing the downstream V8
+  `CreateListFromArrayLike called on non-object` error. The TCP connection and
+  agent-reuse behavior were not the cause.
+- A scoped trace confirmed that the outer guest callback and nested `ownKeys`
+  callback ran on the same thread, with the store borrow held specifically
+  across property-name enumeration. The fix is intentionally limited to
+  `napi_get_property_names` and `napi_get_all_property_names`, the two N-API
+  operations that synchronously invoke a Proxy `ownKeys` trap. No broad
+  lending was added to ordinary property access, allocation, or conversion
+  paths.
+- Added a deterministic standalone N-API regression in `run_script_test`: an
+  outer guest callback invokes both enumeration APIs on a Proxy and verifies
+  that each re-enters the guest `ownKeys` callback. A clean locked native build,
+  the WASIX regression, and the `wasm32-unknown-unknown` JavaScript-backend
+  feature check pass. The exact EdgeJS test also passes with the clean runner,
+  followed by 100 sequential repetitions with zero failures.
+- Pushed the focused enumeration fix to N-API PR #61 as `1add135` and advanced
+  Wasmer SDK PR #6956 to that N-API revision as `ce7c0b598ba`.
 
 ## Verification expectations
 
