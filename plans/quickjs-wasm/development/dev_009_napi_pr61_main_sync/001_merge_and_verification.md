@@ -79,6 +79,40 @@
   advanced EdgeJS to that N-API head. Wasmer head `19011b95302` then updates
   only its N-API submodule pointer, avoiding an unresolvable circular latest-
   commit pin while EdgeJS still consumes every functional SDK change.
+- The full V8 WASIX suite at EdgeJS `de75f0e9` still failed 74 tests after its
+  successful build and import validation. The common primary error was
+  `[callback trampoline] no store lent to this thread`; the later
+  `TypeError: fn is not a function` and missing test-reporter module errors
+  were downstream bootstrap/module-loading failures.
+- Compared the guest bridges and found that `src/guest/napi_js.rs` already
+  lent the store while evaluating `module_wrap`, but the V8 bridge in
+  `src/guest/napi.rs` did not. N-API commit `4f1b39b` now applies the existing
+  `with_cb_context` guard to synchronous and asynchronous module evaluation.
+  This is deliberately limited to the JS-executing boundary and does not
+  change evaluation semantics.
+- Audited the remaining WASIX guest-to-host imports for store-lending needs.
+  The strict boundary is a host operation that can synchronously invoke guest
+  code (or explicit teardown that drains guest finalizers), not every helper
+  that happens to allocate or inspect a JavaScript value. Broad speculative
+  guards around typed arrays, buffers, errors, and serialization were rejected
+  to keep the normal N-API hot path unchanged.
+- N-API commit `d781939` adds only the two confirmed missing boundaries:
+  required-module-facade construction, which internally evaluates its source
+  module, and explicit environment release, which drains guest finalizers. The
+  teardown path unregisters the environment from scheduling first, retains its
+  callback context and heap accounting during finalizer dispatch, and reclaims
+  that state afterward.
+- Added focused coverage to the existing `run_script_test`: a synthetic module
+  verifies that required-module-facade construction invokes its guest evaluation
+  callback exactly once, while the existing explicit-release assertions verify
+  that wrap and add-finalizer callbacks are each dispatched exactly once. The
+  combined test passes both natively and through the standalone WASIX runner
+  with `RUN_SCRIPT_TEST_OK=1`.
+- Advanced Wasmer SDK PR #6956 to the focused N-API head in commit
+  `65b33bf134c`, then advanced EdgeJS to the same N-API revision. A clean locked
+  `napi_wasmer` build, full V8 WASIX rebuild/import validation, CLI smoke, and
+  representative buffer-constructor, diagnostics-channel module-import, and
+  HTTP proxy-fetch tests all pass locally.
 
 ## Verification expectations
 
