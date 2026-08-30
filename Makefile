@@ -29,7 +29,8 @@ WASIX_FRAMEWORK_RUNNER := $(CURDIR)/scripts/edge-wasix-framework-runner.sh
 QUICKJS_EDGE_BINARY := $(BUILD_EDGE_QUICKJS_CLI_DIR)/edge
 NAPI_WASMER_DIR ?= napi
 NAPI_WASMER_CARGO_TARGET_DIR ?= $(abspath $(BUILD_WASIX_NAPI_DIR)/target)
-NAPI_WASMER_BINARY ?= $(NAPI_WASMER_CARGO_TARGET_DIR)/debug/napi_wasmer
+NAPI_WASMER_BINARY ?= $(NAPI_WASMER_CARGO_TARGET_DIR)/release/napi_wasmer
+WASIX_V8_RUNNER_BIN ?= $(NAPI_WASMER_BINARY)
 WASIX_EDGEJS_WASM ?= ./build-wasix/edgejs.wasm
 WASIX_NAPI_SMOKE_JS ?= console.log('hello world!');
 WASMER_BIN ?= wasmer
@@ -41,7 +42,7 @@ WASIX_QUICKJS_NODE_TEST_RUNNER ?= $(CURDIR)/scripts/edge-wasix-node-runner.sh
 # side allocator over guest linear memory + V8 backing stores routed into it),
 # which fixed the zlib/string-decoder/http2-respond-file/buffer/tls-ticket/
 # webcrypto/fastutf8stream data-integrity clusters. Remaining clusters:
-# pseudo-tty (no PTY under wasmer run), dgram/dns/c-ares sockets,
+# pseudo-tty (no PTY under the WASIX runner), dgram/dns/c-ares sockets,
 # worker/messageport crypto, http2 ping/goaway/debug, misc.
 V8_WASIX_SKIP_TESTS := \
   client-proxy/test-http-proxy-request-invalid-char-in-url.mjs \
@@ -52,16 +53,18 @@ V8_WASIX_SKIP_TESTS := \
   parallel/test-http2-reset-flood.js \
   parallel/test-webcrypto-cryptokey-workers.js
 
-# V8 (imports provider) WASIX lane: run the root wasmer.toml package
-# (build-wasix/edgejs.wasm) through the wasmer CLI's experimental N-API
-# runtime. WASMER_BIN must be built with the napi-v8 and llvm features.
+# V8 (imports provider) WASIX lane: execute build-wasix/edgejs.wasm through the
+# standalone N-API CLI built from the pinned napi submodule. This keeps the
+# test provider on the same revision as Edge's imported N-API contract and does
+# not require installing or building the full Wasmer CLI.
 WASIX_V8_LANE_ENV := \
-	WASMER_BIN="$(WASMER_BIN)" \
+	WASIX_RUNNER_KIND="napi" \
+	WASIX_RUNNER_BIN="$(WASIX_V8_RUNNER_BIN)" \
 	EDGEJS_ROOT="$(CURDIR)" \
 	WASIX_EDGEJS_PACKAGE_DIR="$(CURDIR)" \
+	WASIX_EDGEJS_WASM="$(abspath $(WASIX_EDGEJS_WASM))" \
 	WASIX_EDGEJS_WORKSPACE_DIRS="test,tests,lib,deps,assets,build-wasix" \
-	WASIX_EDGEJS_GUEST_EXEC_PATH="/workspace/build-wasix/edgejs.wasm" \
-	WASMER_EXTRA_ARGS="--quiet --experimental-napi"
+	WASIX_EDGEJS_GUEST_EXEC_PATH="/workspace/build-wasix/edgejs.wasm"
 EDGE_VERSION_MAJOR := $(shell awk '$$2 == "EDGE_MAJOR_VERSION" {print $$3; exit}' src/edge_version.h)
 EDGE_VERSION_MINOR := $(shell awk '$$2 == "EDGE_MINOR_VERSION" {print $$3; exit}' src/edge_version.h)
 EDGE_VERSION_PATCH := $(shell awk '$$2 == "EDGE_PATCH_VERSION" {print $$3; exit}' src/edge_version.h)
@@ -346,7 +349,7 @@ build-wasix:
 	./wasix/build-wasix.sh
 
 validate-wasix-imports:
-	python3 ./wasix/validate-imported-napi-wasm.py --cmake-cache ./build-wasix/CMakeCache.txt "$(WASIX_EDGEJS_WASM)"
+	python3 ./wasix/validate-imported-napi-wasm.py --cmake-cache ./build-wasix/CMakeCache.txt --provider-napi-root ./napi "$(WASIX_EDGEJS_WASM)"
 
 test-wasix-import-validator:
 	python3 ./wasix/test_validate_imported_napi_wasm.py
@@ -362,7 +365,7 @@ build-wasix-napi: build-wasix build-napi-wasmer-cli
 build-wasix-napi-quickjs: build-quickjs-wasix
 
 build-napi-wasmer-cli:
-	cd $(NAPI_WASMER_DIR) && CARGO_TARGET_DIR="$(NAPI_WASMER_CARGO_TARGET_DIR)" ./cargo-standalone.sh build --features cli --bin napi_wasmer
+	cd $(NAPI_WASMER_DIR) && CARGO_TARGET_DIR="$(NAPI_WASMER_CARGO_TARGET_DIR)" ./cargo-standalone.sh build --locked --release --features cli --bin napi_wasmer
 
 test-wasix-napi: build-wasix-napi test-wasix-napi-cli
 
@@ -447,16 +450,16 @@ test-lang: $(EDGE_BINARY)
 $(WASIX_EDGEJS_WASM):
 	./wasix/build-wasix.sh
 
-test-wasix-v8-only: $(WASIX_EDGEJS_WASM)
+test-wasix-v8-only: $(WASIX_EDGEJS_WASM) build-napi-wasmer-cli
 	WASIX_SLOW_TESTS="$(subst $(SPACE),$(COMMA),$(strip $(WASIX_SLOW_TESTS)))" \
 	WASIX_SLOW_TEST_TIMEOUT_SCALE="$(WASIX_SLOW_TEST_TIMEOUT_SCALE)" \
 	NODE_TEST_RUNNER=$(WASIX_QUICKJS_NODE_TEST_RUNNER) $(WASIX_V8_LANE_ENV) ./test/nodejs_test_harness --category=node:buffer,node:console,node:dgram,node:diagnostics_channel,node:dns,node:events,node:http,node:https,node:os,node:path,node:punycode,node:querystring,node:stream,node:string_decoder,node:tty,node:url,node:zlib,node:crypto,node:domain,node:http2,node:tls,node:sys \
 	  --skip-tests=$(EDGE_NODE_TEST_SKIP_TESTS),$(WASIX_SKIP_ENV_TESTS),$(subst $(SPACE),$(COMMA),$(strip $(V8_WASIX_SKIP_TESTS))) \
 	  -j $(TEST_JOBS)
 
-test-wasix-v8-intl: $(WASIX_EDGEJS_WASM)
-	@command -v "$(WASMER_BIN)" >/dev/null 2>&1 || { \
-		echo "error: $(WASMER_BIN) is required for test-wasix-v8-intl" >&2; exit 1; }
+test-wasix-v8-intl: $(WASIX_EDGEJS_WASM) build-napi-wasmer-cli
+	@test -x "$(WASIX_V8_RUNNER_BIN)" || { \
+		echo "error: $(WASIX_V8_RUNNER_BIN) is required for test-wasix-v8-intl" >&2; exit 1; }
 	@set -e; for t in $(QUICKJS_INTL_TESTS); do \
 	  echo "[intl v8 wasix] $$t"; \
 	  $(WASIX_V8_LANE_ENV) "$(WASIX_QUICKJS_NODE_TEST_RUNNER)" "$(CURDIR)/test/$$t.js"; \
@@ -472,9 +475,9 @@ WASIX_V8_LANG_TESTS := \
   guest-finalizer-memory \
   finalization-registry-fires
 
-test-wasix-v8-lang: $(WASIX_EDGEJS_WASM)
-	@command -v "$(WASMER_BIN)" >/dev/null 2>&1 || { \
-		echo "error: $(WASMER_BIN) is required for test-wasix-v8-lang" >&2; exit 1; }
+test-wasix-v8-lang: $(WASIX_EDGEJS_WASM) build-napi-wasmer-cli
+	@test -x "$(WASIX_V8_RUNNER_BIN)" || { \
+		echo "error: $(WASIX_V8_RUNNER_BIN) is required for test-wasix-v8-lang" >&2; exit 1; }
 	@set -e; for t in $(WASIX_V8_LANG_TESTS); do \
 	  echo "[lang v8 wasix] $$t"; \
 	  $(WASIX_V8_LANE_ENV) "$(WASIX_QUICKJS_NODE_TEST_RUNNER)" "$(CURDIR)/tests/js/$$t.js"; \
@@ -605,18 +608,17 @@ framework-test-quickjs-wasix: $(QUICKJS_WASIX_WASM)
 # unclean-exit and js-next-ssr/js-next-standalone. Only the docusaurus static sites
 # stay skipped here -- they fail to build on the Node.js reference itself (build
 # tooling), which QuickJS also skips via FRAMEWORK_TEST_NODE_SKIP.
-framework-test-v8-wasix: $(WASIX_EDGEJS_WASM)
+framework-test-v8-wasix: $(WASIX_EDGEJS_WASM) build-napi-wasmer-cli
 	@chmod +x "$(WASIX_FRAMEWORK_RUNNER)"
-	@command -v "$(WASMER_BIN)" >/dev/null 2>&1 || { \
-		echo "error: $(WASMER_BIN) is required for framework-test-v8-wasix" >&2; \
+	@test -x "$(WASIX_V8_RUNNER_BIN)" || { \
+		echo "error: $(WASIX_V8_RUNNER_BIN) is required for framework-test-v8-wasix" >&2; \
 		exit 1; \
 	}
 	@SYMLINK_TARGET="$(abspath $(WASIX_FRAMEWORK_RUNNER))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS V8 WASIX' \
 		FRAMEWORK_TEST_NODE_SKIP='js-docusaurus-staticsite,js-docusaurus2-staticsite' \
-		WASIX_EDGEJS_PACKAGE_DIR="$(CURDIR)" \
-		WASMER_EXTRA_ARGS="--quiet --experimental-napi" \
+		$(WASIX_V8_LANE_ENV) \
 		$(MAKE) framework-test-run $(FRAMEWORK_TEST_SELECTOR)
 
 framework-test-reset:
@@ -650,17 +652,16 @@ standalone-build-test: $(EDGE_BINARY)
 	@SYMLINK_TARGET="$(abspath $(EDGE_BINARY))" \
 		"$(EDGE_BINARY)" "$(STANDALONE_BUILD_TEST_SCRIPT)" test $(FRAMEWORK_TEST_SELECTOR)
 
-standalone-build-test-v8-wasix: $(WASIX_EDGEJS_WASM)
+standalone-build-test-v8-wasix: $(WASIX_EDGEJS_WASM) build-napi-wasmer-cli
 	@chmod +x "$(WASIX_FRAMEWORK_RUNNER)"
-	@command -v "$(WASMER_BIN)" >/dev/null 2>&1 || { \
-		echo "error: $(WASMER_BIN) is required for standalone-build-test-v8-wasix" >&2; \
+	@test -x "$(WASIX_V8_RUNNER_BIN)" || { \
+		echo "error: $(WASIX_V8_RUNNER_BIN) is required for standalone-build-test-v8-wasix" >&2; \
 		exit 1; \
 	}
 	@SYMLINK_TARGET="$(abspath $(WASIX_FRAMEWORK_RUNNER))" \
 		FRAMEWORK_TEST_SKIP_SAFE=1 \
 		FRAMEWORK_TEST_RUNNER_LABEL='EdgeJS V8 WASIX' \
-		WASIX_EDGEJS_PACKAGE_DIR="$(CURDIR)" \
-		WASMER_EXTRA_ARGS="--quiet --experimental-napi" \
+		$(WASIX_V8_LANE_ENV) \
 		$(MAKE) standalone-build-test-run $(FRAMEWORK_TEST_SELECTOR)
 
 standalone-build-test-quickjs-native: $(QUICKJS_EDGE_BINARY)

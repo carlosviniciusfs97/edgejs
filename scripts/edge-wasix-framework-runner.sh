@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Node-compatible launcher used by scripts/framework-test.js to run framework
-# workloads through the QuickJS WASIX package (quickjs-wasm/wasmer.toml).
+# workloads through either a WASIX package or the raw imported-N-API module.
 #
 # The harness symlinks node_modules/.bin/node to this script and always invokes
 # framework commands with cwd set to the project directory.
@@ -35,8 +35,10 @@ resolve_edgejs_root() {
 }
 
 edgejs_root="$(resolve_edgejs_root)"
-wasmer_bin="${WASMER_BIN:-wasmer}"
+runner_kind="${WASIX_RUNNER_KIND:-wasmer}"
+runner_bin="${WASIX_RUNNER_BIN:-${WASMER_BIN:-wasmer}}"
 package_dir="${WASIX_EDGEJS_PACKAGE_DIR:-${edgejs_root}/quickjs-wasm}"
+wasm_path="${WASIX_EDGEJS_WASM:-${edgejs_root}/build-wasix/edgejs.wasm}"
 guest_app_root="${WASIX_FRAMEWORK_GUEST_ROOT:-/app}"
 wasmer_stack_args=()
 
@@ -44,8 +46,7 @@ if [[ -n "${WASMER_STACK_SIZE:-}" ]]; then
   wasmer_stack_args+=(--stack-size "${WASMER_STACK_SIZE}")
 fi
 
-# Extra `wasmer run` flags for the target lane (e.g. --experimental-napi for
-# the V8 imports package). Word-split intentionally.
+# Extra `wasmer run` flags for package-based lanes. Word-split intentionally.
 wasmer_extra_args=()
 if [[ -n "${WASMER_EXTRA_ARGS:-}" ]]; then
   # shellcheck disable=SC2206
@@ -70,10 +71,10 @@ elif [[ "${entry_root}" != "${app_root}" ]]; then
   exit 1
 fi
 
-wasmer_env_args=(--env HOME=/tmp)
+env_specs=("HOME=/tmp")
 for env_name in PORT HOST HOSTNAME STATIC_ROOT NODE_ENV; do
   if [[ -n "${!env_name:-}" ]]; then
-    wasmer_env_args+=(--env "${env_name}=${!env_name}")
+    env_specs+=("${env_name}=${!env_name}")
   fi
 done
 
@@ -103,18 +104,53 @@ for arg in "$@"; do
   guest_args+=("$(rewrite_guest_path_arg "${arg}")")
 done
 
-volume_args=(
-  --volume "${app_root}:${guest_app_root}"
-  --volume "${edgejs_root}/ssl-certs:/usr/local/ssl"
+mount_specs=(
+  "${app_root}:${guest_app_root}"
+  "${edgejs_root}/ssl-certs:/usr/local/ssl"
 )
 
 if [[ -d "${package_dir}/etc" ]]; then
-  volume_args+=(--volume "${package_dir}/etc:/etc")
+  mount_specs+=("${package_dir}/etc:/etc")
 fi
+
+if [[ "${runner_kind}" == "napi" ]]; then
+  runner_args=(
+    "${runner_bin}"
+    "${wasm_path}"
+    --program-name edge
+    --builtin-js-dir "${edgejs_root}/lib"
+    --cwd "${guest_cwd}"
+  )
+  for env_spec in "${env_specs[@]}"; do
+    runner_args+=(--env "${env_spec}")
+  done
+  runner_args+=(--mount "${edgejs_root}:/workspace")
+  for mount_spec in "${mount_specs[@]}"; do
+    runner_args+=(--mount "${mount_spec}")
+  done
+  runner_args+=(-- "${guest_args[@]}")
+
+  if [[ "${WASIX_EDGEJS_TRACE:-0}" == "1" ]]; then
+    printf '%q ' "${runner_args[@]}" >&2
+    printf '\n' >&2
+  fi
+
+  exec "${runner_args[@]}"
+fi
+
+wasmer_env_args=()
+for env_spec in "${env_specs[@]}"; do
+  wasmer_env_args+=(--env "${env_spec}")
+done
+
+volume_args=()
+for mount_spec in "${mount_specs[@]}"; do
+  volume_args+=(--volume "${mount_spec}")
+done
 
 if [[ "${WASIX_EDGEJS_TRACE:-0}" == "1" ]]; then
   {
-    printf '%q ' "${wasmer_bin}" run \
+    printf '%q ' "${runner_bin}" run \
       --llvm \
       "${wasmer_extra_args[@]+"${wasmer_extra_args[@]}"}" \
       "${wasmer_stack_args[@]+"${wasmer_stack_args[@]}"}" \
@@ -128,7 +164,7 @@ if [[ "${WASIX_EDGEJS_TRACE:-0}" == "1" ]]; then
   } >&2
 fi
 
-exec "${wasmer_bin}" run \
+exec "${runner_bin}" run \
   --llvm \
   "${wasmer_extra_args[@]+"${wasmer_extra_args[@]}"}" \
   "${wasmer_stack_args[@]+"${wasmer_stack_args[@]}"}" \

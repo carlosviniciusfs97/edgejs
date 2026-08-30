@@ -23,6 +23,7 @@ class Case:
     # are allowed to say so on stderr; everything else must exit 0 silently.
     expected_returncode: int = 0
     expected_stderr_contains: str = ""
+    alternate_outcomes: tuple[tuple[int, str], ...] = ()
 
 
 def sanitize_stderr(stderr: str) -> str:
@@ -67,10 +68,20 @@ def run_case(wasmer_bin: str, package_dir: Path, timeout: int, case: Case) -> No
     stdout = completed.stdout
     stderr = sanitize_stderr(completed.stderr)
 
-    if completed.returncode != case.expected_returncode:
+    expected_outcomes = (
+        (case.expected_returncode, case.expected_stderr_contains),
+        *case.alternate_outcomes,
+    )
+    matching_outcomes = [
+        stderr_marker
+        for returncode, stderr_marker in expected_outcomes
+        if completed.returncode == returncode
+    ]
+    if not matching_outcomes:
+        expected_returncodes = ", ".join(str(code) for code, _ in expected_outcomes)
         raise RuntimeError(
             f"{name} exited with {completed.returncode}, "
-            f"expected {case.expected_returncode}\n"
+            f"expected one of: {expected_returncodes}\n"
             f"stdout: {stdout}\n"
             f"stderr: {stderr}"
         )
@@ -83,11 +94,12 @@ def run_case(wasmer_bin: str, package_dir: Path, timeout: int, case: Case) -> No
             f"stderr: {stderr}"
         )
 
-    if case.expected_stderr_contains:
-        if case.expected_stderr_contains not in stderr:
+    expected_stderr_markers = [marker for marker in matching_outcomes if marker]
+    if expected_stderr_markers:
+        if not any(marker in stderr for marker in expected_stderr_markers):
             raise RuntimeError(
                 f"{name} stderr missing expected text\n"
-                f"expected to contain: {case.expected_stderr_contains!r}\n"
+                f"expected to contain one of: {expected_stderr_markers!r}\n"
                 f"stderr: {stderr}"
             )
     elif stderr:
@@ -140,7 +152,10 @@ def build_cases(host: str, include_network: bool) -> list[Case]:
         #
         # Without a JS listener the signal must instead reach SignalExit, which
         # re-raises so the default disposition terminates the process. Wasmer
-        # reports that termination using the conventional 128 + signal status.
+        # Released Wasmer reports that termination using the conventional
+        # 128 + signal status. The current source-built Linux CLI reports its
+        # generic terminated-program status (127) instead; in both cases the
+        # stderr marker proves that Wasmer observed the termination signal.
         # Note this only reproduces under WASIX: on native ABIs the surplus
         # arguments are harmless, so the equivalent native test cannot catch it.
         Case(
@@ -148,6 +163,7 @@ def build_cases(host: str, include_network: bool) -> list[Case]:
             script="process.kill(process.pid, 'SIGINT'); setTimeout(() => console.log('NOT REACHED'), 500);",
             expected_returncode=128 + 2,
             expected_stderr_contains="ExitCode::130",
+            alternate_outcomes=((127, "termination signal"),),
         ),
         Case(
             name="SIGTERM reaches a JS listener",

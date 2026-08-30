@@ -2,8 +2,8 @@
 
 | | | Remarks |
 | --- | --- | --- |
-| **Status** | 🟠 | Original QuickJS N-API object/external crash fixed; native shutdown teardown SIGSEGV fixed for CI crash tests. |
-| **Severity** | High | Signal 10/11 crashes affected a large HTTP/2 test cluster and could terminate the QuickJS CLI. |
+| **Status** | ▶️ | Reopened: recurring native V8 macOS shutdown signals remain; a native crash stack is required before another logic change. |
+| **Severity** | High | Signal 5/10/11 crashes intermittently block the macOS V8 CI job. |
 
 ## Symptoms
 
@@ -277,3 +277,63 @@ TEST_PARALLEL=1 NODE_SKIP_FLAG_CHECK=true python3 test/tools/test.py \
 ```
 
 Result: 200/200 direct runs and 100/100 harness runs for each test without SIGSEGV.
+
+## 2026-08-28 recurring V8 macOS CI signals
+
+V8 macOS CI run `33222844238`, job `99020376278`, failed with Signal 11 in:
+
+```text
+test/parallel/test-buffer-bytelength.js
+test/parallel/test-http2-large-write-multiple-requests.js
+```
+
+The HTTP/2 test printed all 100 expected send and receive completions before the
+process crashed, placing that occurrence in process shutdown rather than the
+request/response body of the test.
+
+Reviewing the latest 40 V8 workflow runs found 11 macOS signal failures in a
+small, recurring cluster:
+
+| Test | Signal failures |
+| --- | ---: |
+| `test-stream-pipeline-http2` | 5 |
+| `test-buffer-bytelength` | 3 |
+| `test-http2-large-write-multiple-requests` | 2 |
+| `test-stream-readable-to-web` | 1 |
+
+The observed signals vary between SIGTRAP (5), SIGBUS (10), and SIGSEGV (11).
+Adjacent commits and a fresh rerun of the current branch pass. This distribution
+does not look like a deterministic assertion or a test-specific semantic
+failure. It is consistent with a low-probability native lifetime race or stale
+pointer during stream, environment, or V8 isolate teardown, but the exact owner
+cannot be established without a macOS crash report or LLDB stack.
+
+The macOS CI and local build use the same prebuilt V8 11.9.2 archive. The
+extracted local library and a fresh download of the official darwin-arm64 asset
+both have SHA-256:
+
+```text
+2860c8751fccfcec81410705bbbae8a204937f3a31d3ef0cecdf905473622249
+```
+
+The hosted runner has substantially less CPU and memory than the local host,
+and the exact `make test-only TEST_JOBS=4` suite takes about 3:21 in CI versus
+about 2:30 locally. The runner is therefore likely exposing the race through a
+different shutdown schedule; it is not using a different V8 binary.
+
+Stress verification on the current branch remained clean:
+
+- 1,500 mixed four-way process runs across the three most frequent tests.
+- 900 more mixed runs while saturating 14 local logical CPUs.
+- 1,200 more mixed runs with `MallocScribble=1` and
+  `MallocPreScribble=1`.
+- Five exact `make test-only TEST_JOBS=4` suites: 8,745 tests total.
+- A fresh V8 macOS CI job passed all tests.
+
+No runtime workaround or broad listener/store guard should be added from this
+evidence alone. The next diagnostic change should preserve macOS
+`DiagnosticReports` (`edge*.crash` and `edge*.ips`) as CI artifacts whenever
+the Edge test step fails. If the report is absent, rerun only the reported test
+under LLDB in batch mode and upload its backtrace. Use the resulting native
+stack to identify the exact teardown owner before modifying logic; do not mask
+the issue with test skips or automatic retries.
