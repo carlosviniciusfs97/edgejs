@@ -32,9 +32,14 @@ endif()
 if(EDGE_VERSION_COMMIT STREQUAL "")
   set(EDGE_VERSION_COMMIT "unknown")
 endif()
+# The "g" prefix (git-describe convention) keeps the suffix a valid semver
+# pre-release identifier. A bare short SHA that happens to be all digits with a
+# leading zero -- e.g. 0692402 -- is a *numeric* identifier, and semver forbids
+# leading zeros on those, so `wasmer publish --version=0.0.0-0692402` is
+# rejected outright. Roughly 1 commit in 270 hits this.
 set(EDGE_VERSION_SUFFIX "")
 if(NOT EDGE_VERSION_COMMIT STREQUAL "unknown")
-  set(EDGE_VERSION_SUFFIX "-${EDGE_VERSION_COMMIT}")
+  set(EDGE_VERSION_SUFFIX "-g${EDGE_VERSION_COMMIT}")
 endif()
 if(EXISTS "${PROJECT_ROOT}/napi/v8/cmake/NapiBuildCache.cmake")
   include("${PROJECT_ROOT}/napi/v8/cmake/NapiBuildCache.cmake")
